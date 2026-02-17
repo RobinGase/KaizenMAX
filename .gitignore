@@ -1,0 +1,43 @@
+# ===== Kaizen MAX .gitignore =====
+
+# ----- Secrets & Environment -----
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+credentials.json
+
+# ----- Rust / core -----
+core/target/
+**/*.rs.bk
+
+# ----- Node / UI -----
+ui/node_modules/
+ui/dist/
+ui/.vite/
+ui/.next/
+*.tsbuildinfo
+
+# ----- OS -----
+Thumbs.db
+Desktop.ini
+.DS_Store
+*.swp
+*.swo
+*~
+
+# ----- IDE -----
+.vscode/
+.idea/
+*.code-workspace
+
+# ----- Build artifacts -----
+*.exe
+*.dll
+*.so
+*.dylib
+
+# ----- Logs -----
+*.log
+logs/

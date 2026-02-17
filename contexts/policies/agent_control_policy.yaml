@@ -1,0 +1,79 @@
+version: 1
+policy_id: kaizen_max_agent_control
+
+defaults:
+  main_agent_name: Kaizen
+  runtime_engine: zeroclaw
+  openclaw_compat_enabled: false
+  auto_spawn_subagents: false
+  max_subagents: 5
+  initial_subagents: 0
+  spawn_mode: user_explicit_only
+  provider_inference_only: true
+
+spawn_rules:
+  required_conditions:
+    - user_requested_orchestration
+    - task_plan_exists
+    - subagent_limit_not_exceeded
+
+  denied_conditions:
+    - auto_spawn_requested_without_user_intent
+    - requested_subagents_exceed_max
+
+  required_fields:
+    - task_id
+    - objective
+    - agent_name
+    - success_criteria
+
+communication_rules:
+  allowed_paths:
+    - user_to_kaizen
+    - kaizen_to_subagent
+    - user_to_subagent
+    - subagent_to_kaizen
+    - subagent_to_subagent
+
+  guidance:
+    - prefer_routing_coordination_through_kaizen
+    - allow_direct_user_override_when_explicit
+
+lifecycle_rules:
+  statuses:
+    - idle
+    - active
+    - blocked
+    - review_pending
+    - done
+
+  transitions:
+    - from: idle
+      to: active
+      requires: [assignment_received]
+    - from: active
+      to: review_pending
+      requires: [deliverable_submitted]
+    - from: review_pending
+      to: done
+      requires: [kaizen_review_approved]
+    - from: review_pending
+      to: active
+      requires: [rework_requested]
+
+hard_blocks:
+  - id: deny_unapproved_finalize
+    condition: status == review_pending and not kaizen_review_approved
+    action: deny_finalize
+
+  - id: deny_spawn_over_limit
+    condition: active_subagents >= max_subagents
+    action: deny_spawn
+
+audit:
+  required_events:
+    - subagent_spawn_request
+    - subagent_spawn_decision
+    - assignment_issued
+    - review_outcome
+    - finalize_decision

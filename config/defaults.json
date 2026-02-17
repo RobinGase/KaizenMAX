@@ -1,0 +1,22 @@
+{
+  "$schema": "./settings-schema.json",
+  "_comment": "Kaizen MAX default settings (Section 7 of implementation_plan.md). Personal workflow defaults.",
+
+  "runtime_engine": "zeroclaw",
+  "openclaw_compat_enabled": false,
+
+  "auto_spawn_subagents": false,
+  "max_subagents": 5,
+
+  "main_chat_pinned": true,
+  "new_agent_chat_default_state": "closed",
+  "allow_direct_user_to_subagent_chat": true,
+
+  "crystal_ball_enabled": true,
+  "crystal_ball_default_open": false,
+
+  "hard_gates_enabled": true,
+  "require_human_smoke_test_before_deploy": true,
+
+  "provider_inference_only": true
+}

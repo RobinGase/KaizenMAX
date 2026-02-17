@@ -1,0 +1,59 @@
+version: 1
+policy_id: kaizen_max_review_gates
+
+state_machine:
+  states:
+    - plan
+    - execute
+    - review
+    - human_smoke_test
+    - deploy
+    - complete
+
+  transitions:
+    - from: plan
+      to: execute
+      requires:
+        - plan_defined
+        - plan_acknowledged
+
+    - from: execute
+      to: review
+      requires:
+        - execution_artifacts_present
+
+    - from: review
+      to: human_smoke_test
+      requires:
+        - passed_reasoners_test
+        - kaizen_review_approved
+
+    - from: human_smoke_test
+      to: deploy
+      requires:
+        - human_smoke_test_passed
+
+    - from: deploy
+      to: complete
+      requires:
+        - deploy_validation_passed
+
+hard_blocks:
+  - id: block_finalize_without_reasoners_test
+    condition: not passed_reasoners_test
+    action: deny_finalize
+
+  - id: block_deploy_without_human_smoke_test
+    condition: not human_smoke_test_passed
+    action: deny_deploy
+
+  - id: block_direct_complete_from_execute
+    condition: current_state == execute
+    action: deny_complete
+
+audit:
+  required_events:
+    - state_transition
+    - gate_decision
+    - reviewer_identity
+    - timestamp

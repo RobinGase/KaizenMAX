@@ -1,0 +1,71 @@
+version: 1
+policy_id: kaizen_max_crystal_ball_events
+
+transport:
+  provider: mattermost
+  mode: self_hosted
+  feed_name: crystal_ball
+
+event_types:
+  - orchestration.requested
+  - orchestration.started
+  - subagent.spawned
+  - subagent.assigned
+  - subagent.status
+  - review.requested
+  - review.feedback
+  - gate.transition
+  - gate.blocked
+  - human.smoke_test.requested
+  - human.smoke_test.result
+
+required_fields:
+  - event_id
+  - timestamp
+  - type
+  - source_actor
+  - source_agent_id
+  - target_actor
+  - target_agent_id
+  - task_id
+  - message
+  - visibility
+
+visibility:
+  levels:
+    - operator
+    - admin
+    - audit
+  defaults:
+    normal: operator
+    security_related: admin
+    compliance_related: audit
+
+identity_mapping:
+  agent_username_source: user_assigned_name
+  fallback_format: agent-{id}
+
+redaction:
+  enabled: true
+  deny_patterns:
+    - OPENAI_API_KEY
+    - ANTHROPIC_API_KEY
+    - AWS_SECRET_ACCESS_KEY
+    - ADMIN_
+  action: mask
+
+retention:
+  feed_window_hours: 72
+  archive_required: true
+  archive_ttl_days: 30
+
+ui_behavior:
+  panel:
+    style: twitch_like
+    draggable: true
+    resizable: true
+    default_open: false
+  ordering:
+    newest_bottom: true
+  grouping:
+    by_task_id: true

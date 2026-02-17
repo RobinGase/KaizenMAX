@@ -1,0 +1,80 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Kaizen MAX Settings",
+  "description": "Schema for Kaizen MAX feature toggles and runtime configuration.",
+  "type": "object",
+  "properties": {
+    "runtime_engine": {
+      "type": "string",
+      "enum": ["zeroclaw", "openclaw_compat"],
+      "default": "zeroclaw",
+      "description": "Active runtime engine. ZeroClaw is the Rust-native default."
+    },
+    "openclaw_compat_enabled": {
+      "type": "boolean",
+      "default": false,
+      "description": "Enable optional OpenClaw/Node compatibility adapter."
+    },
+    "auto_spawn_subagents": {
+      "type": "boolean",
+      "default": false,
+      "description": "Allow Kaizen to auto-spawn sub-agents without explicit user instruction."
+    },
+    "max_subagents": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 20,
+      "default": 5,
+      "description": "Maximum number of concurrent sub-agents."
+    },
+    "main_chat_pinned": {
+      "type": "boolean",
+      "default": true,
+      "description": "Keep Kaizen main chat always visible."
+    },
+    "new_agent_chat_default_state": {
+      "type": "string",
+      "enum": ["open", "closed"],
+      "default": "closed",
+      "description": "Default visibility state for newly spawned agent chat panels."
+    },
+    "allow_direct_user_to_subagent_chat": {
+      "type": "boolean",
+      "default": true,
+      "description": "Allow user to talk directly to sub-agents."
+    },
+    "crystal_ball_enabled": {
+      "type": "boolean",
+      "default": true,
+      "description": "Enable Crystal Ball AI:AI:HUMAN communication feed."
+    },
+    "crystal_ball_default_open": {
+      "type": "boolean",
+      "default": false,
+      "description": "Show Crystal Ball feed panel on startup."
+    },
+    "hard_gates_enabled": {
+      "type": "boolean",
+      "default": true,
+      "description": "Enforce hard review gates in the orchestration state machine."
+    },
+    "require_human_smoke_test_before_deploy": {
+      "type": "boolean",
+      "default": true,
+      "description": "Require human smoke test approval before deploy gate."
+    },
+    "provider_inference_only": {
+      "type": "boolean",
+      "default": true,
+      "description": "Use only provider-hosted inference APIs (no local model hosting)."
+    }
+  },
+  "required": [
+    "runtime_engine",
+    "auto_spawn_subagents",
+    "max_subagents",
+    "hard_gates_enabled",
+    "provider_inference_only"
+  ],
+  "additionalProperties": false
+}
