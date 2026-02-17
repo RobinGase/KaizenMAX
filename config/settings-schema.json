@@ -98,6 +98,31 @@
       "type": "boolean",
       "default": true,
       "description": "Only display masked metadata for secrets in the UI. Must remain true for security."
+    },
+    "inference_provider": {
+      "type": "string",
+      "enum": ["anthropic", "openai"],
+      "default": "anthropic",
+      "description": "Active LLM inference provider. API key must be stored in vault."
+    },
+    "inference_model": {
+      "type": "string",
+      "default": "claude-sonnet-4-20250514",
+      "description": "Model identifier for the selected inference provider."
+    },
+    "inference_max_tokens": {
+      "type": "integer",
+      "minimum": 256,
+      "maximum": 32768,
+      "default": 4096,
+      "description": "Maximum tokens for inference responses."
+    },
+    "inference_temperature": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "default": 0.7,
+      "description": "Sampling temperature for inference (0 = deterministic, 1 = creative)."
     }
   },
   "required": [
@@ -105,7 +130,8 @@
     "auto_spawn_subagents",
     "max_subagents",
     "hard_gates_enabled",
-    "provider_inference_only"
+    "provider_inference_only",
+    "inference_provider"
   ],
   "additionalProperties": false
 }

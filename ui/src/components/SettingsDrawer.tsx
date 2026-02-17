@@ -264,6 +264,84 @@ function SettingsDrawer({
             Provider Inference Only
           </label>
 
+          <div className="inference-settings">
+            <h4>Inference Provider</h4>
+
+            <div className="inference-field">
+              <label>Provider</label>
+              <select
+                value={settings.inference_provider}
+                disabled={saving}
+                onChange={(event) =>
+                  void save({ inference_provider: event.target.value })
+                }
+              >
+                <option value="anthropic">Anthropic (Claude)</option>
+                <option value="openai">OpenAI (GPT)</option>
+              </select>
+            </div>
+
+            <div className="inference-field">
+              <label>Model</label>
+              <input
+                type="text"
+                value={settings.inference_model}
+                disabled={saving}
+                onChange={(event) =>
+                  void save({ inference_model: event.target.value })
+                }
+                placeholder={
+                  settings.inference_provider === "anthropic"
+                    ? "claude-sonnet-4-20250514"
+                    : "gpt-4o"
+                }
+              />
+            </div>
+
+            <div className="inference-field">
+              <label>
+                Max Tokens
+                <span className="range-value">{settings.inference_max_tokens}</span>
+              </label>
+              <input
+                type="number"
+                min={256}
+                max={32768}
+                step={256}
+                value={settings.inference_max_tokens}
+                disabled={saving}
+                onChange={(event) =>
+                  void save({
+                    inference_max_tokens: Math.min(
+                      32768,
+                      Math.max(256, Number(event.target.value) || 4096)
+                    ),
+                  })
+                }
+              />
+            </div>
+
+            <div className="inference-field">
+              <label>
+                Temperature
+                <span className="range-value">{settings.inference_temperature.toFixed(2)}</span>
+              </label>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={settings.inference_temperature}
+                disabled={saving}
+                onChange={(event) =>
+                  void save({
+                    inference_temperature: parseFloat(event.target.value),
+                  })
+                }
+              />
+            </div>
+          </div>
+
           <section className="audit-card">
             <div className="audit-card-header">
               <h4>Crystal Ball Audit</h4>

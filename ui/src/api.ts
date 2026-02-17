@@ -14,6 +14,8 @@ import type {
   KaizenSettingsPatch,
   SecretMetadata,
   SecretTestResult,
+  StreamDoneEvent,
+  StreamTokenEvent,
 } from "./types";
 
 interface ApiAgent {
@@ -225,6 +227,129 @@ export async function testSecret(
   return request<SecretTestResult>(`/api/secrets/${provider}/test`, {
     method: "POST",
   });
+}
+
+// ---- Streaming Chat ----
+
+export interface StreamChatCallbacks {
+  onToken: (token: StreamTokenEvent) => void;
+  onDone: (done: StreamDoneEvent) => void;
+  onError: (error: string) => void;
+}
+
+/**
+ * Start a streaming chat session via SSE.
+ * Returns an AbortController so the caller can cancel the stream.
+ */
+export function streamChat(
+  message: string,
+  callbacks: StreamChatCallbacks,
+  agentId?: string,
+  clearHistory = false
+): AbortController {
+  const controller = new AbortController();
+
+  const body = JSON.stringify({
+    message,
+    agent_id: agentId,
+    clear_history: clearHistory,
+  });
+
+  fetch("/api/chat/stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+    signal: controller.signal,
+  })
+    .then(async (response) => {
+      if (!response.ok) {
+        const errorText = await response.text();
+        callbacks.onError(errorText || `Stream failed: ${response.status}`);
+        return;
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) {
+        callbacks.onError("No response body");
+        return;
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let currentEventType = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        // Parse SSE lines: split on newlines, keep last partial line in buffer
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+
+          // Empty line = end of event (reset)
+          if (!trimmed) {
+            currentEventType = "";
+            continue;
+          }
+
+          // Comment
+          if (trimmed.startsWith(":")) continue;
+
+          // Event type line
+          if (trimmed.startsWith("event:")) {
+            currentEventType = trimmed.slice(6).trim();
+            continue;
+          }
+
+          // Data line
+          if (trimmed.startsWith("data:")) {
+            const data = trimmed.slice(5).trim();
+            if (currentEventType) {
+              handleSSEEvent(currentEventType, data, callbacks);
+            }
+          }
+        }
+      }
+    })
+    .catch((err) => {
+      if (err.name !== "AbortError") {
+        callbacks.onError(String(err));
+      }
+    });
+
+  return controller;
+}
+
+function handleSSEEvent(
+  eventType: string,
+  data: string,
+  callbacks: StreamChatCallbacks
+): void {
+  try {
+    switch (eventType) {
+      case "token": {
+        const token = JSON.parse(data) as StreamTokenEvent;
+        callbacks.onToken(token);
+        break;
+      }
+      case "done": {
+        const done = JSON.parse(data) as StreamDoneEvent;
+        callbacks.onDone(done);
+        break;
+      }
+      case "error": {
+        callbacks.onError(data);
+        break;
+      }
+    }
+  } catch {
+    // Ignore parse errors in stream
+  }
 }
 
 // ---- OAuth ----

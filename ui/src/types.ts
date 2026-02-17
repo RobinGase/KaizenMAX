@@ -63,6 +63,22 @@ export interface ChatResponse {
   target: string;
   active_agents: number;
   gate_state: GateState;
+  model?: string;
+  provider?: string;
+  input_tokens?: number;
+  output_tokens?: number;
+}
+
+/** SSE stream token event */
+export interface StreamTokenEvent {
+  text: string;
+}
+
+/** SSE stream done event */
+export interface StreamDoneEvent {
+  full_response: string;
+  model: string;
+  provider: string;
 }
 
 /** Crystal Ball event */
@@ -167,6 +183,10 @@ export interface KaizenSettings {
   secrets_storage_mode: string;
   write_plaintext_secrets_to_env: boolean;
   show_only_masked_secrets_in_ui: boolean;
+  inference_provider: string;
+  inference_model: string;
+  inference_max_tokens: number;
+  inference_temperature: number;
 }
 
 export type KaizenSettingsPatch = Partial<KaizenSettings>;

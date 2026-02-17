@@ -43,10 +43,30 @@ pub struct KaizenSettings {
     pub write_plaintext_secrets_to_env: bool,
     #[serde(default = "default_true")]
     pub show_only_masked_secrets_in_ui: bool,
+    #[serde(default = "default_inference_provider")]
+    pub inference_provider: String,
+    #[serde(default = "default_inference_model")]
+    pub inference_model: String,
+    #[serde(default = "default_inference_max_tokens")]
+    pub inference_max_tokens: u32,
+    #[serde(default = "default_inference_temperature")]
+    pub inference_temperature: f32,
 }
 
 fn default_encrypted_vault() -> String {
     "encrypted_vault".to_string()
+}
+fn default_inference_provider() -> String {
+    "anthropic".to_string()
+}
+fn default_inference_model() -> String {
+    "claude-sonnet-4-20250514".to_string()
+}
+fn default_inference_max_tokens() -> u32 {
+    4096
+}
+fn default_inference_temperature() -> f32 {
+    0.7
 }
 
 impl Default for KaizenSettings {
@@ -70,6 +90,10 @@ impl Default for KaizenSettings {
             secrets_storage_mode: "encrypted_vault".to_string(),
             write_plaintext_secrets_to_env: false,
             show_only_masked_secrets_in_ui: true,
+            inference_provider: "anthropic".to_string(),
+            inference_model: "claude-sonnet-4-20250514".to_string(),
+            inference_max_tokens: 4096,
+            inference_temperature: 0.7,
         }
     }
 }
@@ -94,6 +118,10 @@ pub struct SettingsPatch {
     pub secrets_storage_mode: Option<String>,
     pub write_plaintext_secrets_to_env: Option<bool>,
     pub show_only_masked_secrets_in_ui: Option<bool>,
+    pub inference_provider: Option<String>,
+    pub inference_model: Option<String>,
+    pub inference_max_tokens: Option<u32>,
+    pub inference_temperature: Option<f32>,
 }
 
 fn default_max_subagents() -> u32 {
@@ -165,6 +193,18 @@ impl KaizenSettings {
         if let Ok(val) = std::env::var("ADMIN_PROVIDER_INFERENCE_ONLY") {
             self.provider_inference_only = val.parse().unwrap_or(self.provider_inference_only);
         }
+        if let Ok(val) = std::env::var("KAIZEN_INFERENCE_PROVIDER") {
+            self.inference_provider = val;
+        }
+        if let Ok(val) = std::env::var("KAIZEN_INFERENCE_MODEL") {
+            self.inference_model = val;
+        }
+        if let Ok(val) = std::env::var("KAIZEN_INFERENCE_MAX_TOKENS") {
+            self.inference_max_tokens = val.parse().unwrap_or(self.inference_max_tokens);
+        }
+        if let Ok(val) = std::env::var("KAIZEN_INFERENCE_TEMPERATURE") {
+            self.inference_temperature = val.parse().unwrap_or(self.inference_temperature);
+        }
     }
 
     pub fn apply_patch(&mut self, patch: SettingsPatch) {
@@ -221,6 +261,18 @@ impl KaizenSettings {
         }
         if let Some(value) = patch.show_only_masked_secrets_in_ui {
             self.show_only_masked_secrets_in_ui = value;
+        }
+        if let Some(value) = patch.inference_provider {
+            self.inference_provider = value;
+        }
+        if let Some(value) = patch.inference_model {
+            self.inference_model = value;
+        }
+        if let Some(value) = patch.inference_max_tokens {
+            self.inference_max_tokens = value;
+        }
+        if let Some(value) = patch.inference_temperature {
+            self.inference_temperature = value;
         }
     }
 }

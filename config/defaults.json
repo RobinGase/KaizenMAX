@@ -25,5 +25,10 @@
   "agent_name_editable_after_spawn": true,
   "secrets_storage_mode": "encrypted_vault",
   "write_plaintext_secrets_to_env": false,
-  "show_only_masked_secrets_in_ui": true
+  "show_only_masked_secrets_in_ui": true,
+
+  "inference_provider": "anthropic",
+  "inference_model": "claude-sonnet-4-20250514",
+  "inference_max_tokens": 4096,
+  "inference_temperature": 0.7
 }

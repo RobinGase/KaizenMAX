@@ -796,3 +796,77 @@ body {
   color: var(--ink-dim);
   margin-top: 0.25rem;
 }
+
+/* ── Streaming Chat ─────────────────────────────────────────────────── */
+
+.message-streaming {
+  opacity: 0.9;
+}
+
+.message-content {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.streaming-cursor {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  background: var(--accent);
+  margin-left: 2px;
+  animation: cursor-blink 0.7s step-end infinite;
+  vertical-align: text-bottom;
+}
+
+@keyframes cursor-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+/* ── Inference Settings ─────────────────────────────────────────────── */
+
+.inference-settings {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+.inference-settings h4 {
+  margin: 0 0 0.75rem;
+  color: var(--ink-bright);
+  font-size: 0.85rem;
+}
+
+.inference-field {
+  margin-bottom: 0.75rem;
+}
+
+.inference-field label {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--ink-dim);
+  margin-bottom: 0.25rem;
+}
+
+.inference-field select,
+.inference-field input {
+  width: 100%;
+  padding: 6px 8px;
+  background: var(--bg-2);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.8rem;
+}
+
+.inference-field select:focus,
+.inference-field input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.inference-field .range-value {
+  font-size: 0.7rem;
+  color: var(--ink-dim);
+  margin-left: 0.5rem;
+}

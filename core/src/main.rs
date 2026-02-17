@@ -10,12 +10,15 @@ use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
+    response::sse::{Event, KeepAlive, Sse},
     routing::{delete, get, patch, post, put},
 };
+use futures_util::Stream;
 use serde::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
+    convert::Infallible,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering as AtomicOrdering},
@@ -33,6 +36,10 @@ use zeroclaw_gateway::{
     },
     event_archive::{ArchiveIntegrityReport, EventArchive},
     gate_engine::{GateConditionPatch, GateRuntime, GateState, TransitionResult},
+    inference::{
+        self, AnthropicStreamEvent, ChatMessage as InferenceChatMessage, InferenceClient,
+        InferenceProvider, InferenceRequest, OpenAIStreamChunk,
+    },
     settings::{KaizenSettings, SettingsPatch},
     vault::{SecretMetadata, SecretVault},
 };
@@ -49,6 +56,10 @@ struct AppState {
     crystal_ball: Arc<RwLock<Option<CrystalBallClient>>>,
     event_archive: Arc<EventArchive>,
     vault: Arc<Option<SecretVault>>,
+    inference: InferenceClient,
+    system_prompt: Arc<String>,
+    /// Per-session conversation history (keyed by "kaizen" or agent_id).
+    conversations: Arc<RwLock<HashMap<String, Vec<InferenceChatMessage>>>>,
     next_id: Arc<AtomicU64>,
 }
 
@@ -425,6 +436,9 @@ async fn patch_settings(
 struct ChatRequest {
     message: String,
     agent_id: Option<String>,
+    /// If true, clear conversation history before this message.
+    #[serde(default)]
+    clear_history: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -434,6 +448,83 @@ struct ChatResponse {
     target: String,
     active_agents: usize,
     gate_state: GateState,
+    model: Option<String>,
+    provider: Option<String>,
+    input_tokens: Option<u32>,
+    output_tokens: Option<u32>,
+}
+
+/// Resolve inference settings into provider + model + API key from vault.
+async fn resolve_inference(
+    state: &AppState,
+) -> Result<(InferenceProvider, String, String), (StatusCode, String)> {
+    let settings = state.settings.read().await;
+    let provider = InferenceProvider::from_str_loose(&settings.inference_provider).ok_or((
+        StatusCode::BAD_REQUEST,
+        format!(
+            "Unknown inference provider '{}'. Use 'anthropic' or 'openai'.",
+            settings.inference_provider
+        ),
+    ))?;
+
+    let model = if settings.inference_model.is_empty() {
+        provider.default_model().to_string()
+    } else {
+        settings.inference_model.clone()
+    };
+
+    let vault = state.vault.as_ref().as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Secret vault is not configured. Set ADMIN_VAULT_KEY and store an API key via /api/secrets/{provider}.".to_string(),
+    ))?;
+
+    let api_key = vault.decrypt(provider.vault_key()).await.map_err(|e| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "No API key configured for '{}'. Store one via PUT /api/secrets/{}. Error: {}",
+                provider,
+                provider.vault_key(),
+                e
+            ),
+        )
+    })?;
+
+    Ok((provider, model, api_key))
+}
+
+/// Get or create conversation history for a conversation key.
+async fn get_conversation(
+    state: &AppState,
+    key: &str,
+) -> Vec<InferenceChatMessage> {
+    let conversations = state.conversations.read().await;
+    conversations.get(key).cloned().unwrap_or_default()
+}
+
+/// Append messages to conversation history.
+async fn append_to_conversation(
+    state: &AppState,
+    key: &str,
+    user_msg: &str,
+    assistant_msg: &str,
+) {
+    let mut conversations = state.conversations.write().await;
+    let history = conversations.entry(key.to_string()).or_default();
+    history.push(InferenceChatMessage {
+        role: "user".to_string(),
+        content: user_msg.to_string(),
+    });
+    history.push(InferenceChatMessage {
+        role: "assistant".to_string(),
+        content: assistant_msg.to_string(),
+    });
+
+    // Keep conversation history bounded (last 50 turns = 100 messages)
+    if history.len() > 100 {
+        let drain = history.len() - 100;
+        history.drain(0..drain);
+    }
 }
 
 async fn chat(
@@ -449,7 +540,10 @@ async fn chat(
     }
 
     let source = "user".to_string();
-    let (target, reply) = if let Some(agent_id) = request.agent_id {
+    let conversation_key: String;
+    let target: String;
+
+    if let Some(ref agent_id) = request.agent_id {
         let allow_direct = state
             .settings
             .read()
@@ -464,29 +558,23 @@ async fn chat(
 
         let agents = state.agents.read().await;
         let agent = agents
-            .get(&agent_id)
+            .get(agent_id)
             .ok_or((StatusCode::NOT_FOUND, "agent not found".to_string()))?;
 
-        (
-            agent.name.clone(),
-            format!(
-                "{} received your message and will report progress back to Kaizen.",
-                agent.name
-            ),
-        )
+        target = agent.name.clone();
+        conversation_key = agent_id.clone();
     } else {
-        (
-            "Kaizen".to_string(),
-            format!(
-                "Acknowledged. Kaizen is tracking this request: '{}'",
-                message
-            ),
-        )
-    };
+        target = "Kaizen".to_string();
+        conversation_key = "kaizen".to_string();
+    }
 
-    let active_agents = state.agents.read().await.active_count();
-    let gate_state = state.gates.read().await.current_state;
+    // Clear history if requested
+    if request.clear_history {
+        let mut conversations = state.conversations.write().await;
+        conversations.remove(&conversation_key);
+    }
 
+    // Emit Crystal Ball event for the user message
     push_event(
         &state,
         CrystalBallEvent {
@@ -504,13 +592,313 @@ async fn chat(
     )
     .await;
 
+    // Attempt real inference
+    let (reply, model, provider_name, input_tokens, output_tokens) =
+        match resolve_inference(&state).await {
+            Ok((provider, model, api_key)) => {
+                let settings = state.settings.read().await;
+                let max_tokens = settings.inference_max_tokens;
+                let temperature = settings.inference_temperature;
+                drop(settings);
+
+                let history = get_conversation(&state, &conversation_key).await;
+
+                let mut messages = history;
+                messages.push(InferenceChatMessage {
+                    role: "user".to_string(),
+                    content: message.to_string(),
+                });
+
+                let req = InferenceRequest {
+                    provider,
+                    model: model.clone(),
+                    system_prompt: state.system_prompt.as_ref().clone(),
+                    messages,
+                    max_tokens,
+                    temperature,
+                };
+
+                match state.inference.complete(&api_key, &req).await {
+                    Ok(resp) => {
+                        // Store in conversation history
+                        append_to_conversation(
+                            &state,
+                            &conversation_key,
+                            message,
+                            &resp.content,
+                        )
+                        .await;
+
+                        (
+                            resp.content,
+                            Some(resp.model),
+                            Some(resp.provider),
+                            resp.input_tokens,
+                            resp.output_tokens,
+                        )
+                    }
+                    Err(e) => {
+                        tracing::error!("Inference failed: {}", e);
+                        (
+                            format!("[Inference error] {e}"),
+                            Some(model),
+                            Some(provider.to_string()),
+                            None,
+                            None,
+                        )
+                    }
+                }
+            }
+            Err((_status, reason)) => {
+                // Fallback: no vault or no API key configured - return helpful message
+                tracing::warn!("Inference not available: {}", reason);
+                (
+                    format!(
+                        "Kaizen is in offline mode. To enable AI responses, store an API key: \
+                         PUT /api/secrets/anthropic (or /api/secrets/openai) with your key. \
+                         Reason: {reason}"
+                    ),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            }
+        };
+
+    let active_agents = state.agents.read().await.active_count();
+    let gate_state = state.gates.read().await.current_state;
+
+    // Emit Crystal Ball event for the response
+    push_event(
+        &state,
+        CrystalBallEvent {
+            event_id: next_id(&state, "event"),
+            timestamp: now_timestamp(),
+            event_type: "orchestration.response".to_string(),
+            source_actor: target.clone(),
+            source_agent_id: target.to_lowercase(),
+            target_actor: source.clone(),
+            target_agent_id: "human".to_string(),
+            task_id: "chat".to_string(),
+            message: if reply.len() > 200 {
+                format!("{}...", &reply[..200])
+            } else {
+                reply.clone()
+            },
+            visibility: "operator".to_string(),
+        },
+    )
+    .await;
+
     Ok(Json(ChatResponse {
         reply,
         source,
         target,
         active_agents,
         gate_state,
+        model,
+        provider: provider_name,
+        input_tokens,
+        output_tokens,
     }))
+}
+
+// ── Streaming Chat (SSE) ───────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct ChatStreamRequest {
+    message: String,
+    agent_id: Option<String>,
+    #[serde(default)]
+    clear_history: bool,
+}
+
+async fn chat_stream(
+    State(state): State<AppState>,
+    Json(request): Json<ChatStreamRequest>,
+) -> Result<
+    Sse<impl Stream<Item = Result<Event, Infallible>>>,
+    (StatusCode, String),
+> {
+    let message = request.message.trim().to_string();
+    if message.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "message cannot be empty".to_string(),
+        ));
+    }
+
+    let conversation_key = if let Some(ref agent_id) = request.agent_id {
+        let allow_direct = state
+            .settings
+            .read()
+            .await
+            .allow_direct_user_to_subagent_chat;
+        if !allow_direct {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Direct user-to-subagent chat is disabled in settings".to_string(),
+            ));
+        }
+        let agents = state.agents.read().await;
+        agents
+            .get(agent_id)
+            .ok_or((StatusCode::NOT_FOUND, "agent not found".to_string()))?;
+        agent_id.clone()
+    } else {
+        "kaizen".to_string()
+    };
+
+    if request.clear_history {
+        let mut conversations = state.conversations.write().await;
+        conversations.remove(&conversation_key);
+    }
+
+    let (provider, model, api_key) = resolve_inference(&state).await?;
+
+    let settings = state.settings.read().await;
+    let max_tokens = settings.inference_max_tokens;
+    let temperature = settings.inference_temperature;
+    drop(settings);
+
+    let history = get_conversation(&state, &conversation_key).await;
+    let mut messages = history;
+    messages.push(InferenceChatMessage {
+        role: "user".to_string(),
+        content: message.clone(),
+    });
+
+    let req = InferenceRequest {
+        provider,
+        model: model.clone(),
+        system_prompt: state.system_prompt.as_ref().clone(),
+        messages,
+        max_tokens,
+        temperature,
+    };
+
+    let raw_response = state
+        .inference
+        .stream_raw(&api_key, &req)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+
+    // Build SSE stream that parses provider-specific SSE and re-emits normalized tokens
+    let state_clone = state.clone();
+    let conv_key = conversation_key.clone();
+    let user_msg = message.clone();
+
+    let stream = async_stream::stream! {
+        use futures_util::StreamExt;
+
+        let mut byte_stream = raw_response.bytes_stream();
+        let mut buffer = String::new();
+        let mut full_response = String::new();
+
+        while let Some(chunk_result) = byte_stream.next().await {
+            let chunk = match chunk_result {
+                Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+                Err(e) => {
+                    let err_event = Event::default()
+                        .event("error")
+                        .data(format!("Stream error: {e}"));
+                    yield Ok(err_event);
+                    break;
+                }
+            };
+
+            buffer.push_str(&chunk);
+
+            // Parse SSE lines
+            while let Some(line_end) = buffer.find('\n') {
+                let line = buffer[..line_end].trim_end_matches('\r').to_string();
+                buffer = buffer[line_end + 1..].to_string();
+
+                if line.is_empty() || line.starts_with(':') {
+                    continue;
+                }
+
+                if !line.starts_with("data: ") {
+                    continue;
+                }
+
+                let data = &line[6..];
+
+                if data == "[DONE]" {
+                    // Store conversation history
+                    append_to_conversation(
+                        &state_clone,
+                        &conv_key,
+                        &user_msg,
+                        &full_response,
+                    ).await;
+
+                    let done_event = Event::default()
+                        .event("done")
+                        .data(serde_json::json!({
+                            "full_response": full_response,
+                            "model": model,
+                            "provider": provider.to_string(),
+                        }).to_string());
+                    yield Ok(done_event);
+                    break;
+                }
+
+                // Parse based on provider
+                match provider {
+                    InferenceProvider::Anthropic => {
+                        if let Ok(event) = serde_json::from_str::<AnthropicStreamEvent>(data) {
+                            match event {
+                                AnthropicStreamEvent::ContentBlockDelta { delta, .. } => {
+                                    if let Some(text) = delta.text {
+                                        full_response.push_str(&text);
+                                        let token_event = Event::default()
+                                            .event("token")
+                                            .data(serde_json::json!({ "text": text }).to_string());
+                                        yield Ok(token_event);
+                                    }
+                                }
+                                AnthropicStreamEvent::MessageStop {} => {
+                                    append_to_conversation(
+                                        &state_clone,
+                                        &conv_key,
+                                        &user_msg,
+                                        &full_response,
+                                    ).await;
+
+                                    let done_event = Event::default()
+                                        .event("done")
+                                        .data(serde_json::json!({
+                                            "full_response": full_response,
+                                            "model": model,
+                                            "provider": "anthropic",
+                                        }).to_string());
+                                    yield Ok(done_event);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    InferenceProvider::OpenAI => {
+                        if let Ok(chunk) = serde_json::from_str::<OpenAIStreamChunk>(data) {
+                            for choice in &chunk.choices {
+                                if let Some(ref text) = choice.delta.content {
+                                    full_response.push_str(text);
+                                    let token_event = Event::default()
+                                        .event("token")
+                                        .data(serde_json::json!({ "text": text }).to_string());
+                                    yield Ok(token_event);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1089,6 +1477,9 @@ async fn main() {
         }
     };
 
+    let system_prompt = inference::load_system_prompt();
+    tracing::info!("Loaded Kaizen system prompt ({} chars)", system_prompt.len());
+
     let state = AppState {
         settings: Arc::new(RwLock::new(settings.clone())),
         agents: Arc::new(RwLock::new(AgentRegistry::new(
@@ -1099,6 +1490,9 @@ async fn main() {
         crystal_ball: Arc::new(RwLock::new(initial_crystal_ball)),
         event_archive: Arc::new(event_archive),
         vault: Arc::new(vault),
+        inference: InferenceClient::new(),
+        system_prompt: Arc::new(system_prompt),
+        conversations: Arc::new(RwLock::new(HashMap::new())),
         next_id: Arc::new(AtomicU64::new(1)),
     };
 
@@ -1134,6 +1528,7 @@ async fn main() {
         .route("/api/crystal-ball/smoke", post(crystal_ball_smoke))
         .route("/api/settings", get(get_settings).patch(patch_settings))
         .route("/api/chat", post(chat))
+        .route("/api/chat/stream", post(chat_stream))
         .route("/api/agents", get(list_agents).post(spawn_agent))
         .route("/api/agents/{agent_id}/status", patch(update_agent_status))
         .route("/api/agents/{agent_id}", patch(rename_agent))

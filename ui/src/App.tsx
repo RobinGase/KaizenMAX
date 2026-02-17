@@ -13,6 +13,7 @@ import {
   renameAgent,
   runCrystalBallSmoke,
   sendChat,
+  streamChat,
   updateAgentStatus,
   validateCrystalBall,
 } from "./api";
@@ -61,6 +62,7 @@ function App() {
   const [crystalBallOpen, setCrystalBallOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sendingKaizen, setSendingKaizen] = useState(false);
+  const [streamingContent, setStreamingContent] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   const gateState = gateSnapshot?.current_state ?? "plan";
@@ -165,6 +167,7 @@ function App() {
 
   const handleSendKaizen = async (message: string) => {
     setSendingKaizen(true);
+    setStreamingContent("");
     setError(null);
 
     setKaizenMessages((current) => [
@@ -176,31 +179,63 @@ function App() {
       },
     ]);
 
+    // Try streaming first, fall back to non-streaming
     try {
-      const response = await sendChat(message);
-      setKaizenMessages((current) => [
-        ...current,
-        {
-          role: "kaizen",
-          content: response.reply,
-          timestamp: new Date().toISOString(),
-        },
-      ]);
+      await new Promise<void>((resolve, reject) => {
+        streamChat(
+          message,
+          {
+            onToken: (token) => {
+              setStreamingContent((prev) => prev + token.text);
+            },
+            onDone: (done) => {
+              // Move streaming content to permanent messages
+              setStreamingContent("");
+              setKaizenMessages((current) => [
+                ...current,
+                {
+                  role: "kaizen",
+                  content: done.full_response,
+                  timestamp: new Date().toISOString(),
+                },
+              ]);
+              resolve();
+            },
+            onError: (errMsg) => {
+              reject(new Error(errMsg));
+            },
+          }
+        );
+      });
+    } catch {
+      // Streaming failed - fall back to non-streaming
+      setStreamingContent("");
+      try {
+        const response = await sendChat(message);
+        setKaizenMessages((current) => [
+          ...current,
+          {
+            role: "kaizen",
+            content: response.reply,
+            timestamp: new Date().toISOString(),
+          },
+        ]);
 
-      setGateSnapshot((current) =>
-        current ? { ...current, current_state: response.gate_state } : current
-      );
-    } catch (sendError) {
-      const text = sendError instanceof Error ? sendError.message : "Chat failed";
-      setError(text);
-      setKaizenMessages((current) => [
-        ...current,
-        {
-          role: "kaizen",
-          content: `Request failed: ${text}`,
-          timestamp: new Date().toISOString(),
-        },
-      ]);
+        setGateSnapshot((current) =>
+          current ? { ...current, current_state: response.gate_state } : current
+        );
+      } catch (sendError) {
+        const text = sendError instanceof Error ? sendError.message : "Chat failed";
+        setError(text);
+        setKaizenMessages((current) => [
+          ...current,
+          {
+            role: "kaizen",
+            content: `Request failed: ${text}`,
+            timestamp: new Date().toISOString(),
+          },
+        ]);
+      }
     } finally {
       setSendingKaizen(false);
     }
@@ -401,6 +436,7 @@ function App() {
             messages={kaizenMessages}
             gateState={gateState}
             sending={sendingKaizen}
+            streamingContent={streamingContent}
             onSend={handleSendKaizen}
           />
 
