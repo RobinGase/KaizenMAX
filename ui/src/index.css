@@ -459,6 +459,36 @@ body {
   padding: 0.82rem;
 }
 
+.settings-tabs {
+  display: flex;
+  gap: 0.4rem;
+  padding: 0.65rem 0.82rem 0;
+}
+
+.settings-tab {
+  background: rgba(22, 35, 53, 0.9);
+  border: 1px solid #2f4a69;
+  border-radius: 7px;
+  color: var(--ink-dim);
+  cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  padding: 0.34rem 0.52rem;
+}
+
+.settings-tab.active {
+  background: linear-gradient(180deg, #224267, #1b3453);
+  border-color: #4e79a5;
+  color: var(--ink);
+}
+
+.settings-note {
+  color: var(--ink-dim);
+  font-size: 0.74rem;
+  margin: 0;
+}
+
 .settings-content label {
   color: var(--ink-dim);
   display: grid;
@@ -696,9 +726,31 @@ body {
 /* ---- Credentials Panel ---- */
 
 .credentials-panel {
-  margin-top: 1.5rem;
+  margin-top: 0.5rem;
   border-top: 1px solid var(--line);
   padding-top: 1rem;
+}
+
+.credentials-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.35rem;
+}
+
+.credentials-panel-header button {
+  background: rgba(27, 56, 86, 0.85);
+  border: 1px solid #3b5c7f;
+  border-radius: 6px;
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 0.7rem;
+  padding: 0.24rem 0.46rem;
+}
+
+.credentials-panel-header button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .credentials-panel h4 {
@@ -710,6 +762,41 @@ body {
   font-size: 0.75rem;
   color: var(--ink-dim);
   margin-bottom: 0.75rem;
+}
+
+.vault-status-card {
+  background: rgba(17, 29, 43, 0.86);
+  border: 1px solid #2d4b6b;
+  border-radius: 8px;
+  margin-bottom: 0.7rem;
+  padding: 0.55rem;
+}
+
+.vault-status-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.5rem;
+  margin-bottom: 0.25rem;
+}
+
+.vault-status-row span {
+  color: var(--ink-dim);
+  font-size: 0.7rem;
+}
+
+.vault-status-row strong,
+.vault-status-row code {
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 0.69rem;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.vault-status-note {
+  color: #96ffd0;
+  font-size: 0.7rem;
+  margin: 0.3rem 0 0;
 }
 
 .credential-row {

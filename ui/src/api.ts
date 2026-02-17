@@ -16,6 +16,7 @@ import type {
   SecretTestResult,
   StreamDoneEvent,
   StreamTokenEvent,
+  VaultStatus,
 } from "./types";
 
 interface ApiAgent {
@@ -201,6 +202,10 @@ export async function renameAgent(
 }
 
 // ---- Secret Vault ----
+
+export async function fetchVaultStatus(): Promise<VaultStatus> {
+  return request<VaultStatus>("/api/vault/status");
+}
 
 export async function fetchSecrets(): Promise<SecretMetadata[]> {
   return request<SecretMetadata[]>("/api/secrets");

@@ -4,7 +4,9 @@
 //! Secrets are encrypted immediately on receipt and never stored or returned in plaintext.
 //!
 //! Vault file format: JSON map of provider -> EncryptedEntry.
-//! Master key source: ADMIN_VAULT_KEY env variable (base64-encoded 32-byte key).
+//! Master key source priority:
+//! 1) ADMIN_VAULT_KEY env variable (base64-encoded 32-byte key)
+//! 2) Managed key file at KAIZEN_VAULT_KEY_PATH (auto-generated on first run)
 
 use aes_gcm::{
     aead::{Aead, KeyInit, OsRng},
@@ -15,6 +17,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
+    convert::TryInto,
     fs,
     path::PathBuf,
     sync::Arc,
@@ -58,6 +61,52 @@ struct VaultInner {
     path: PathBuf,
 }
 
+/// Runtime status for the vault subsystem.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VaultStatus {
+    pub available: bool,
+    pub key_source: String,
+    pub vault_path: String,
+    pub key_path: Option<String>,
+    pub bootstrap_created: bool,
+    pub error: Option<String>,
+}
+
+fn default_vault_path() -> PathBuf {
+    PathBuf::from(
+        std::env::var("KAIZEN_VAULT_PATH").unwrap_or_else(|_| "../data/vault.json".to_string()),
+    )
+}
+
+fn default_key_path() -> PathBuf {
+    PathBuf::from(
+        std::env::var("KAIZEN_VAULT_KEY_PATH")
+            .unwrap_or_else(|_| "../data/vault.key".to_string()),
+    )
+}
+
+fn parse_key_b64(value: &str, source: &str) -> Result<[u8; 32], String> {
+    let key_bytes = B64
+        .decode(value.trim())
+        .map_err(|e| format!("{source} is not valid base64: {e}"))?;
+
+    let key: [u8; 32] = key_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| format!("{source} must be exactly 32 bytes (got {})", key_bytes.len()))?;
+
+    Ok(key)
+}
+
+fn load_entries(path: &PathBuf) -> Result<HashMap<String, EncryptedEntry>, String> {
+    if path.exists() {
+        let content = fs::read_to_string(path).map_err(|e| format!("Failed to read vault file: {e}"))?;
+        serde_json::from_str(&content).map_err(|e| format!("Failed to parse vault file: {e}"))
+    } else {
+        Ok(HashMap::new())
+    }
+}
+
 impl SecretVault {
     /// Create a vault from environment configuration.
     /// Reads ADMIN_VAULT_KEY (base64-encoded 32-byte key) and KAIZEN_VAULT_PATH.
@@ -65,32 +114,12 @@ impl SecretVault {
         let key_b64 = std::env::var("ADMIN_VAULT_KEY")
             .map_err(|_| "ADMIN_VAULT_KEY not set. Cannot initialize secret vault.".to_string())?;
 
-        let key_bytes = B64
-            .decode(key_b64.trim())
-            .map_err(|e| format!("ADMIN_VAULT_KEY is not valid base64: {e}"))?;
-
-        if key_bytes.len() != 32 {
-            return Err(format!(
-                "ADMIN_VAULT_KEY must be exactly 32 bytes (got {})",
-                key_bytes.len()
-            ));
-        }
-
-        let cipher = Aes256Gcm::new_from_slice(&key_bytes)
+        let key = parse_key_b64(&key_b64, "ADMIN_VAULT_KEY")?;
+        let cipher = Aes256Gcm::new_from_slice(&key)
             .map_err(|e| format!("Failed to create cipher: {e}"))?;
 
-        let vault_path = std::env::var("KAIZEN_VAULT_PATH")
-            .unwrap_or_else(|_| "../data/vault.json".to_string());
-        let path = PathBuf::from(vault_path);
-
-        let entries = if path.exists() {
-            let content = fs::read_to_string(&path)
-                .map_err(|e| format!("Failed to read vault file: {e}"))?;
-            serde_json::from_str(&content)
-                .map_err(|e| format!("Failed to parse vault file: {e}"))?
-        } else {
-            HashMap::new()
-        };
+        let path = default_vault_path();
+        let entries = load_entries(&path)?;
 
         Ok(Self {
             inner: Arc::new(RwLock::new(VaultInner {
@@ -101,19 +130,65 @@ impl SecretVault {
         })
     }
 
+    /// Create a vault using env key if provided, otherwise auto-bootstrap a
+    /// managed key file so users can configure providers fully from the UI.
+    pub fn from_env_or_bootstrap() -> Result<(Self, VaultStatus), String> {
+        let vault_path = default_vault_path();
+
+        if let Ok(key_b64) = std::env::var("ADMIN_VAULT_KEY") {
+            let key = parse_key_b64(&key_b64, "ADMIN_VAULT_KEY")?;
+            let vault = Self::new(&key, vault_path.clone())?;
+            let status = VaultStatus {
+                available: true,
+                key_source: "env".to_string(),
+                vault_path: vault_path.display().to_string(),
+                key_path: None,
+                bootstrap_created: false,
+                error: None,
+            };
+            return Ok((vault, status));
+        }
+
+        let key_path = default_key_path();
+        let (key, bootstrap_created) = if key_path.exists() {
+            let content = fs::read_to_string(&key_path)
+                .map_err(|e| format!("Failed to read vault key file: {e}"))?;
+            (parse_key_b64(content.trim(), "KAIZEN_VAULT_KEY_PATH file")?, false)
+        } else {
+            if let Some(parent) = key_path.parent() {
+                if !parent.exists() {
+                    fs::create_dir_all(parent)
+                        .map_err(|e| format!("Failed to create vault key directory: {e}"))?;
+                }
+            }
+
+            let mut key = [0u8; 32];
+            OsRng.fill_bytes(&mut key);
+            let key_b64 = B64.encode(key);
+            fs::write(&key_path, format!("{key_b64}\n"))
+                .map_err(|e| format!("Failed to write vault key file: {e}"))?;
+            (key, true)
+        };
+
+        let vault = Self::new(&key, vault_path.clone())?;
+        let status = VaultStatus {
+            available: true,
+            key_source: "managed_file".to_string(),
+            vault_path: vault_path.display().to_string(),
+            key_path: Some(key_path.display().to_string()),
+            bootstrap_created,
+            error: None,
+        };
+
+        Ok((vault, status))
+    }
+
     /// Create a vault with an explicit key and path (for testing).
     pub fn new(key: &[u8; 32], path: PathBuf) -> Result<Self, String> {
         let cipher = Aes256Gcm::new_from_slice(key)
             .map_err(|e| format!("Failed to create cipher: {e}"))?;
 
-        let entries = if path.exists() {
-            let content = fs::read_to_string(&path)
-                .map_err(|e| format!("Failed to read vault file: {e}"))?;
-            serde_json::from_str(&content)
-                .map_err(|e| format!("Failed to parse vault file: {e}"))?
-        } else {
-            HashMap::new()
-        };
+        let entries = load_entries(&path)?;
 
         Ok(Self {
             inner: Arc::new(RwLock::new(VaultInner {
@@ -246,7 +321,15 @@ fn persist(inner: &VaultInner) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env::temp_dir;
+    use std::{
+        env::temp_dir,
+        sync::{Mutex, OnceLock},
+    };
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     fn test_vault_path(name: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -260,6 +343,14 @@ mod tests {
         let mut key = [0u8; 32];
         rand::RngCore::fill_bytes(&mut OsRng, &mut key);
         key
+    }
+
+    fn test_key_path(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        temp_dir().join(format!("vault-key-test-{name}-{nanos}.key"))
     }
 
     #[tokio::test]
@@ -373,5 +464,31 @@ mod tests {
         assert!(result.is_err());
 
         fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_bootstrap_generates_managed_key_file() {
+        let _guard = env_lock().lock().unwrap();
+        let vault_path = test_vault_path("bootstrap-managed");
+        let key_path = test_key_path("bootstrap-managed");
+
+        unsafe {
+            std::env::remove_var("ADMIN_VAULT_KEY");
+            std::env::set_var("KAIZEN_VAULT_PATH", vault_path.display().to_string());
+            std::env::set_var("KAIZEN_VAULT_KEY_PATH", key_path.display().to_string());
+        }
+
+        let (_, status) = SecretVault::from_env_or_bootstrap().unwrap();
+        assert!(status.available);
+        assert_eq!(status.key_source, "managed_file");
+        assert!(status.bootstrap_created);
+        assert!(key_path.exists());
+
+        unsafe {
+            std::env::remove_var("KAIZEN_VAULT_PATH");
+            std::env::remove_var("KAIZEN_VAULT_KEY_PATH");
+        }
+        fs::remove_file(&key_path).ok();
+        fs::remove_file(&vault_path).ok();
     }
 }

@@ -41,7 +41,7 @@ use zeroclaw_gateway::{
         InferenceProvider, InferenceRequest, OpenAIStreamChunk,
     },
     settings::{KaizenSettings, SettingsPatch},
-    vault::{SecretMetadata, SecretVault},
+    vault::{SecretMetadata, SecretVault, VaultStatus},
 };
 
 const LOCAL_EVENT_RETENTION_SECS: f64 = 72.0 * 3600.0;
@@ -56,6 +56,7 @@ struct AppState {
     crystal_ball: Arc<RwLock<Option<CrystalBallClient>>>,
     event_archive: Arc<EventArchive>,
     vault: Arc<Option<SecretVault>>,
+    vault_status: Arc<RwLock<VaultStatus>>,
     inference: InferenceClient,
     system_prompt: Arc<String>,
     /// Per-session conversation history (keyed by "kaizen" or agent_id).
@@ -385,8 +386,15 @@ async fn patch_settings(
             ));
         }
 
-        let mut registry = state.agents.write().await;
-        registry.set_max_subagents(settings.max_subagents as usize);
+        {
+            let mut registry = state.agents.write().await;
+            registry.set_max_subagents(settings.max_subagents as usize);
+        }
+
+        let persisted_path = settings
+            .persist_to_workspace()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        tracing::info!("Persisted runtime settings to {}", persisted_path.display());
 
         settings.crystal_ball_enabled
     };
@@ -475,7 +483,7 @@ async fn resolve_inference(
 
     let vault = state.vault.as_ref().as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
-        "Secret vault is not configured. Set ADMIN_VAULT_KEY and store an API key via /api/secrets/{provider}.".to_string(),
+        "Secret vault is not available. Open Settings -> Providers to check vault status.".to_string(),
     ))?;
 
     let api_key = vault.decrypt(provider.vault_key()).await.map_err(|e| {
@@ -654,9 +662,8 @@ async fn chat(
                 tracing::warn!("Inference not available: {}", reason);
                 (
                     format!(
-                        "Kaizen is in offline mode. To enable AI responses, store an API key: \
-                         PUT /api/secrets/anthropic (or /api/secrets/openai) with your key. \
-                         Reason: {reason}"
+                        "Kaizen is in offline mode. Open Settings -> Providers and add an API key \
+                         for Anthropic or OpenAI. Reason: {reason}"
                     ),
                     None,
                     None,
@@ -1164,10 +1171,14 @@ async fn rename_agent(
 
 // ---- Secret Vault Endpoints ----
 
+async fn get_vault_status(State(state): State<AppState>) -> Json<VaultStatus> {
+    Json(state.vault_status.read().await.clone())
+}
+
 fn require_vault(state: &AppState) -> Result<&SecretVault, (StatusCode, String)> {
     state.vault.as_ref().as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
-        "Secret vault is not configured. Set ADMIN_VAULT_KEY to enable.".to_string(),
+        "Secret vault is not available. Check /api/vault/status for diagnostics.".to_string(),
     ))
 }
 
@@ -1466,14 +1477,44 @@ async fn main() {
         None
     };
 
-    let vault = match SecretVault::from_env() {
-        Ok(v) => {
-            tracing::info!("Secret vault initialized.");
-            Some(v)
+    let (vault, vault_status) = match SecretVault::from_env_or_bootstrap() {
+        Ok((v, status)) => {
+            tracing::info!(
+                "Secret vault initialized (source={}, path={})",
+                status.key_source,
+                status.vault_path
+            );
+            if status.bootstrap_created {
+                tracing::info!(
+                    "Generated new managed vault key at {}",
+                    status
+                        .key_path
+                        .as_deref()
+                        .unwrap_or("<unknown key path>")
+                );
+            }
+            (Some(v), status)
         }
         Err(e) => {
-            tracing::warn!("Secret vault not available: {}. Credential endpoints will be disabled.", e);
-            None
+            tracing::warn!(
+                "Secret vault initialization failed: {}. Credential endpoints will be unavailable.",
+                e
+            );
+            (
+                None,
+                VaultStatus {
+                    available: false,
+                    key_source: "unavailable".to_string(),
+                    vault_path: std::env::var("KAIZEN_VAULT_PATH")
+                        .unwrap_or_else(|_| "../data/vault.json".to_string()),
+                    key_path: Some(
+                        std::env::var("KAIZEN_VAULT_KEY_PATH")
+                            .unwrap_or_else(|_| "../data/vault.key".to_string()),
+                    ),
+                    bootstrap_created: false,
+                    error: Some(e),
+                },
+            )
         }
     };
 
@@ -1490,6 +1531,7 @@ async fn main() {
         crystal_ball: Arc::new(RwLock::new(initial_crystal_ball)),
         event_archive: Arc::new(event_archive),
         vault: Arc::new(vault),
+        vault_status: Arc::new(RwLock::new(vault_status)),
         inference: InferenceClient::new(),
         system_prompt: Arc::new(system_prompt),
         conversations: Arc::new(RwLock::new(HashMap::new())),
@@ -1537,6 +1579,7 @@ async fn main() {
         .route("/api/gates/advance", post(advance_gates))
         .route("/api/events", get(list_events))
         // Secret vault endpoints
+        .route("/api/vault/status", get(get_vault_status))
         .route("/api/secrets", get(list_secrets))
         .route(
             "/api/secrets/{provider}",

@@ -275,6 +275,28 @@ impl KaizenSettings {
             self.inference_temperature = value;
         }
     }
+
+    /// Persist current settings to the workspace defaults file so UI updates
+    /// survive restarts without manual file editing.
+    pub fn persist_to_workspace(&self) -> Result<PathBuf, String> {
+        let path = settings_write_path();
+        if let Some(parent) = path.parent() {
+            if !parent.exists() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to create settings directory: {e}"))?;
+            }
+        }
+
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| format!("Failed to serialize settings: {e}"))?;
+
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, json).map_err(|e| format!("Failed to write settings tmp: {e}"))?;
+        std::fs::rename(&tmp, &path)
+            .map_err(|e| format!("Failed to persist settings file: {e}"))?;
+
+        Ok(path)
+    }
 }
 
 fn settings_path_candidates() -> Vec<PathBuf> {
@@ -288,4 +310,22 @@ fn settings_path_candidates() -> Vec<PathBuf> {
     paths.push(PathBuf::from("config/defaults.json"));
 
     paths
+}
+
+fn settings_write_path() -> PathBuf {
+    if let Ok(path) = std::env::var("KAIZEN_SETTINGS_PATH") {
+        return PathBuf::from(path);
+    }
+
+    let workspace_path = PathBuf::from("../config/defaults.json");
+    if workspace_path.exists() {
+        return workspace_path;
+    }
+
+    let local_path = PathBuf::from("config/defaults.json");
+    if local_path.exists() {
+        return local_path;
+    }
+
+    workspace_path
 }

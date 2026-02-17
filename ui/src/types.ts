@@ -206,3 +206,12 @@ export interface SecretTestResult {
   test_passed: boolean;
   error: string | null;
 }
+
+export interface VaultStatus {
+  available: boolean;
+  key_source: string;
+  vault_path: string;
+  key_path: string | null;
+  bootstrap_created: boolean;
+  error: string | null;
+}
