@@ -536,59 +536,19 @@ function SettingsDrawer({
 
           {activeTab === "crystal_ball" && (
             <>
-              <label className="settings-toggle">
-                <input
-                  type="checkbox"
-                  checked={settings.crystal_ball_enabled}
-                  disabled={saving}
-                  onChange={(event) =>
-                    void save({ crystal_ball_enabled: event.target.checked })
-                  }
-                />
-                Crystal Ball Enabled
-              </label>
-
-              <label className="settings-toggle">
-                <input
-                  type="checkbox"
-                  checked={settings.crystal_ball_default_open}
-                  disabled={saving}
-                  onChange={(event) =>
-                    void save({ crystal_ball_default_open: event.target.checked })
-                  }
-                />
-                Crystal Ball Open on Startup
-              </label>
+              <p className="settings-note">
+                Bridge setup and validation now live in the Providers tab.
+              </p>
 
               <section className="audit-card">
                 <div className="audit-card-header">
-                  <h4>Crystal Ball Audit</h4>
-                  <div className="audit-actions">
-                    <button
-                      type="button"
-                      onClick={() => void refreshAudit()}
-                      disabled={refreshingAudit}
-                    >
-                      {refreshingAudit ? "Refreshing..." : "Refresh"}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void validateBridge()}
-                      disabled={validatingBridge}
-                    >
-                      {validatingBridge ? "Validating..." : "Validate"}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void runSmoke()}
-                      disabled={runningSmoke}
-                    >
-                      {runningSmoke ? "Running..." : "Smoke"}
-                    </button>
-                  </div>
+                  <h4>Crystal Ball Telemetry</h4>
                 </div>
 
                 <div className="audit-grid">
+                  <span>Bridge</span>
+                  <strong>{settings.crystal_ball_enabled ? "enabled" : "disabled"}</strong>
+
                   <span>Mode</span>
                   <strong>{crystalBallHealth?.mode ?? "unknown"}</strong>
 
@@ -624,7 +584,7 @@ function SettingsDrawer({
 
                 {crystalBallValidation && (
                   <div className="audit-summary">
-                    <span>Bridge Validation</span>
+                    <span>Last Validation</span>
                     <strong>
                       {crystalBallValidation.error
                         ? `failed (${crystalBallValidation.error})`
