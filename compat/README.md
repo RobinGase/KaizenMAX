@@ -1,14 +1,20 @@
-# compat/
+# compat
 
-Optional compatibility adapters for Kaizen MAX.
+This directory is reserved for optional compatibility adapters.
 
-## Status
-**Disabled by default.** The baseline stack uses ZeroClaw (Rust) natively. This directory is reserved for:
+## Current Status
 
-- OpenClaw/Node bridge adapters (if a required feature is missing from ZeroClaw).
-- Any future protocol translation layers.
+- Compatibility mode is disabled by default.
+- Native runtime behavior is implemented in Rust through ZeroClaw.
+- This directory is currently a reserved extension point.
 
-## Policy
-- Adapters here are opt-in only, controlled via `config/defaults.json` (`openclaw_compat_enabled`).
-- No adapter in this directory should be loaded unless the user explicitly enables it in settings.
-- Node.js is **not** part of the default runtime stack.
+## When to Use
+
+- Add an adapter only if a required capability cannot be delivered in native runtime modules.
+- Keep adapters isolated from the default execution path.
+
+## Control Model
+
+- Compatibility toggles are controlled by runtime settings.
+- No adapter should load unless explicitly enabled by the operator.
+- Node runtime remains outside the default stack.

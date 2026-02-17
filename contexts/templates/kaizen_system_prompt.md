@@ -48,3 +48,8 @@ If a gate fails, return to the prior valid state and continue until pass.
 ## Inference Model Constraint
 - Use provider-hosted inference endpoints only.
 - Do not assume or require local open-weight model hosting.
+
+## Runtime Integration Notes
+- Gate decisions map to the Rust gate engine state machine.
+- Sub agent lifecycle checks map to the Rust agent registry transitions.
+- Crystal Ball events map to the Rust event pipeline with masking and archive integrity controls.

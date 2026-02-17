@@ -1,27 +1,29 @@
 # Kaizen MAX Context Architecture
 
-This folder defines the context strategy for Kaizen MAX.
+This directory defines policy and prompt context for Kaizen MAX.
 
 ## Purpose
-- Keep Kaizen as the main planner/reasoner.
-- Keep sub-agents user-controlled and hardware-aware.
-- Enforce hard review gates before finalization/deploy.
-- Keep alignment and security rules consistent across all agent sessions.
-- Keep desktop workflow native on Windows (no WSL baseline).
-- Keep feature behavior controlled through settings toggles with personal defaults.
 
-## Context Layers (highest priority first)
-1. `Security/Integrity Rules`
+- Keep Kaizen as the main planner and reviewer.
+- Keep sub agent orchestration explicit and user controlled.
+- Keep review and deployment gate policy consistent.
+- Keep security and masking rules consistent across agent sessions.
+- Keep runtime behavior tied to settings and policy files.
+
+## Priority Layers
+
+1. `Security and Integrity Rules`
 2. `Nex Alignment Rules`
 3. `Kaizen MAX Product Rules`
 4. `Runtime Limits and Tooling Rules`
 5. `Task Context`
-6. `Agent-Specific Context`
+6. `Agent Context`
 7. `Conversation History`
 
-If two rules conflict, higher-priority layers win.
+Higher layers override lower layers when rules conflict.
 
-## Files
+## Contents
+
 - `templates/kaizen_system_prompt.md`
 - `templates/subagent_system_prompt.md`
 - `policies/review_gate_policy.yaml`
@@ -29,8 +31,8 @@ If two rules conflict, higher-priority layers win.
 - `policies/crystal_ball_event_policy.yaml`
 - `rollout_checklist.md`
 
-## Notes
-- These are planning-first templates and policies.
-- During ZeroClaw integration, bind these to the actual ZeroClaw settings fields for system prompts, agent templates, and policy hooks.
-- Preferred deployment mode: native Windows UI + native ZeroClaw core.
-- Optional offload mode: native Windows UI + remote ZeroClaw core.
+## Runtime Binding Status
+
+- Gate and lifecycle policy behavior is implemented in Rust runtime modules.
+- Crystal Ball masking and archive integrity behavior is implemented in Rust runtime modules.
+- Prompt templates remain source templates and are ready for direct runtime prompt binding.
