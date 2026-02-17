@@ -31,7 +31,8 @@ use tracing_subscriber::EnvFilter;
 use zeroclaw_gateway::{
     agents::{AgentRegistry, AgentStatus, SubAgent},
     crystal_ball::{
-        CrystalBallClient, CrystalBallEvent, MattermostSmokeResult, MattermostValidation,
+        CrystalBallClient, CrystalBallConfig, CrystalBallEvent, MattermostSmokeResult,
+        MattermostValidation,
         redact_sensitive,
     },
     event_archive::{ArchiveIntegrityReport, EventArchive},
@@ -368,6 +369,50 @@ async fn push_event(state: &AppState, mut event: CrystalBallEvent) {
     }
 }
 
+async fn build_crystal_ball_client(
+    settings: &KaizenSettings,
+    vault: Option<&SecretVault>,
+) -> Option<CrystalBallClient> {
+    if !settings.crystal_ball_enabled {
+        return None;
+    }
+
+    let base_url = settings.mattermost_url.trim();
+    let channel_id = settings.mattermost_channel_id.trim();
+
+    if !base_url.is_empty() && !channel_id.is_empty() {
+        if let Some(vault) = vault {
+            match vault.decrypt("mattermost").await {
+                Ok(token) => {
+                    let config = CrystalBallConfig {
+                        base_url: base_url.to_string(),
+                        token,
+                        channel_id: channel_id.to_string(),
+                    };
+                    if let Some(client) = CrystalBallClient::from_config(config) {
+                        return Some(client);
+                    }
+                    tracing::warn!(
+                        "Mattermost settings are present but Crystal Ball config is invalid."
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        "Mattermost settings are present but no token is stored in vault provider 'mattermost': {}",
+                        err
+                    );
+                }
+            }
+        } else {
+            tracing::warn!(
+                "Mattermost settings are present but vault is unavailable for token decryption."
+            );
+        }
+    }
+
+    CrystalBallClient::from_env()
+}
+
 async fn get_settings(State(state): State<AppState>) -> Json<KaizenSettings> {
     Json(state.settings.read().await.clone())
 }
@@ -376,7 +421,7 @@ async fn patch_settings(
     State(state): State<AppState>,
     Json(patch): Json<SettingsPatch>,
 ) -> Result<Json<KaizenSettings>, (StatusCode, String)> {
-    let crystal_ball_enabled = {
+    let updated_settings = {
         let mut settings = state.settings.write().await;
         settings.apply_patch(patch);
         if settings.max_subagents > 20 {
@@ -396,23 +441,22 @@ async fn patch_settings(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
         tracing::info!("Persisted runtime settings to {}", persisted_path.display());
 
-        settings.crystal_ball_enabled
+        settings.clone()
     };
+
+    let new_crystal_ball =
+        build_crystal_ball_client(&updated_settings, state.vault.as_ref().as_ref()).await;
+    let client_available = new_crystal_ball.is_some();
 
     {
         let mut crystal_ball = state.crystal_ball.write().await;
-        if crystal_ball_enabled {
-            if crystal_ball.is_none() {
-                *crystal_ball = CrystalBallClient::from_env();
-                if crystal_ball.is_none() {
-                    tracing::warn!(
-                        "Crystal Ball enabled but Mattermost env vars are missing. Using local feed only."
-                    );
-                }
-            }
-        } else {
-            *crystal_ball = None;
-        }
+        *crystal_ball = new_crystal_ball;
+    }
+
+    if updated_settings.crystal_ball_enabled && !client_available {
+        tracing::warn!(
+            "Crystal Ball enabled but Mattermost client is not configured. Running local feed only."
+        );
     }
 
     {
@@ -1465,18 +1509,6 @@ async fn main() {
             }
         };
 
-    let initial_crystal_ball = if settings.crystal_ball_enabled {
-        let client = CrystalBallClient::from_env();
-        if client.is_none() {
-            tracing::warn!(
-                "Crystal Ball is enabled but Mattermost env vars are missing. Running local feed only."
-            );
-        }
-        client
-    } else {
-        None
-    };
-
     let (vault, vault_status) = match SecretVault::from_env_or_bootstrap() {
         Ok((v, status)) => {
             tracing::info!(
@@ -1517,6 +1549,13 @@ async fn main() {
             )
         }
     };
+
+    let initial_crystal_ball = build_crystal_ball_client(&settings, vault.as_ref()).await;
+    if settings.crystal_ball_enabled && initial_crystal_ball.is_none() {
+        tracing::warn!(
+            "Crystal Ball enabled but Mattermost client is not configured. Running local feed only."
+        );
+    }
 
     let system_prompt = inference::load_system_prompt();
     tracing::info!("Loaded Kaizen system prompt ({} chars)", system_prompt.len());

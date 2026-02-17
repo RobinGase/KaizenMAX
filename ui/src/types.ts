@@ -174,6 +174,8 @@ export interface KaizenSettings {
   allow_direct_user_to_subagent_chat: boolean;
   crystal_ball_enabled: boolean;
   crystal_ball_default_open: boolean;
+  mattermost_url: string;
+  mattermost_channel_id: string;
   hard_gates_enabled: boolean;
   require_human_smoke_test_before_deploy: boolean;
   provider_inference_only: boolean;

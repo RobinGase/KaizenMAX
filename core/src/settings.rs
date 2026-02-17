@@ -43,6 +43,10 @@ pub struct KaizenSettings {
     pub write_plaintext_secrets_to_env: bool,
     #[serde(default = "default_true")]
     pub show_only_masked_secrets_in_ui: bool,
+    #[serde(default)]
+    pub mattermost_url: String,
+    #[serde(default)]
+    pub mattermost_channel_id: String,
     #[serde(default = "default_inference_provider")]
     pub inference_provider: String,
     #[serde(default = "default_inference_model")]
@@ -90,6 +94,8 @@ impl Default for KaizenSettings {
             secrets_storage_mode: "encrypted_vault".to_string(),
             write_plaintext_secrets_to_env: false,
             show_only_masked_secrets_in_ui: true,
+            mattermost_url: String::new(),
+            mattermost_channel_id: String::new(),
             inference_provider: "anthropic".to_string(),
             inference_model: "claude-sonnet-4-20250514".to_string(),
             inference_max_tokens: 4096,
@@ -118,6 +124,8 @@ pub struct SettingsPatch {
     pub secrets_storage_mode: Option<String>,
     pub write_plaintext_secrets_to_env: Option<bool>,
     pub show_only_masked_secrets_in_ui: Option<bool>,
+    pub mattermost_url: Option<String>,
+    pub mattermost_channel_id: Option<String>,
     pub inference_provider: Option<String>,
     pub inference_model: Option<String>,
     pub inference_max_tokens: Option<u32>,
@@ -205,6 +213,14 @@ impl KaizenSettings {
         if let Ok(val) = std::env::var("KAIZEN_INFERENCE_TEMPERATURE") {
             self.inference_temperature = val.parse().unwrap_or(self.inference_temperature);
         }
+        if let Ok(val) = std::env::var("MATTERMOST_URL") {
+            self.mattermost_url = val;
+        }
+        if let Ok(val) = std::env::var("MATTERMOST_CHANNEL_ID") {
+            self.mattermost_channel_id = val;
+        } else if let Ok(val) = std::env::var("CRYSTAL_BALL_CHANNEL") {
+            self.mattermost_channel_id = val;
+        }
     }
 
     pub fn apply_patch(&mut self, patch: SettingsPatch) {
@@ -261,6 +277,12 @@ impl KaizenSettings {
         }
         if let Some(value) = patch.show_only_masked_secrets_in_ui {
             self.show_only_masked_secrets_in_ui = value;
+        }
+        if let Some(value) = patch.mattermost_url {
+            self.mattermost_url = value;
+        }
+        if let Some(value) = patch.mattermost_channel_id {
+            self.mattermost_channel_id = value;
         }
         if let Some(value) = patch.inference_provider {
             self.inference_provider = value;

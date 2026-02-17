@@ -392,6 +392,41 @@ function SettingsDrawer({
                 </label>
               </div>
 
+              <div className="inference-settings">
+                <h4>Crystal Ball Provider (Mattermost)</h4>
+
+                <div className="inference-field">
+                  <label>Mattermost URL</label>
+                  <input
+                    type="url"
+                    value={settings.mattermost_url}
+                    disabled={saving}
+                    onChange={(event) =>
+                      void save({ mattermost_url: event.target.value.trim() })
+                    }
+                    placeholder="https://mattermost.example.com"
+                  />
+                </div>
+
+                <div className="inference-field">
+                  <label>Mattermost Channel ID</label>
+                  <input
+                    type="text"
+                    value={settings.mattermost_channel_id}
+                    disabled={saving}
+                    onChange={(event) =>
+                      void save({ mattermost_channel_id: event.target.value.trim() })
+                    }
+                    placeholder="channel id"
+                  />
+                </div>
+
+                <p className="settings-note">
+                  Store the Mattermost bot token below in Provider Credentials under
+                  "Mattermost Bot".
+                </p>
+              </div>
+
               {loadingVaultStatus && <p className="settings-note">Loading vault status...</p>}
 
               <CredentialsPanel

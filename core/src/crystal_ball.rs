@@ -36,6 +36,13 @@ pub struct CrystalBallClient {
     http: reqwest::Client,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrystalBallConfig {
+    pub base_url: String,
+    pub token: String,
+    pub channel_id: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct MattermostPostList {
     order: Vec<String>,
@@ -94,24 +101,34 @@ pub struct MattermostSmokeResult {
 }
 
 impl CrystalBallClient {
-    pub fn from_env() -> Option<Self> {
-        let base_url = std::env::var("MATTERMOST_URL").ok()?.trim().to_string();
-        let token = std::env::var("MATTERMOST_TOKEN").ok()?.trim().to_string();
-        let channel_id = std::env::var("MATTERMOST_CHANNEL_ID")
-            .or_else(|_| std::env::var("CRYSTAL_BALL_CHANNEL"))
-            .ok()?
-            .trim()
-            .to_string();
+    pub fn from_config(config: CrystalBallConfig) -> Option<Self> {
+        let base_url = config.base_url.trim().trim_end_matches('/').to_string();
+        let token = config.token.trim().to_string();
+        let channel_id = config.channel_id.trim().to_string();
 
         if base_url.is_empty() || token.is_empty() || channel_id.is_empty() {
             return None;
         }
 
         Some(Self {
-            base_url: base_url.trim_end_matches('/').to_string(),
+            base_url,
             token,
             channel_id,
             http: reqwest::Client::new(),
+        })
+    }
+
+    pub fn from_env() -> Option<Self> {
+        let base_url = std::env::var("MATTERMOST_URL").ok()?;
+        let token = std::env::var("MATTERMOST_TOKEN").ok()?;
+        let channel_id = std::env::var("MATTERMOST_CHANNEL_ID")
+            .or_else(|_| std::env::var("CRYSTAL_BALL_CHANNEL"))
+            .ok()?;
+
+        Self::from_config(CrystalBallConfig {
+            base_url,
+            token,
+            channel_id,
         })
     }
 

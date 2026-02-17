@@ -15,6 +15,7 @@ interface CredentialsPanelProps {
 const KNOWN_PROVIDERS = [
   { id: "anthropic", label: "Anthropic" },
   { id: "openai", label: "OpenAI" },
+  { id: "mattermost", label: "Mattermost Bot" },
   { id: "google", label: "Google AI" },
 ];
 

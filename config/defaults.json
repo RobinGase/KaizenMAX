@@ -27,6 +27,9 @@
   "write_plaintext_secrets_to_env": false,
   "show_only_masked_secrets_in_ui": true,
 
+  "mattermost_url": "",
+  "mattermost_channel_id": "",
+
   "inference_provider": "anthropic",
   "inference_model": "claude-sonnet-4-20250514",
   "inference_max_tokens": 4096,
