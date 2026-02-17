@@ -161,6 +161,28 @@ export interface KaizenSettings {
   hard_gates_enabled: boolean;
   require_human_smoke_test_before_deploy: boolean;
   provider_inference_only: boolean;
+  credentials_ui_enabled: boolean;
+  oauth_ui_enabled: boolean;
+  agent_name_editable_after_spawn: boolean;
+  secrets_storage_mode: string;
+  write_plaintext_secrets_to_env: boolean;
+  show_only_masked_secrets_in_ui: boolean;
 }
 
 export type KaizenSettingsPatch = Partial<KaizenSettings>;
+
+/** Secret vault metadata (never contains raw values) */
+export interface SecretMetadata {
+  provider: string;
+  configured: boolean;
+  last_updated: string;
+  last4: string;
+  secret_type: string;
+}
+
+export interface SecretTestResult {
+  provider: string;
+  configured: boolean;
+  test_passed: boolean;
+  error: string | null;
+}

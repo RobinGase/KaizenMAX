@@ -12,6 +12,8 @@ import type {
   GateTransitionResult,
   KaizenSettings,
   KaizenSettingsPatch,
+  SecretMetadata,
+  SecretTestResult,
 } from "./types";
 
 interface ApiAgent {
@@ -181,4 +183,52 @@ export async function runCrystalBallSmoke(): Promise<CrystalBallSmokeResponse> {
   return request<CrystalBallSmokeResponse>("/api/crystal-ball/smoke", {
     method: "POST",
   });
+}
+
+// ---- Agent Rename ----
+
+export async function renameAgent(
+  agentId: string,
+  name: string
+): Promise<Agent> {
+  const updated = await request<ApiAgent>(`/api/agents/${agentId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ name }),
+  });
+  return mapApiAgent(updated, false);
+}
+
+// ---- Secret Vault ----
+
+export async function fetchSecrets(): Promise<SecretMetadata[]> {
+  return request<SecretMetadata[]>("/api/secrets");
+}
+
+export async function storeSecret(
+  provider: string,
+  value: string,
+  secretType = "api_key"
+): Promise<SecretMetadata> {
+  return request<SecretMetadata>(`/api/secrets/${provider}`, {
+    method: "PUT",
+    body: JSON.stringify({ value, secret_type: secretType }),
+  });
+}
+
+export async function revokeSecret(provider: string): Promise<void> {
+  await fetch(`/api/secrets/${provider}`, { method: "DELETE" });
+}
+
+export async function testSecret(
+  provider: string
+): Promise<SecretTestResult> {
+  return request<SecretTestResult>(`/api/secrets/${provider}/test`, {
+    method: "POST",
+  });
+}
+
+// ---- OAuth ----
+
+export async function oauthDisconnect(provider: string): Promise<void> {
+  await fetch(`/api/oauth/${provider}`, { method: "DELETE" });
 }

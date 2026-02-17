@@ -10,12 +10,12 @@ use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
-    routing::{get, patch, post},
+    routing::{delete, get, patch, post, put},
 };
 use serde::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering as AtomicOrdering},
@@ -34,6 +34,7 @@ use zeroclaw_gateway::{
     event_archive::{ArchiveIntegrityReport, EventArchive},
     gate_engine::{GateConditionPatch, GateRuntime, GateState, TransitionResult},
     settings::{KaizenSettings, SettingsPatch},
+    vault::{SecretMetadata, SecretVault},
 };
 
 const LOCAL_EVENT_RETENTION_SECS: f64 = 72.0 * 3600.0;
@@ -47,6 +48,7 @@ struct AppState {
     events: Arc<RwLock<Vec<CrystalBallEvent>>>,
     crystal_ball: Arc<RwLock<Option<CrystalBallClient>>>,
     event_archive: Arc<EventArchive>,
+    vault: Arc<Option<SecretVault>>,
     next_id: Arc<AtomicU64>,
 }
 
@@ -708,6 +710,274 @@ async fn advance_gates(State(state): State<AppState>) -> Json<TransitionResult> 
     Json(result)
 }
 
+// ---- Agent Rename ----
+
+#[derive(Debug, Deserialize)]
+struct AgentRenamePatch {
+    name: String,
+}
+
+async fn rename_agent(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+    Json(request): Json<AgentRenamePatch>,
+) -> Result<Json<SubAgent>, (StatusCode, String)> {
+    let settings = state.settings.read().await;
+    if !settings.agent_name_editable_after_spawn {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Agent renaming is disabled in settings".to_string(),
+        ));
+    }
+    drop(settings);
+
+    let old_name = {
+        let registry = state.agents.read().await;
+        registry
+            .get(&agent_id)
+            .map(|a| a.name.clone())
+            .ok_or((StatusCode::NOT_FOUND, "agent not found".to_string()))?
+    };
+
+    {
+        let mut registry = state.agents.write().await;
+        registry
+            .rename(&agent_id, &request.name)
+            .map_err(|err| (StatusCode::BAD_REQUEST, err))?;
+    }
+
+    let updated = {
+        let registry = state.agents.read().await;
+        registry
+            .get(&agent_id)
+            .ok_or((StatusCode::NOT_FOUND, "agent not found".to_string()))?
+            .clone()
+    };
+
+    push_event(
+        &state,
+        CrystalBallEvent {
+            event_id: next_id(&state, "event"),
+            timestamp: now_timestamp(),
+            event_type: "subagent.renamed".to_string(),
+            source_actor: updated.name.clone(),
+            source_agent_id: updated.id.clone(),
+            target_actor: "Kaizen".to_string(),
+            target_agent_id: "kaizen".to_string(),
+            task_id: updated.task_id.clone(),
+            message: format!("Renamed from '{}' to '{}'", old_name, updated.name),
+            visibility: "operator".to_string(),
+        },
+    )
+    .await;
+
+    Ok(Json(updated))
+}
+
+// ---- Secret Vault Endpoints ----
+
+fn require_vault(state: &AppState) -> Result<&SecretVault, (StatusCode, String)> {
+    state.vault.as_ref().as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Secret vault is not configured. Set ADMIN_VAULT_KEY to enable.".to_string(),
+    ))
+}
+
+async fn list_secrets(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<SecretMetadata>>, (StatusCode, String)> {
+    let vault = require_vault(&state)?;
+    Ok(Json(vault.list().await))
+}
+
+#[derive(Debug, Deserialize)]
+struct StoreSecretRequest {
+    value: String,
+    #[serde(default = "default_api_key_type")]
+    secret_type: String,
+}
+
+fn default_api_key_type() -> String {
+    "api_key".to_string()
+}
+
+async fn store_secret(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+    Json(request): Json<StoreSecretRequest>,
+) -> Result<Json<SecretMetadata>, (StatusCode, String)> {
+    let vault = require_vault(&state)?;
+    let meta = vault
+        .store(&provider, &request.value, &request.secret_type)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    push_event(
+        &state,
+        CrystalBallEvent {
+            event_id: next_id(&state, "event"),
+            timestamp: now_timestamp(),
+            event_type: "orchestration.started".to_string(),
+            source_actor: "operator".to_string(),
+            source_agent_id: "human".to_string(),
+            target_actor: "vault".to_string(),
+            target_agent_id: "system".to_string(),
+            task_id: "credentials".to_string(),
+            message: format!("Credential stored for provider '{}'", provider),
+            visibility: "admin".to_string(),
+        },
+    )
+    .await;
+
+    Ok(Json(meta))
+}
+
+async fn revoke_secret(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let vault = require_vault(&state)?;
+    vault
+        .revoke(&provider)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    push_event(
+        &state,
+        CrystalBallEvent {
+            event_id: next_id(&state, "event"),
+            timestamp: now_timestamp(),
+            event_type: "orchestration.started".to_string(),
+            source_actor: "operator".to_string(),
+            source_agent_id: "human".to_string(),
+            target_actor: "vault".to_string(),
+            target_agent_id: "system".to_string(),
+            task_id: "credentials".to_string(),
+            message: format!("Credential revoked for provider '{}'", provider),
+            visibility: "admin".to_string(),
+        },
+    )
+    .await;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Serialize)]
+struct SecretTestResult {
+    provider: String,
+    configured: bool,
+    test_passed: bool,
+    error: Option<String>,
+}
+
+async fn test_secret(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+) -> Result<Json<SecretTestResult>, (StatusCode, String)> {
+    let vault = require_vault(&state)?;
+
+    if !vault.has(&provider).await {
+        return Ok(Json(SecretTestResult {
+            provider,
+            configured: false,
+            test_passed: false,
+            error: Some("No credential stored for this provider".to_string()),
+        }));
+    }
+
+    // Decrypt to verify the key is valid ciphertext (integrity check).
+    // Actual provider API validation would go here in production.
+    match vault.decrypt(&provider).await {
+        Ok(_) => Ok(Json(SecretTestResult {
+            provider,
+            configured: true,
+            test_passed: true,
+            error: None,
+        })),
+        Err(e) => Ok(Json(SecretTestResult {
+            provider,
+            configured: true,
+            test_passed: false,
+            error: Some(e),
+        })),
+    }
+}
+
+// ---- OAuth Stub Endpoints ----
+// These provide the contract surface for Phase I OAuth flows.
+// Full provider-specific OAuth implementation is wired when providers are configured.
+
+#[derive(Serialize)]
+struct OAuthStartResponse {
+    redirect_url: String,
+    state_token: String,
+}
+
+async fn oauth_start(
+    State(_state): State<AppState>,
+    Path(provider): Path<String>,
+) -> Result<Json<OAuthStartResponse>, (StatusCode, String)> {
+    // In production: build PKCE challenge and redirect URL for the given provider.
+    Err((
+        StatusCode::NOT_IMPLEMENTED,
+        format!("OAuth start for '{}' is not yet configured. Configure OAuth client credentials first.", provider),
+    ))
+}
+
+async fn oauth_callback(
+    State(_state): State<AppState>,
+    Path(provider): Path<String>,
+    Query(_params): Query<HashMap<String, String>>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    Err((
+        StatusCode::NOT_IMPLEMENTED,
+        format!("OAuth callback for '{}' is not yet configured.", provider),
+    ))
+}
+
+async fn oauth_refresh(
+    State(_state): State<AppState>,
+    Path(provider): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    Err((
+        StatusCode::NOT_IMPLEMENTED,
+        format!("OAuth refresh for '{}' is not yet configured.", provider),
+    ))
+}
+
+async fn oauth_disconnect(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    // Revoke stored OAuth tokens for this provider.
+    let vault = require_vault(&state)?;
+    let access_key = format!("{provider}_oauth_access");
+    let refresh_key = format!("{provider}_oauth_refresh");
+    vault.revoke(&access_key).await.ok();
+    vault.revoke(&refresh_key).await.ok();
+
+    push_event(
+        &state,
+        CrystalBallEvent {
+            event_id: next_id(&state, "event"),
+            timestamp: now_timestamp(),
+            event_type: "orchestration.started".to_string(),
+            source_actor: "operator".to_string(),
+            source_agent_id: "human".to_string(),
+            target_actor: "vault".to_string(),
+            target_agent_id: "system".to_string(),
+            task_id: "credentials".to_string(),
+            message: format!("OAuth disconnected for provider '{}'", provider),
+            visibility: "admin".to_string(),
+        },
+    )
+    .await;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---- Events ----
+
 #[derive(Debug, Deserialize)]
 struct EventsQuery {
     limit: Option<usize>,
@@ -808,6 +1078,17 @@ async fn main() {
         None
     };
 
+    let vault = match SecretVault::from_env() {
+        Ok(v) => {
+            tracing::info!("Secret vault initialized.");
+            Some(v)
+        }
+        Err(e) => {
+            tracing::warn!("Secret vault not available: {}. Credential endpoints will be disabled.", e);
+            None
+        }
+    };
+
     let state = AppState {
         settings: Arc::new(RwLock::new(settings.clone())),
         agents: Arc::new(RwLock::new(AgentRegistry::new(
@@ -817,12 +1098,33 @@ async fn main() {
         events: Arc::new(RwLock::new(archived_events)),
         crystal_ball: Arc::new(RwLock::new(initial_crystal_ball)),
         event_archive: Arc::new(event_archive),
+        vault: Arc::new(vault),
         next_id: Arc::new(AtomicU64::new(1)),
     };
 
     let host = std::env::var("ZEROCLAW_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let port = std::env::var("ZEROCLAW_PORT").unwrap_or_else(|_| "9100".to_string());
     let addr = format!("{host}:{port}");
+
+    // CORS: allow only loopback origins by default for security.
+    let allowed_origins = std::env::var("KAIZEN_CORS_ORIGINS")
+        .unwrap_or_else(|_| "http://localhost:3000,http://127.0.0.1:3000".to_string());
+    let origins: Vec<_> = allowed_origins
+        .split(',')
+        .filter_map(|s| s.trim().parse().ok())
+        .collect();
+
+    let cors = CorsLayer::new()
+        .allow_origin(origins)
+        .allow_methods([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::PUT,
+            axum::http::Method::PATCH,
+            axum::http::Method::DELETE,
+            axum::http::Method::OPTIONS,
+        ])
+        .allow_headers([axum::http::header::CONTENT_TYPE, axum::http::header::AUTHORIZATION]);
 
     let app = Router::new()
         .route("/health", get(health))
@@ -834,12 +1136,25 @@ async fn main() {
         .route("/api/chat", post(chat))
         .route("/api/agents", get(list_agents).post(spawn_agent))
         .route("/api/agents/{agent_id}/status", patch(update_agent_status))
+        .route("/api/agents/{agent_id}", patch(rename_agent))
         .route("/api/gates", get(get_gates))
         .route("/api/gates/conditions", patch(patch_gate_conditions))
         .route("/api/gates/advance", post(advance_gates))
         .route("/api/events", get(list_events))
+        // Secret vault endpoints
+        .route("/api/secrets", get(list_secrets))
+        .route(
+            "/api/secrets/{provider}",
+            put(store_secret).delete(revoke_secret),
+        )
+        .route("/api/secrets/{provider}/test", post(test_secret))
+        // OAuth endpoints
+        .route("/api/oauth/{provider}/start", get(oauth_start))
+        .route("/api/oauth/{provider}/callback", get(oauth_callback))
+        .route("/api/oauth/{provider}/refresh", post(oauth_refresh))
+        .route("/api/oauth/{provider}", delete(oauth_disconnect))
         .with_state(state)
-        .layer(CorsLayer::permissive());
+        .layer(cors);
 
     tracing::info!("ZeroClaw gateway starting on {}", addr);
 

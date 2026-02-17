@@ -10,6 +10,7 @@ import {
   fetchSettings,
   patchGateConditions,
   patchSettings,
+  renameAgent,
   runCrystalBallSmoke,
   sendChat,
   updateAgentStatus,
@@ -252,6 +253,11 @@ function App() {
     });
   };
 
+  const handleRenameAgent = async (agentId: string, newName: string) => {
+    const updated = await renameAgent(agentId, newName);
+    patchLocalAgent(agentId, { name: updated.name });
+  };
+
   const handleSendAgentMessage = async (agentId: string, message: string) => {
     appendAgentMessage(agentId, {
       role: "user",
@@ -432,9 +438,11 @@ function App() {
           <AgentPanel
             agents={agents}
             maxSubagents={maxSubagents}
+            renameEnabled={settings?.agent_name_editable_after_spawn ?? true}
             onToggleChat={toggleAgentChat}
             onSpawn={handleSpawnAgent}
             onSetStatus={handleSetAgentStatus}
+            onRename={handleRenameAgent}
           />
         </aside>
       </main>

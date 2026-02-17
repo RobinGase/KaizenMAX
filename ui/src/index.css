@@ -671,3 +671,128 @@ body {
     max-height: 36vh;
   }
 }
+
+/* ---- Agent Rename ---- */
+
+.agent-name-editable {
+  cursor: pointer;
+  border-bottom: 1px dashed var(--ink-dim);
+}
+
+.agent-name-editable:hover {
+  color: var(--accent);
+}
+
+.agent-rename-input {
+  background: var(--bg-1);
+  border: 1px solid var(--accent);
+  color: var(--ink);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.85rem;
+  width: 120px;
+}
+
+/* ---- Credentials Panel ---- */
+
+.credentials-panel {
+  margin-top: 1.5rem;
+  border-top: 1px solid var(--line);
+  padding-top: 1rem;
+}
+
+.credentials-panel h4 {
+  margin: 0 0 0.25rem;
+  color: var(--ink);
+}
+
+.credentials-info {
+  font-size: 0.75rem;
+  color: var(--ink-dim);
+  margin-bottom: 0.75rem;
+}
+
+.credential-row {
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.credential-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+
+.credential-status {
+  font-size: 0.75rem;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.credential-configured {
+  background: rgba(46, 204, 113, 0.15);
+  color: #2ecc71;
+}
+
+.credential-missing {
+  background: rgba(231, 76, 60, 0.15);
+  color: #e74c3c;
+}
+
+.credential-actions {
+  display: flex;
+  gap: 0.35rem;
+  align-items: center;
+}
+
+.credential-actions input[type="password"] {
+  flex: 1;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  color: var(--ink);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 0.8rem;
+}
+
+.credential-actions button {
+  padding: 4px 10px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel-2);
+  color: var(--ink);
+}
+
+.credential-revoke {
+  color: #e74c3c !important;
+  border-color: #e74c3c !important;
+}
+
+.credential-test-result {
+  font-size: 0.75rem;
+  margin-top: 0.35rem;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+.test-pass {
+  background: rgba(46, 204, 113, 0.1);
+  color: #2ecc71;
+}
+
+.test-fail {
+  background: rgba(231, 76, 60, 0.1);
+  color: #e74c3c;
+}
+
+.credential-meta {
+  font-size: 0.7rem;
+  color: var(--ink-dim);
+  margin-top: 0.25rem;
+}

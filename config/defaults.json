@@ -18,5 +18,12 @@
   "hard_gates_enabled": true,
   "require_human_smoke_test_before_deploy": true,
 
-  "provider_inference_only": true
+  "provider_inference_only": true,
+
+  "credentials_ui_enabled": true,
+  "oauth_ui_enabled": true,
+  "agent_name_editable_after_spawn": true,
+  "secrets_storage_mode": "encrypted_vault",
+  "write_plaintext_secrets_to_env": false,
+  "show_only_masked_secrets_in_ui": true
 }

@@ -5,6 +5,7 @@ import type { AgentStatus } from "../types";
 interface AgentPanelProps {
   agents: Agent[];
   maxSubagents: number;
+  renameEnabled: boolean;
   onToggleChat: (agentId: string) => void;
   onSpawn: (input: {
     agentName: string;
@@ -16,21 +17,26 @@ interface AgentPanelProps {
     status: AgentStatus,
     kaizenReviewApproved: boolean
   ) => Promise<void>;
+  onRename: (agentId: string, newName: string) => Promise<void>;
 }
 
 /** Sidebar showing all agents and their status. Click to toggle chat. */
 function AgentPanel({
   agents,
   maxSubagents,
+  renameEnabled,
   onToggleChat,
   onSpawn,
   onSetStatus,
+  onRename,
 }: AgentPanelProps) {
   const [agentName, setAgentName] = useState("Builder-1");
   const [taskId, setTaskId] = useState("task-001");
   const [objective, setObjective] = useState("Implement requested feature slice");
   const [spawning, setSpawning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingName, setEditingName] = useState("");
 
   const activeCount = useMemo(
     () => agents.filter((agent) => agent.status !== "done").length,
@@ -87,6 +93,36 @@ function AgentPanel({
     }
   };
 
+  const startRename = (agent: Agent) => {
+    if (!renameEnabled) return;
+    setEditingId(agent.id);
+    setEditingName(agent.name);
+  };
+
+  const confirmRename = async (agentId: string) => {
+    const trimmed = editingName.trim();
+    if (!trimmed) {
+      setEditingId(null);
+      return;
+    }
+    setError(null);
+    try {
+      await onRename(agentId, trimmed);
+    } catch (renameError) {
+      setError(
+        renameError instanceof Error
+          ? renameError.message
+          : "Failed to rename agent."
+      );
+    }
+    setEditingId(null);
+  };
+
+  const cancelRename = () => {
+    setEditingId(null);
+    setEditingName("");
+  };
+
   return (
     <div className="agent-panel">
       <h3>Agents</h3>
@@ -125,7 +161,27 @@ function AgentPanel({
         <ul className="agent-list">
           {agents.map((agent) => (
             <li key={agent.id} className={`agent-item agent-${agent.status}`}>
-              <span className="agent-name">{agent.name}</span>
+              {editingId === agent.id ? (
+                <input
+                  className="agent-rename-input"
+                  value={editingName}
+                  onChange={(e) => setEditingName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") void confirmRename(agent.id);
+                    if (e.key === "Escape") cancelRename();
+                  }}
+                  onBlur={() => void confirmRename(agent.id)}
+                  autoFocus
+                />
+              ) : (
+                <span
+                  className={`agent-name ${renameEnabled ? "agent-name-editable" : ""}`}
+                  onClick={() => startRename(agent)}
+                  title={renameEnabled ? "Click to rename" : ""}
+                >
+                  {agent.name}
+                </span>
+              )}
               <span className="agent-status">{agent.status}</span>
               <button
                 className="agent-toggle"

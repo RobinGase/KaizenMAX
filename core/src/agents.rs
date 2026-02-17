@@ -89,6 +89,47 @@ impl AgentRegistry {
         self.agents.iter().find(|a| a.id == agent_id)
     }
 
+    /// Rename an agent. Validates length, charset, uniqueness, and reserved names.
+    pub fn rename(&mut self, agent_id: &str, new_name: &str) -> Result<(), String> {
+        let trimmed = new_name.trim();
+
+        if trimmed.is_empty() || trimmed.len() > 64 {
+            return Err("Agent name must be 1-64 characters.".to_string());
+        }
+
+        if !trimmed
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == ' ' || c == '_')
+        {
+            return Err(
+                "Agent name may only contain alphanumeric characters, hyphens, underscores, and spaces."
+                    .to_string(),
+            );
+        }
+
+        let reserved = ["kaizen", "system", "admin", "operator", "human"];
+        if reserved.contains(&trimmed.to_lowercase().as_str()) {
+            return Err(format!("'{}' is a reserved name.", trimmed));
+        }
+
+        let has_duplicate = self
+            .agents
+            .iter()
+            .any(|a| a.id != agent_id && a.name.eq_ignore_ascii_case(trimmed));
+        if has_duplicate {
+            return Err(format!("Another agent already has the name '{}'.", trimmed));
+        }
+
+        let agent = self
+            .agents
+            .iter_mut()
+            .find(|a| a.id == agent_id)
+            .ok_or_else(|| format!("Agent not found: {agent_id}"))?;
+
+        agent.name = trimmed.to_string();
+        Ok(())
+    }
+
     /// Transition an agent to a new status.
     ///
     /// Enforced rules (from policy):
@@ -204,5 +245,65 @@ mod tests {
 
         let result = registry.set_status("a1", AgentStatus::Done, true);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_rename_agent() {
+        let mut registry = AgentRegistry::new(2);
+        registry
+            .spawn("a1".into(), "Agent1".into(), "t1".into(), "Task1".into())
+            .unwrap();
+
+        registry.rename("a1", "Builder-Alpha").unwrap();
+        assert_eq!(registry.get("a1").unwrap().name, "Builder-Alpha");
+    }
+
+    #[test]
+    fn test_rename_rejects_reserved_names() {
+        let mut registry = AgentRegistry::new(2);
+        registry
+            .spawn("a1".into(), "Agent1".into(), "t1".into(), "Task1".into())
+            .unwrap();
+
+        let result = registry.rename("a1", "Kaizen");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("reserved"));
+    }
+
+    #[test]
+    fn test_rename_rejects_duplicates() {
+        let mut registry = AgentRegistry::new(3);
+        registry
+            .spawn("a1".into(), "Agent1".into(), "t1".into(), "Task1".into())
+            .unwrap();
+        registry
+            .spawn("a2".into(), "Agent2".into(), "t2".into(), "Task2".into())
+            .unwrap();
+
+        let result = registry.rename("a1", "Agent2");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("already has the name"));
+    }
+
+    #[test]
+    fn test_rename_rejects_invalid_chars() {
+        let mut registry = AgentRegistry::new(2);
+        registry
+            .spawn("a1".into(), "Agent1".into(), "t1".into(), "Task1".into())
+            .unwrap();
+
+        let result = registry.rename("a1", "Agent<script>");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_rename_rejects_empty_or_long() {
+        let mut registry = AgentRegistry::new(2);
+        registry
+            .spawn("a1".into(), "Agent1".into(), "t1".into(), "Task1".into())
+            .unwrap();
+
+        assert!(registry.rename("a1", "").is_err());
+        assert!(registry.rename("a1", &"x".repeat(65)).is_err());
     }
 }

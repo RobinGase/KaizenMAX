@@ -67,6 +67,37 @@
       "type": "boolean",
       "default": true,
       "description": "Use only provider-hosted inference APIs (no local model hosting)."
+    },
+    "credentials_ui_enabled": {
+      "type": "boolean",
+      "default": true,
+      "description": "Show credential management section in settings UI."
+    },
+    "oauth_ui_enabled": {
+      "type": "boolean",
+      "default": true,
+      "description": "Show OAuth connect/disconnect controls in settings UI."
+    },
+    "agent_name_editable_after_spawn": {
+      "type": "boolean",
+      "default": true,
+      "description": "Allow renaming agents after they are spawned."
+    },
+    "secrets_storage_mode": {
+      "type": "string",
+      "enum": ["encrypted_vault"],
+      "default": "encrypted_vault",
+      "description": "Storage backend for secrets. Only encrypted vault is supported."
+    },
+    "write_plaintext_secrets_to_env": {
+      "type": "boolean",
+      "default": false,
+      "description": "Write raw secret values to .env file. Must remain false for security."
+    },
+    "show_only_masked_secrets_in_ui": {
+      "type": "boolean",
+      "default": true,
+      "description": "Only display masked metadata for secrets in the UI. Must remain true for security."
     }
   },
   "required": [

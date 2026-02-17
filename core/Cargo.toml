@@ -19,3 +19,8 @@ regex = "1"
 sha2 = "0.10"
 hex = "0.4"
 hmac = "0.12"
+aes-gcm = "0.10"
+rand = "0.8"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }

@@ -31,6 +31,22 @@ pub struct KaizenSettings {
     pub require_human_smoke_test_before_deploy: bool,
     #[serde(default = "default_true")]
     pub provider_inference_only: bool,
+    #[serde(default = "default_true")]
+    pub credentials_ui_enabled: bool,
+    #[serde(default = "default_true")]
+    pub oauth_ui_enabled: bool,
+    #[serde(default = "default_true")]
+    pub agent_name_editable_after_spawn: bool,
+    #[serde(default = "default_encrypted_vault")]
+    pub secrets_storage_mode: String,
+    #[serde(default)]
+    pub write_plaintext_secrets_to_env: bool,
+    #[serde(default = "default_true")]
+    pub show_only_masked_secrets_in_ui: bool,
+}
+
+fn default_encrypted_vault() -> String {
+    "encrypted_vault".to_string()
 }
 
 impl Default for KaizenSettings {
@@ -48,6 +64,12 @@ impl Default for KaizenSettings {
             hard_gates_enabled: true,
             require_human_smoke_test_before_deploy: true,
             provider_inference_only: true,
+            credentials_ui_enabled: true,
+            oauth_ui_enabled: true,
+            agent_name_editable_after_spawn: true,
+            secrets_storage_mode: "encrypted_vault".to_string(),
+            write_plaintext_secrets_to_env: false,
+            show_only_masked_secrets_in_ui: true,
         }
     }
 }
@@ -66,6 +88,12 @@ pub struct SettingsPatch {
     pub hard_gates_enabled: Option<bool>,
     pub require_human_smoke_test_before_deploy: Option<bool>,
     pub provider_inference_only: Option<bool>,
+    pub credentials_ui_enabled: Option<bool>,
+    pub oauth_ui_enabled: Option<bool>,
+    pub agent_name_editable_after_spawn: Option<bool>,
+    pub secrets_storage_mode: Option<String>,
+    pub write_plaintext_secrets_to_env: Option<bool>,
+    pub show_only_masked_secrets_in_ui: Option<bool>,
 }
 
 fn default_max_subagents() -> u32 {
@@ -175,6 +203,24 @@ impl KaizenSettings {
         }
         if let Some(value) = patch.provider_inference_only {
             self.provider_inference_only = value;
+        }
+        if let Some(value) = patch.credentials_ui_enabled {
+            self.credentials_ui_enabled = value;
+        }
+        if let Some(value) = patch.oauth_ui_enabled {
+            self.oauth_ui_enabled = value;
+        }
+        if let Some(value) = patch.agent_name_editable_after_spawn {
+            self.agent_name_editable_after_spawn = value;
+        }
+        if let Some(value) = patch.secrets_storage_mode {
+            self.secrets_storage_mode = value;
+        }
+        if let Some(value) = patch.write_plaintext_secrets_to_env {
+            self.write_plaintext_secrets_to_env = value;
+        }
+        if let Some(value) = patch.show_only_masked_secrets_in_ui {
+            self.show_only_masked_secrets_in_ui = value;
         }
     }
 }

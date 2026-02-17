@@ -7,6 +7,7 @@ import type {
   KaizenSettings,
   KaizenSettingsPatch,
 } from "../types";
+import CredentialsPanel from "./CredentialsPanel";
 
 interface SettingsDrawerProps {
   isOpen: boolean;
@@ -358,6 +359,8 @@ function SettingsDrawer({
               </p>
             )}
           </section>
+
+          <CredentialsPanel enabled={settings.credentials_ui_enabled} />
 
           {error && <p className="settings-error">{error}</p>}
         </div>
