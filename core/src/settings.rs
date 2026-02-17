@@ -4,7 +4,7 @@
 //! Maps to the feature toggles defined in Section 7 of the implementation plan.
 
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KaizenSettings {
@@ -33,6 +33,41 @@ pub struct KaizenSettings {
     pub provider_inference_only: bool,
 }
 
+impl Default for KaizenSettings {
+    fn default() -> Self {
+        Self {
+            runtime_engine: "zeroclaw".to_string(),
+            openclaw_compat_enabled: false,
+            auto_spawn_subagents: false,
+            max_subagents: 5,
+            main_chat_pinned: true,
+            new_agent_chat_default_state: "closed".to_string(),
+            allow_direct_user_to_subagent_chat: true,
+            crystal_ball_enabled: true,
+            crystal_ball_default_open: false,
+            hard_gates_enabled: true,
+            require_human_smoke_test_before_deploy: true,
+            provider_inference_only: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SettingsPatch {
+    pub runtime_engine: Option<String>,
+    pub openclaw_compat_enabled: Option<bool>,
+    pub auto_spawn_subagents: Option<bool>,
+    pub max_subagents: Option<u32>,
+    pub main_chat_pinned: Option<bool>,
+    pub new_agent_chat_default_state: Option<String>,
+    pub allow_direct_user_to_subagent_chat: Option<bool>,
+    pub crystal_ball_enabled: Option<bool>,
+    pub crystal_ball_default_open: Option<bool>,
+    pub hard_gates_enabled: Option<bool>,
+    pub require_human_smoke_test_before_deploy: Option<bool>,
+    pub provider_inference_only: Option<bool>,
+}
+
 fn default_max_subagents() -> u32 {
     5
 }
@@ -51,8 +86,40 @@ impl KaizenSettings {
         Ok(settings)
     }
 
+    /// Load settings from config/defaults.json candidates with env overrides.
+    pub fn load_from_workspace() -> Self {
+        let mut settings = Self::default();
+
+        for candidate in settings_path_candidates() {
+            if !candidate.exists() {
+                continue;
+            }
+
+            match Self::from_file(&candidate) {
+                Ok(file_settings) => {
+                    tracing::info!("Loaded settings from {}", candidate.display());
+                    settings = file_settings;
+                    break;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        "Failed to parse settings file {}: {}",
+                        candidate.display(),
+                        err
+                    );
+                }
+            }
+        }
+
+        settings.apply_env_overrides();
+        settings
+    }
+
     /// Apply environment variable overrides (ADMIN_ prefix convention).
     pub fn apply_env_overrides(&mut self) {
+        if let Ok(val) = std::env::var("RUNTIME_ENGINE") {
+            self.runtime_engine = val;
+        }
         if let Ok(val) = std::env::var("ADMIN_HARD_GATES_ENABLED") {
             self.hard_gates_enabled = val.parse().unwrap_or(self.hard_gates_enabled);
         }
@@ -71,4 +138,56 @@ impl KaizenSettings {
             self.provider_inference_only = val.parse().unwrap_or(self.provider_inference_only);
         }
     }
+
+    pub fn apply_patch(&mut self, patch: SettingsPatch) {
+        if let Some(value) = patch.runtime_engine {
+            self.runtime_engine = value;
+        }
+        if let Some(value) = patch.openclaw_compat_enabled {
+            self.openclaw_compat_enabled = value;
+        }
+        if let Some(value) = patch.auto_spawn_subagents {
+            self.auto_spawn_subagents = value;
+        }
+        if let Some(value) = patch.max_subagents {
+            self.max_subagents = value;
+        }
+        if let Some(value) = patch.main_chat_pinned {
+            self.main_chat_pinned = value;
+        }
+        if let Some(value) = patch.new_agent_chat_default_state {
+            self.new_agent_chat_default_state = value;
+        }
+        if let Some(value) = patch.allow_direct_user_to_subagent_chat {
+            self.allow_direct_user_to_subagent_chat = value;
+        }
+        if let Some(value) = patch.crystal_ball_enabled {
+            self.crystal_ball_enabled = value;
+        }
+        if let Some(value) = patch.crystal_ball_default_open {
+            self.crystal_ball_default_open = value;
+        }
+        if let Some(value) = patch.hard_gates_enabled {
+            self.hard_gates_enabled = value;
+        }
+        if let Some(value) = patch.require_human_smoke_test_before_deploy {
+            self.require_human_smoke_test_before_deploy = value;
+        }
+        if let Some(value) = patch.provider_inference_only {
+            self.provider_inference_only = value;
+        }
+    }
+}
+
+fn settings_path_candidates() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    if let Ok(path) = std::env::var("KAIZEN_SETTINGS_PATH") {
+        paths.push(PathBuf::from(path));
+    }
+
+    paths.push(PathBuf::from("../config/defaults.json"));
+    paths.push(PathBuf::from("config/defaults.json"));
+
+    paths
 }

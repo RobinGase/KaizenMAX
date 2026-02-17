@@ -1,23 +1,122 @@
+import { useMemo, useState } from "react";
 import type { Agent } from "../types";
+import type { AgentStatus } from "../types";
 
 interface AgentPanelProps {
   agents: Agent[];
-  onAgentsChange: (agents: Agent[]) => void;
+  maxSubagents: number;
+  onToggleChat: (agentId: string) => void;
+  onSpawn: (input: {
+    agentName: string;
+    taskId: string;
+    objective: string;
+  }) => Promise<void>;
+  onSetStatus: (
+    agentId: string,
+    status: AgentStatus,
+    kaizenReviewApproved: boolean
+  ) => Promise<void>;
 }
 
 /** Sidebar showing all agents and their status. Click to toggle chat. */
-function AgentPanel({ agents, onAgentsChange }: AgentPanelProps) {
-  const toggleChat = (agentId: string) => {
-    onAgentsChange(
-      agents.map((a) =>
-        a.id === agentId ? { ...a, chatOpen: !a.chatOpen } : a
-      )
-    );
+function AgentPanel({
+  agents,
+  maxSubagents,
+  onToggleChat,
+  onSpawn,
+  onSetStatus,
+}: AgentPanelProps) {
+  const [agentName, setAgentName] = useState("Builder-1");
+  const [taskId, setTaskId] = useState("task-001");
+  const [objective, setObjective] = useState("Implement requested feature slice");
+  const [spawning, setSpawning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const activeCount = useMemo(
+    () => agents.filter((agent) => agent.status !== "done").length,
+    [agents]
+  );
+
+  const canSpawn = activeCount < maxSubagents;
+
+  const handleSpawn = async () => {
+    if (!agentName.trim() || !taskId.trim() || !objective.trim()) {
+      setError("Agent name, task ID, and objective are required.");
+      return;
+    }
+
+    setError(null);
+    setSpawning(true);
+    try {
+      await onSpawn({
+        agentName: agentName.trim(),
+        taskId: taskId.trim(),
+        objective: objective.trim(),
+      });
+      setAgentName((name) => {
+        const index = Number(name.match(/(\d+)$/)?.[1] ?? "1") + 1;
+        return `Builder-${index}`;
+      });
+      setTaskId((id) => {
+        const index = Number(id.match(/(\d+)$/)?.[1] ?? "1") + 1;
+        return `task-${String(index).padStart(3, "0")}`;
+      });
+    } catch (spawnError) {
+      setError(
+        spawnError instanceof Error ? spawnError.message : "Failed to spawn agent."
+      );
+    } finally {
+      setSpawning(false);
+    }
+  };
+
+  const handleSetStatus = async (
+    agentId: string,
+    status: AgentStatus,
+    kaizenReviewApproved: boolean
+  ) => {
+    setError(null);
+    try {
+      await onSetStatus(agentId, status, kaizenReviewApproved);
+    } catch (statusError) {
+      setError(
+        statusError instanceof Error
+          ? statusError.message
+          : "Failed to update agent status."
+      );
+    }
   };
 
   return (
     <div className="agent-panel">
       <h3>Agents</h3>
+      <p className="agent-capacity">
+        Active: {activeCount} / {maxSubagents}
+      </p>
+
+      <div className="agent-spawn-form">
+        <input
+          value={agentName}
+          onChange={(e) => setAgentName(e.target.value)}
+          placeholder="Agent name"
+        />
+        <input
+          value={taskId}
+          onChange={(e) => setTaskId(e.target.value)}
+          placeholder="Task ID"
+        />
+        <textarea
+          value={objective}
+          onChange={(e) => setObjective(e.target.value)}
+          placeholder="Objective"
+          rows={2}
+        />
+        <button disabled={!canSpawn || spawning} onClick={() => void handleSpawn()}>
+          {spawning ? "Spawning..." : "Spawn Agent"}
+        </button>
+      </div>
+      {error && <p className="agent-error">{error}</p>}
+
       {agents.length === 0 ? (
         <p className="agent-empty">
           No sub-agents active. Ask Kaizen to spawn agents when needed.
@@ -25,16 +124,38 @@ function AgentPanel({ agents, onAgentsChange }: AgentPanelProps) {
       ) : (
         <ul className="agent-list">
           {agents.map((agent) => (
-            <li
-              key={agent.id}
-              className={`agent-item agent-${agent.status}`}
-              onClick={() => toggleChat(agent.id)}
-            >
+            <li key={agent.id} className={`agent-item agent-${agent.status}`}>
               <span className="agent-name">{agent.name}</span>
               <span className="agent-status">{agent.status}</span>
-              <span className="agent-toggle">
-                {agent.chatOpen ? "[-]" : "[+]"}
-              </span>
+              <button
+                className="agent-toggle"
+                onClick={() => onToggleChat(agent.id)}
+                type="button"
+              >
+                {agent.chatOpen ? "Hide" : "Chat"}
+              </button>
+              <div className="agent-actions">
+                <button
+                  type="button"
+                  onClick={() => void handleSetStatus(agent.id, "active", false)}
+                >
+                  Active
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    void handleSetStatus(agent.id, "review_pending", false)
+                  }
+                >
+                  Review
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleSetStatus(agent.id, "done", true)}
+                >
+                  Done
+                </button>
+              </div>
             </li>
           ))}
         </ul>

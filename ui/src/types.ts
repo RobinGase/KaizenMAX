@@ -6,6 +6,12 @@ export type AgentStatus =
   | "review_pending"
   | "done";
 
+export interface ChatMessage {
+  role: "user" | "kaizen" | "agent";
+  content: string;
+  timestamp: string;
+}
+
 /** Sub-agent representation */
 export interface Agent {
   id: string;
@@ -14,6 +20,7 @@ export interface Agent {
   objective: string;
   status: AgentStatus;
   chatOpen: boolean;
+  messages: ChatMessage[];
 }
 
 /** Gate states - mirrors core/src/gate_engine.rs */
@@ -24,6 +31,39 @@ export type GateState =
   | "human_smoke_test"
   | "deploy"
   | "complete";
+
+export interface GateConditions {
+  plan_defined: boolean;
+  plan_acknowledged: boolean;
+  execution_artifacts_present: boolean;
+  passed_reasoners_test: boolean;
+  kaizen_review_approved: boolean;
+  human_smoke_test_passed: boolean;
+  deploy_validation_passed: boolean;
+}
+
+export interface GateSnapshot {
+  current_state: GateState;
+  conditions: GateConditions;
+  hard_gates_enabled: boolean;
+}
+
+export type GateConditionPatch = Partial<GateConditions>;
+
+export interface GateTransitionResult {
+  allowed: boolean;
+  from: GateState;
+  to: GateState;
+  blocked_by: string[];
+}
+
+export interface ChatResponse {
+  reply: string;
+  source: string;
+  target: string;
+  active_agents: number;
+  gate_state: GateState;
+}
 
 /** Crystal Ball event */
 export interface CrystalBallEvent {
@@ -37,6 +77,74 @@ export interface CrystalBallEvent {
   taskId: string;
   message: string;
   visibility: "operator" | "admin" | "audit";
+}
+
+export interface CrystalBallHealth {
+  enabled: boolean;
+  mode: string;
+  mattermost_configured: boolean;
+  mattermost_connected: boolean;
+  local_archive_path: string;
+  local_archive_ttl_days: number;
+  local_event_count: number;
+  archive_integrity_valid: boolean;
+  archive_hmac_configured: boolean;
+  archive_signed_records: number;
+  archive_legacy_unsigned_records: number;
+  archive_mac_verified_records: number;
+  archive_mac_missing_records: number;
+  archive_mac_unverified_records: number;
+  archive_last_hash: string;
+}
+
+export interface ArchiveIntegrityReport {
+  valid: boolean;
+  total_records: number;
+  signed_records: number;
+  legacy_unsigned_records: number;
+  hmac_configured: boolean;
+  mac_verified_records: number;
+  mac_missing_records: number;
+  mac_unverified_records: number;
+  first_invalid_line: number | null;
+  reason: string | null;
+  last_hash: string;
+}
+
+export interface MattermostValidation {
+  reachable: boolean;
+  auth_ok: boolean;
+  channel_ok: boolean;
+  user_id: string | null;
+  username: string | null;
+  channel_id: string;
+  channel_name: string | null;
+  channel_display_name: string | null;
+  error: string | null;
+}
+
+export interface MattermostSmokeResult {
+  sent: boolean;
+  fetched: boolean;
+  detected: boolean;
+  post_id: string | null;
+  marker: string;
+  error: string | null;
+}
+
+export interface CrystalBallValidateResponse {
+  enabled: boolean;
+  configured: boolean;
+  validation: MattermostValidation | null;
+  error: string | null;
+}
+
+export interface CrystalBallSmokeResponse {
+  enabled: boolean;
+  configured: boolean;
+  success: boolean;
+  smoke: MattermostSmokeResult | null;
+  error: string | null;
 }
 
 /** Settings from config/defaults.json */
@@ -54,3 +162,5 @@ export interface KaizenSettings {
   require_human_smoke_test_before_deploy: boolean;
   provider_inference_only: boolean;
 }
+
+export type KaizenSettingsPatch = Partial<KaizenSettings>;

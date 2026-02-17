@@ -1,39 +1,22 @@
 import { useState } from "react";
+import type { ChatMessage, GateState } from "../types";
 
-interface Message {
-  role: "user" | "kaizen";
-  content: string;
-  timestamp: string;
+interface KaizenChatProps {
+  messages: ChatMessage[];
+  gateState: GateState;
+  sending: boolean;
+  onSend: (message: string) => Promise<void>;
 }
 
 /** Main Kaizen chat panel - always visible (main_chat_pinned: true) */
-function KaizenChat() {
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      role: "kaizen",
-      content: "Kaizen online. Ready to plan, reason, and review.",
-      timestamp: new Date().toISOString(),
-    },
-  ]);
+function KaizenChat({ messages, gateState, sending, onSend }: KaizenChatProps) {
   const [input, setInput] = useState("");
 
-  const handleSend = () => {
-    if (!input.trim()) return;
-    const userMsg: Message = {
-      role: "user",
-      content: input.trim(),
-      timestamp: new Date().toISOString(),
-    };
-    setMessages((prev) => [...prev, userMsg]);
+  const handleSend = async () => {
+    const content = input.trim();
+    if (!content || sending) return;
     setInput("");
-
-    // TODO: Send to ZeroClaw gateway /api/chat and stream response
-    const kaizenReply: Message = {
-      role: "kaizen",
-      content: "[Gateway integration pending - Phase C/D]",
-      timestamp: new Date().toISOString(),
-    };
-    setMessages((prev) => [...prev, kaizenReply]);
+    await onSend(content);
   };
 
   return (
@@ -41,12 +24,13 @@ function KaizenChat() {
       <div className="chat-header">
         <h2>Kaizen</h2>
         <span className="status-badge">Primary Agent</span>
+        <span className="gate-badge">Gate: {gateState}</span>
       </div>
       <div className="chat-messages">
         {messages.map((msg, i) => (
           <div key={i} className={`message message-${msg.role}`}>
             <span className="message-role">
-              {msg.role === "kaizen" ? "Kaizen" : "You"}
+              {msg.role === "kaizen" ? "Kaizen" : msg.role === "agent" ? "Agent" : "You"}
             </span>
             <p>{msg.content}</p>
           </div>
@@ -57,10 +41,16 @@ function KaizenChat() {
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && handleSend()}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              void handleSend();
+            }
+          }}
           placeholder="Talk to Kaizen..."
         />
-        <button onClick={handleSend}>Send</button>
+        <button onClick={() => void handleSend()} disabled={sending}>
+          {sending ? "Sending..." : "Send"}
+        </button>
       </div>
     </div>
   );

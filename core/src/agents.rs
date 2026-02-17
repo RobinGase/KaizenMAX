@@ -41,6 +41,10 @@ impl AgentRegistry {
         }
     }
 
+    pub fn set_max_subagents(&mut self, max_subagents: usize) {
+        self.max_subagents = max_subagents;
+    }
+
     /// Count currently active (non-done) agents.
     pub fn active_count(&self) -> usize {
         self.agents
@@ -81,16 +85,50 @@ impl AgentRegistry {
         &self.agents
     }
 
+    pub fn get(&self, agent_id: &str) -> Option<&SubAgent> {
+        self.agents.iter().find(|a| a.id == agent_id)
+    }
+
     /// Transition an agent to a new status.
-    pub fn set_status(&mut self, agent_id: &str, status: AgentStatus) -> Result<(), String> {
+    ///
+    /// Enforced rules (from policy):
+    /// - idle -> active requires assignment
+    /// - active -> review_pending requires deliverable
+    /// - review_pending -> done requires Kaizen approval
+    /// - review_pending -> active allowed for rework
+    pub fn set_status(
+        &mut self,
+        agent_id: &str,
+        status: AgentStatus,
+        kaizen_review_approved: bool,
+    ) -> Result<(), String> {
         let agent = self
             .agents
             .iter_mut()
             .find(|a| a.id == agent_id)
             .ok_or_else(|| format!("Agent not found: {agent_id}"))?;
 
-        // Enforce: cannot finalize (Done) from ReviewPending without approval
-        // This check is simplified; real implementation ties into gate_engine
+        let from = agent.status;
+        let to = status;
+
+        let allowed = match (from, to) {
+            (AgentStatus::Idle, AgentStatus::Active) => true,
+            (AgentStatus::Active, AgentStatus::ReviewPending) => true,
+            (AgentStatus::ReviewPending, AgentStatus::Done) => kaizen_review_approved,
+            (AgentStatus::ReviewPending, AgentStatus::Active) => true,
+            (AgentStatus::Active, AgentStatus::Blocked) => true,
+            (AgentStatus::Blocked, AgentStatus::Active) => true,
+            // Idempotent state updates are allowed.
+            (a, b) if a == b => true,
+            _ => false,
+        };
+
+        if !allowed {
+            return Err(format!(
+                "Invalid lifecycle transition: {from:?} -> {to:?} (kaizen_review_approved={kaizen_review_approved})"
+            ));
+        }
+
         agent.status = status;
         Ok(())
     }
@@ -129,8 +167,42 @@ mod tests {
         registry
             .spawn("a1".into(), "Agent1".into(), "t1".into(), "Task1".into())
             .unwrap();
-        registry.set_status("a1", AgentStatus::Done).unwrap();
+        registry
+            .set_status("a1", AgentStatus::Active, false)
+            .unwrap();
+        registry
+            .set_status("a1", AgentStatus::ReviewPending, false)
+            .unwrap();
+        registry.set_status("a1", AgentStatus::Done, true).unwrap();
         let result = registry.spawn("a2".into(), "Agent2".into(), "t2".into(), "Task2".into());
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_cannot_finish_without_kaizen_approval() {
+        let mut registry = AgentRegistry::new(1);
+        registry
+            .spawn("a1".into(), "Agent1".into(), "t1".into(), "Task1".into())
+            .unwrap();
+        registry
+            .set_status("a1", AgentStatus::Active, false)
+            .unwrap();
+        registry
+            .set_status("a1", AgentStatus::ReviewPending, false)
+            .unwrap();
+
+        let result = registry.set_status("a1", AgentStatus::Done, false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_invalid_skip_transition_is_blocked() {
+        let mut registry = AgentRegistry::new(1);
+        registry
+            .spawn("a1".into(), "Agent1".into(), "t1".into(), "Task1".into())
+            .unwrap();
+
+        let result = registry.set_status("a1", AgentStatus::Done, true);
+        assert!(result.is_err());
     }
 }

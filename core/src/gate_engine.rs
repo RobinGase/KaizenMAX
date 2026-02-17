@@ -57,6 +57,66 @@ pub struct TransitionResult {
     pub blocked_by: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GateRuntime {
+    pub current_state: GateState,
+    pub conditions: GateConditions,
+}
+
+impl Default for GateRuntime {
+    fn default() -> Self {
+        Self {
+            current_state: GateState::Plan,
+            conditions: GateConditions::default(),
+        }
+    }
+}
+
+impl GateRuntime {
+    pub fn update_conditions(&mut self, patch: GateConditionPatch) {
+        if let Some(value) = patch.plan_defined {
+            self.conditions.plan_defined = value;
+        }
+        if let Some(value) = patch.plan_acknowledged {
+            self.conditions.plan_acknowledged = value;
+        }
+        if let Some(value) = patch.execution_artifacts_present {
+            self.conditions.execution_artifacts_present = value;
+        }
+        if let Some(value) = patch.passed_reasoners_test {
+            self.conditions.passed_reasoners_test = value;
+        }
+        if let Some(value) = patch.kaizen_review_approved {
+            self.conditions.kaizen_review_approved = value;
+        }
+        if let Some(value) = patch.human_smoke_test_passed {
+            self.conditions.human_smoke_test_passed = value;
+        }
+        if let Some(value) = patch.deploy_validation_passed {
+            self.conditions.deploy_validation_passed = value;
+        }
+    }
+
+    pub fn advance(&mut self) -> TransitionResult {
+        let result = try_transition(self.current_state, &self.conditions);
+        if result.allowed {
+            self.current_state = result.to;
+        }
+        result
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GateConditionPatch {
+    pub plan_defined: Option<bool>,
+    pub plan_acknowledged: Option<bool>,
+    pub execution_artifacts_present: Option<bool>,
+    pub passed_reasoners_test: Option<bool>,
+    pub kaizen_review_approved: Option<bool>,
+    pub human_smoke_test_passed: Option<bool>,
+    pub deploy_validation_passed: Option<bool>,
+}
+
 /// Attempt to transition from current state to the next.
 pub fn try_transition(current: GateState, conditions: &GateConditions) -> TransitionResult {
     let (next, missing) = match current {
@@ -152,9 +212,11 @@ mod tests {
         };
         let result = try_transition(GateState::Review, &conditions);
         assert!(!result.allowed);
-        assert!(result
-            .blocked_by
-            .contains(&"passed_reasoners_test".to_string()));
+        assert!(
+            result
+                .blocked_by
+                .contains(&"passed_reasoners_test".to_string())
+        );
     }
 
     #[test]
@@ -162,8 +224,28 @@ mod tests {
         let conditions = GateConditions::default();
         let result = try_transition(GateState::HumanSmokeTest, &conditions);
         assert!(!result.allowed);
-        assert!(result
-            .blocked_by
-            .contains(&"human_smoke_test_passed".to_string()));
+        assert!(
+            result
+                .blocked_by
+                .contains(&"human_smoke_test_passed".to_string())
+        );
+    }
+
+    #[test]
+    fn test_runtime_advance_updates_state() {
+        let mut runtime = GateRuntime::default();
+        runtime.update_conditions(GateConditionPatch {
+            plan_defined: Some(true),
+            plan_acknowledged: Some(true),
+            execution_artifacts_present: None,
+            passed_reasoners_test: None,
+            kaizen_review_approved: None,
+            human_smoke_test_passed: None,
+            deploy_validation_passed: None,
+        });
+
+        let result = runtime.advance();
+        assert!(result.allowed);
+        assert_eq!(runtime.current_state, GateState::Execute);
     }
 }

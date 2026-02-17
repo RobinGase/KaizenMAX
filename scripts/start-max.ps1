@@ -47,11 +47,24 @@ if (-not $UIOnly) {
 
 # ---- Start UI ----
 if (-not $CoreOnly) {
-    Write-Host "[Kaizen MAX] Starting UI dev server..." -ForegroundColor Green
-    Push-Location $UIDir
-    try {
-        & npm run dev
-    } finally {
-        Pop-Location
+    $desktopCandidates = @(
+        (Join-Path $UIDir "desktop\KaizenMAX.exe"),
+        (Join-Path $UIDir "dist\KaizenMAX.exe"),
+        (Join-Path $UIDir "build\KaizenMAX.exe")
+    )
+
+    $desktopExe = $desktopCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+    if ($desktopExe) {
+        Write-Host "[Kaizen MAX] Starting packaged desktop UI from $desktopExe" -ForegroundColor Green
+        Start-Process -FilePath $desktopExe -WorkingDirectory $UIDir
+    } else {
+        Write-Host "[Kaizen MAX] Packaged UI not found. Starting Vite dev server..." -ForegroundColor Yellow
+        Push-Location $UIDir
+        try {
+            & npm run dev
+        } finally {
+            Pop-Location
+        }
     }
 }
