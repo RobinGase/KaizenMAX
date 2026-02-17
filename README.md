@@ -15,12 +15,12 @@ The product focuses on one primary agent named Kaizen, explicit user controlled 
 
 ### Foundation implemented
 
-- Rust gateway service with settings, chat, agent, gate, and event APIs.
-- Enforced gate state machine and agent lifecycle transition checks.
-- React and TypeScript dashboard with Kaizen chat, agent panel, per agent chat windows, and settings drawer.
-- Crystal Ball live feed UI with drag and resize support.
-- Local event archive with retention compaction, hash chain integrity, and optional HMAC signing.
-- Optional Mattermost bridge with validation and smoke test endpoints.
+- DevMaster runtime includes settings, chat, agent, gate, and event APIs.
+- DevMaster runtime enforces gate state transitions and agent lifecycle checks.
+- UI includes Kaizen chat, agent panel, per agent chat windows, and settings controls.
+- Crystal Ball includes live feed behavior with drag and resize support.
+- Local archive includes retention compaction, hash chain integrity, and optional HMAC signing.
+- Optional Mattermost bridge includes validation and smoke endpoints.
 
 ### Remaining work
 
@@ -44,6 +44,8 @@ KaizenMAX/
 
 ## Runtime APIs
 
+These endpoints are currently wired in `core/src/main.rs` on the `DevMaster` branch.
+
 - `GET /health`
 - `GET /api/settings`
 - `PATCH /api/settings`
@@ -62,11 +64,13 @@ KaizenMAX/
 
 ## Local Setup
 
-1. Copy `.env.example` to `.env` and fill required keys.
+1. Ensure `.env` exists at repository root, or run `scripts/start-max.ps1 -InitEnv` once to create it from `.env.example`.
 2. Run `cargo test` in `core/`.
 3. Run `npm install` in `ui/`.
 4. Run `npm run build` in `ui/`.
-5. Start services with `scripts/start-max.ps1`.
+5. Start services with `scripts/start-max.bat` or `scripts/start-max.ps1`.
+
+The launcher binds child processes to a kill on close Job Object. If one process exits or the terminal closes, the remaining pipeline processes are stopped automatically.
 
 ## Branch Workflow
 
