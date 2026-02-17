@@ -514,6 +514,27 @@ body {
   padding: 0.62rem;
 }
 
+.provider-bridge-card {
+  background: rgba(17, 29, 43, 0.86);
+  border: 1px solid #2d4b6b;
+  border-radius: 10px;
+  padding: 0.62rem;
+}
+
+.provider-bridge-header {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+
+.provider-bridge-header h4 {
+  color: var(--ink);
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 .audit-card-header {
   align-items: center;
   display: flex;

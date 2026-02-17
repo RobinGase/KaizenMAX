@@ -413,6 +413,23 @@ async fn build_crystal_ball_client(
     CrystalBallClient::from_env()
 }
 
+async fn refresh_crystal_ball_client(state: &AppState) {
+    let settings = state.settings.read().await.clone();
+    let new_client = build_crystal_ball_client(&settings, state.vault.as_ref().as_ref()).await;
+    let client_available = new_client.is_some();
+
+    {
+        let mut crystal_ball = state.crystal_ball.write().await;
+        *crystal_ball = new_client;
+    }
+
+    if settings.crystal_ball_enabled && !client_available {
+        tracing::warn!(
+            "Crystal Ball enabled but Mattermost client is not configured. Running local feed only."
+        );
+    }
+}
+
 async fn get_settings(State(state): State<AppState>) -> Json<KaizenSettings> {
     Json(state.settings.read().await.clone())
 }
@@ -421,7 +438,7 @@ async fn patch_settings(
     State(state): State<AppState>,
     Json(patch): Json<SettingsPatch>,
 ) -> Result<Json<KaizenSettings>, (StatusCode, String)> {
-    let updated_settings = {
+    {
         let mut settings = state.settings.write().await;
         settings.apply_patch(patch);
         if settings.max_subagents > 20 {
@@ -441,23 +458,9 @@ async fn patch_settings(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
         tracing::info!("Persisted runtime settings to {}", persisted_path.display());
 
-        settings.clone()
     };
 
-    let new_crystal_ball =
-        build_crystal_ball_client(&updated_settings, state.vault.as_ref().as_ref()).await;
-    let client_available = new_crystal_ball.is_some();
-
-    {
-        let mut crystal_ball = state.crystal_ball.write().await;
-        *crystal_ball = new_crystal_ball;
-    }
-
-    if updated_settings.crystal_ball_enabled && !client_available {
-        tracing::warn!(
-            "Crystal Ball enabled but Mattermost client is not configured. Running local feed only."
-        );
-    }
+    refresh_crystal_ball_client(&state).await;
 
     {
         let mut events = state.events.write().await;
@@ -1272,6 +1275,10 @@ async fn store_secret(
     )
     .await;
 
+    if provider.eq_ignore_ascii_case("mattermost") {
+        refresh_crystal_ball_client(&state).await;
+    }
+
     Ok(Json(meta))
 }
 
@@ -1301,6 +1308,10 @@ async fn revoke_secret(
         },
     )
     .await;
+
+    if provider.eq_ignore_ascii_case("mattermost") {
+        refresh_crystal_ball_client(&state).await;
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }

@@ -425,7 +425,105 @@ function SettingsDrawer({
                   Store the Mattermost bot token below in Provider Credentials under
                   "Mattermost Bot".
                 </p>
+
+                <label className="settings-toggle">
+                  <input
+                    type="checkbox"
+                    checked={settings.crystal_ball_enabled}
+                    disabled={saving}
+                    onChange={(event) =>
+                      void save({ crystal_ball_enabled: event.target.checked })
+                    }
+                  />
+                  Enable Crystal Ball Bridge
+                </label>
+
+                <label className="settings-toggle">
+                  <input
+                    type="checkbox"
+                    checked={settings.crystal_ball_default_open}
+                    disabled={saving}
+                    onChange={(event) =>
+                      void save({ crystal_ball_default_open: event.target.checked })
+                    }
+                  />
+                  Open Crystal Ball on Startup
+                </label>
               </div>
+
+              <section className="provider-bridge-card">
+                <div className="provider-bridge-header">
+                  <h4>Mattermost Bridge Validation</h4>
+                  <div className="audit-actions">
+                    <button
+                      type="button"
+                      onClick={() => void refreshAudit()}
+                      disabled={refreshingAudit || !settings.crystal_ball_enabled}
+                    >
+                      {refreshingAudit ? "Refreshing..." : "Refresh"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void validateBridge()}
+                      disabled={validatingBridge || !settings.crystal_ball_enabled}
+                    >
+                      {validatingBridge ? "Validating..." : "Validate"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void runSmoke()}
+                      disabled={runningSmoke || !settings.crystal_ball_enabled}
+                    >
+                      {runningSmoke ? "Running..." : "Smoke"}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="audit-grid">
+                  <span>Bridge</span>
+                  <strong>{settings.crystal_ball_enabled ? "enabled" : "disabled"}</strong>
+
+                  <span>Mode</span>
+                  <strong>{crystalBallHealth?.mode ?? "unknown"}</strong>
+
+                  <span>Mattermost</span>
+                  <strong>
+                    {crystalBallHealth?.mattermost_configured
+                      ? crystalBallHealth?.mattermost_connected
+                        ? "connected"
+                        : "configured (offline)"
+                      : "local-only"}
+                  </strong>
+                </div>
+
+                {!settings.crystal_ball_enabled && (
+                  <p className="settings-note">
+                    Enable Crystal Ball Bridge to run provider validation and smoke tests.
+                  </p>
+                )}
+
+                {crystalBallValidation && (
+                  <div className="audit-summary">
+                    <span>Validation</span>
+                    <strong>
+                      {crystalBallValidation.error
+                        ? `failed (${crystalBallValidation.error})`
+                        : "ok"}
+                    </strong>
+                  </div>
+                )}
+
+                {crystalBallSmoke && (
+                  <div className="audit-summary">
+                    <span>Smoke Test</span>
+                    <strong>
+                      {crystalBallSmoke.success
+                        ? `ok (${crystalBallSmoke.smoke?.marker ?? "no marker"})`
+                        : `failed (${crystalBallSmoke.error ?? "unknown"})`}
+                    </strong>
+                  </div>
+                )}
+              </section>
 
               {loadingVaultStatus && <p className="settings-note">Loading vault status...</p>}
 
