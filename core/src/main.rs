@@ -46,6 +46,10 @@ use zeroclaw_gateway::{
     },
     settings::{KaizenSettings, SettingsPatch},
     vault::{SecretMetadata, SecretVault, VaultStatus},
+    webkeys::{
+        WebKeysService, WebProviderType, VirtualKeyPublicRecord,
+        VirtualKeyCreationResult, WebProviderBindingPublicRecord,
+    },
 };
 
 const LOCAL_EVENT_RETENTION_SECS: f64 = 72.0 * 3600.0;
@@ -67,6 +71,8 @@ struct AppState {
     /// Per-session conversation history (keyed by "kaizen" or agent_id).
     conversations: Arc<RwLock<HashMap<String, Vec<InferenceChatMessage>>>>,
     next_id: Arc<AtomicU64>,
+    /// WebKeys service for virtual key management
+    webkeys: Option<WebKeysService>,
 }
 
 #[derive(Serialize)]
@@ -1239,6 +1245,412 @@ async fn chat_stream(
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
+// ---- WebKeys Routes ----
+
+#[derive(Debug, Deserialize)]
+struct CreateVirtualKeyHttpRequest {
+    name: String,
+    provider_binding_ids: Vec<String>,
+    default_binding_id: Option<String>,
+    model_allowlist: Option<Vec<String>>,
+    #[serde(default)]
+    metadata: Option<std::collections::HashMap<String, String>>,
+    rate_limit_rpm: Option<u32>,
+    rate_limit_tpm: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateVirtualKeyHttpRequest {
+    name: Option<String>,
+    enabled: Option<bool>,
+    provider_binding_ids: Option<Vec<String>>,
+    default_binding_id: Option<String>,
+    model_allowlist: Option<Vec<String>>,
+    metadata: Option<std::collections::HashMap<String, String>>,
+    rate_limit_rpm: Option<u32>,
+    rate_limit_tpm: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateProviderBindingHttpRequest {
+    provider_type: WebProviderType,
+    account_id: String,
+    display_name: String,
+    profile_path: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateProviderBindingHttpRequest {
+    display_name: Option<String>,
+    enabled: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VerifyVirtualKeyRequest {
+    raw_key: String,
+    preferred_binding_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct VerifyVirtualKeyResponse {
+    valid: bool,
+    key: Option<VirtualKeyPublicRecord>,
+    selected_binding_id: Option<String>,
+    error: Option<String>,
+}
+
+// Admin: Virtual Key Routes
+
+async fn webkeys_list_keys(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<VirtualKeyPublicRecord>>, StatusCode> {
+    let webkeys = state.webkeys.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let keys = webkeys.list_virtual_keys().await;
+    Ok(Json(keys))
+}
+
+async fn webkeys_create_key(
+    State(state): State<AppState>,
+    Json(request): Json<CreateVirtualKeyHttpRequest>,
+) -> Result<Json<VirtualKeyCreationResult>, (StatusCode, String)> {
+    let webkeys = state
+        .webkeys
+        .as_ref()
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "WebKeys not available".to_string()))?;
+
+    let internal_request = zeroclaw_gateway::webkeys::CreateVirtualKeyRequest {
+        name: request.name,
+        provider_binding_ids: request.provider_binding_ids,
+        default_binding_id: request.default_binding_id,
+        model_allowlist: request.model_allowlist,
+        metadata: request.metadata,
+        rate_limit_rpm: request.rate_limit_rpm,
+        rate_limit_tpm: request.rate_limit_tpm,
+    };
+
+    webkeys
+        .create_virtual_key(internal_request)
+        .await
+        .map(Json)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))
+}
+
+async fn webkeys_get_key(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<VirtualKeyPublicRecord>, StatusCode> {
+    let webkeys = state.webkeys.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+
+    webkeys
+        .get_virtual_key(&id)
+        .await
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+async fn webkeys_update_key(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<UpdateVirtualKeyHttpRequest>,
+) -> Result<Json<VirtualKeyPublicRecord>, (StatusCode, String)> {
+    let webkeys = state
+        .webkeys
+        .as_ref()
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "WebKeys not available".to_string()))?;
+
+    let internal_request = zeroclaw_gateway::webkeys::UpdateVirtualKeyRequest {
+        name: request.name,
+        enabled: request.enabled,
+        provider_binding_ids: request.provider_binding_ids,
+        default_binding_id: request.default_binding_id,
+        model_allowlist: request.model_allowlist,
+        metadata: request.metadata,
+        rate_limit_rpm: request.rate_limit_rpm,
+        rate_limit_tpm: request.rate_limit_tpm,
+    };
+
+    webkeys
+        .update_virtual_key(&id, internal_request)
+        .await
+        .map(Json)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))
+}
+
+async fn webkeys_delete_key(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let webkeys = state
+        .webkeys
+        .as_ref()
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "WebKeys not available".to_string()))?;
+
+    webkeys
+        .delete_virtual_key(&id)
+        .await
+        .map(|found| if found { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND })
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))
+}
+
+async fn webkeys_rotate_key(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<VirtualKeyCreationResult>, (StatusCode, String)> {
+    let webkeys = state
+        .webkeys
+        .as_ref()
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "WebKeys not available".to_string()))?;
+
+    webkeys
+        .rotate_virtual_key(&id)
+        .await
+        .map(Json)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))
+}
+
+async fn webkeys_verify_key(
+    State(state): State<AppState>,
+    Json(request): Json<VerifyVirtualKeyRequest>,
+) -> Result<Json<VerifyVirtualKeyResponse>, StatusCode> {
+    let webkeys = match state.webkeys.as_ref() {
+        Some(w) => w,
+        None => {
+            return Ok(Json(VerifyVirtualKeyResponse {
+                valid: false,
+                key: None,
+                selected_binding_id: None,
+                error: Some("WebKeys not available".to_string()),
+            }))
+        }
+    };
+
+    match webkeys
+        .verify_virtual_key(&request.raw_key, request.preferred_binding_id.as_deref())
+        .await
+    {
+        Ok((key, binding_id)) => Ok(Json(VerifyVirtualKeyResponse {
+            valid: true,
+            key: Some(key),
+            selected_binding_id: Some(binding_id),
+            error: None,
+        })),
+        Err(e) => Ok(Json(VerifyVirtualKeyResponse {
+            valid: false,
+            key: None,
+            selected_binding_id: None,
+            error: Some(e),
+        })),
+    }
+}
+
+// Admin: Provider Binding Routes
+
+async fn webkeys_list_bindings(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<WebProviderBindingPublicRecord>>, StatusCode> {
+    let webkeys = state.webkeys.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let bindings = webkeys.list_provider_bindings().await;
+    Ok(Json(bindings))
+}
+
+async fn webkeys_create_binding(
+    State(state): State<AppState>,
+    Json(request): Json<CreateProviderBindingHttpRequest>,
+) -> Result<Json<WebProviderBindingPublicRecord>, (StatusCode, String)> {
+    let webkeys = state
+        .webkeys
+        .as_ref()
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "WebKeys not available".to_string()))?;
+
+    let internal_request = zeroclaw_gateway::webkeys::CreateProviderBindingRequest {
+        provider_type: request.provider_type,
+        account_id: request.account_id,
+        display_name: request.display_name,
+        profile_path: request.profile_path,
+    };
+
+    webkeys
+        .create_provider_binding(internal_request)
+        .await
+        .map(Json)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))
+}
+
+async fn webkeys_get_binding(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<WebProviderBindingPublicRecord>, StatusCode> {
+    let webkeys = state.webkeys.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+
+    webkeys
+        .get_provider_binding(&id)
+        .await
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+async fn webkeys_update_binding(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<UpdateProviderBindingHttpRequest>,
+) -> Result<Json<WebProviderBindingPublicRecord>, (StatusCode, String)> {
+    let webkeys = state
+        .webkeys
+        .as_ref()
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "WebKeys not available".to_string()))?;
+
+    let internal_request = zeroclaw_gateway::webkeys::UpdateProviderBindingRequest {
+        display_name: request.display_name,
+        enabled: request.enabled,
+    };
+
+    webkeys
+        .update_provider_binding(&id, internal_request)
+        .await
+        .map(Json)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))
+}
+
+async fn webkeys_delete_binding(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let webkeys = state
+        .webkeys
+        .as_ref()
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "WebKeys not available".to_string()))?;
+
+    webkeys
+        .delete_provider_binding(&id)
+        .await
+        .map(|found| if found { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND })
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))
+}
+
+// Runtime: OpenAI-Compatible Routes
+
+#[derive(Debug, Deserialize)]
+struct ChatCompletionRequest {
+    model: String,
+    messages: Vec<ChatCompletionMessage>,
+    #[serde(default)]
+    stream: bool,
+    #[serde(default)]
+    max_tokens: Option<u32>,
+    #[serde(default)]
+    temperature: Option<f32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatCompletionMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ChatCompletionResponse {
+    id: String,
+    object: String,
+    created: i64,
+    model: String,
+    choices: Vec<ChatCompletionChoice>,
+    usage: ChatCompletionUsage,
+}
+
+#[derive(Debug, Serialize)]
+struct ChatCompletionChoice {
+    index: u32,
+    message: ChatCompletionResponseMessage,
+    finish_reason: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ChatCompletionResponseMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ChatCompletionUsage {
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    total_tokens: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct ModelListResponse {
+    object: String,
+    data: Vec<ModelInfo>,
+}
+
+#[derive(Debug, Serialize)]
+struct ModelInfo {
+    id: String,
+    object: String,
+    created: i64,
+    owned_by: String,
+}
+
+async fn webkeys_chat_completions(
+    State(state): State<AppState>,
+    Json(request): Json<ChatCompletionRequest>,
+) -> Result<Json<ChatCompletionResponse>, (StatusCode, String)> {
+    let _webkeys = state
+        .webkeys
+        .as_ref()
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "WebKeys not available".to_string()))?;
+
+    // TODO: Extract bearer token from Authorization header
+    // TODO: Verify virtual key and get binding
+    // TODO: Route to appropriate provider executor (ChatGPT Web / Gemini Web)
+    // TODO: Transform response to OpenAI format
+
+    // Placeholder response for now
+    let response = ChatCompletionResponse {
+        id: format!("chatcmpl-{}", uuid::Uuid::new_v4()),
+        object: "chat.completion".to_string(),
+        created: chrono::Utc::now().timestamp(),
+        model: request.model,
+        choices: vec![ChatCompletionChoice {
+            index: 0,
+            message: ChatCompletionResponseMessage {
+                role: "assistant".to_string(),
+                content: "WebKeys runtime not yet implemented. Milestone 2 complete - API surface ready.".to_string(),
+            },
+            finish_reason: "stop".to_string(),
+        }],
+        usage: ChatCompletionUsage {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+        },
+    };
+
+    Ok(Json(response))
+}
+
+async fn webkeys_list_models() -> Json<ModelListResponse> {
+    let models = vec![
+        ModelInfo {
+            id: "chatgpt-web".to_string(),
+            object: "model".to_string(),
+            created: chrono::Utc::now().timestamp(),
+            owned_by: "openai".to_string(),
+        },
+        ModelInfo {
+            id: "gemini-web".to_string(),
+            object: "model".to_string(),
+            created: chrono::Utc::now().timestamp(),
+            owned_by: "google".to_string(),
+        },
+    ];
+
+    Json(ModelListResponse {
+        object: "list".to_string(),
+        data: models,
+    })
+}
+
 #[derive(Debug, Deserialize)]
 struct SpawnAgentRequest {
     agent_name: String,
@@ -2359,6 +2771,18 @@ async fn main() {
         );
     }
 
+    // Initialize WebKeys service
+    let webkeys = match WebKeysService::new().await {
+        Ok(service) => {
+            tracing::info!("WebKeys service initialized");
+            Some(service)
+        }
+        Err(e) => {
+            tracing::warn!("WebKeys service initialization failed: {}. Virtual key endpoints will be unavailable.", e);
+            None
+        }
+    };
+
     let system_prompt = inference::load_system_prompt();
     tracing::info!(
         "Loaded Kaizen system prompt ({} chars)",
@@ -2389,6 +2813,7 @@ async fn main() {
         system_prompt: Arc::new(system_prompt),
         conversations: Arc::new(RwLock::new(HashMap::new())),
         next_id: Arc::new(AtomicU64::new(1)),
+        webkeys,
     };
 
     let mode = resolve_bind_mode();
@@ -2483,6 +2908,16 @@ async fn main() {
         .route("/api/oauth/{provider}/callback", get(oauth_callback))
         .route("/api/oauth/{provider}/refresh", post(oauth_refresh))
         .route("/api/oauth/{provider}", delete(oauth_disconnect))
+        // WebKeys admin routes
+        .route("/api/webkeys/keys", get(webkeys_list_keys).post(webkeys_create_key))
+        .route("/api/webkeys/keys/{id}", get(webkeys_get_key).patch(webkeys_update_key).delete(webkeys_delete_key))
+        .route("/api/webkeys/keys/{id}/rotate", post(webkeys_rotate_key))
+        .route("/api/webkeys/keys/verify", post(webkeys_verify_key))
+        .route("/api/webkeys/providers", get(webkeys_list_bindings).post(webkeys_create_binding))
+        .route("/api/webkeys/providers/{id}", get(webkeys_get_binding).patch(webkeys_update_binding).delete(webkeys_delete_binding))
+        // WebKeys runtime routes (OpenAI-compatible)
+        .route("/v1/chat/completions", post(webkeys_chat_completions))
+        .route("/v1/models", get(webkeys_list_models))
         .with_state(state)
         .layer(middleware::from_fn(redact_error_response_middleware))
         .layer(trace_layer)

@@ -9,5 +9,5 @@ pub mod types;
 
 // Re-export main types
 pub use types::*;
-pub use service::WebKeysService;
+pub use service::{WebKeysService, WebKeysServiceConfig};
 pub use storage::WebKeysStorage;
