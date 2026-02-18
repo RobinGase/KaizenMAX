@@ -13,5 +13,5 @@ pub mod types;
 pub use types::*;
 pub use service::{WebKeysService, WebKeysServiceConfig};
 pub use storage::WebKeysStorage;
-pub use browser::BrowserManager;
+pub use browser::{BrowserManager, SessionConfig};
 pub use executor::{WebExecutor, ChatGptExecutor, GeminiExecutor};

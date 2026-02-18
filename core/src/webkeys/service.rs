@@ -388,9 +388,14 @@ impl WebKeysService {
             .collect()
     }
 
-    /// Get a provider binding by ID
+    /// Get a provider binding by ID (public record)
     pub async fn get_provider_binding(&self, id: &str) -> Option<WebProviderBindingPublicRecord> {
         self.storage.get_binding(id).await.map(|b| b.into())
+    }
+
+    /// Get a full provider binding by ID (internal use)
+    pub async fn get_provider_binding_full(&self, id: &str) -> Option<WebProviderBinding> {
+        self.storage.get_binding(id).await
     }
 
     /// Update a provider binding

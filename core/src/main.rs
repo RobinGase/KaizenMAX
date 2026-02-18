@@ -49,6 +49,7 @@ use zeroclaw_gateway::{
     webkeys::{
         WebKeysService, WebProviderType, VirtualKeyPublicRecord,
         VirtualKeyCreationResult, WebProviderBindingPublicRecord,
+        SessionConfig, WebExecutor, ChatGptExecutor, GeminiExecutor,
     },
 };
 
@@ -1595,19 +1596,105 @@ struct ModelInfo {
 
 async fn webkeys_chat_completions(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(request): Json<ChatCompletionRequest>,
 ) -> Result<Json<ChatCompletionResponse>, (StatusCode, String)> {
-    let _webkeys = state
+    let webkeys = state
         .webkeys
         .as_ref()
         .ok_or((StatusCode::SERVICE_UNAVAILABLE, "WebKeys not available".to_string()))?;
 
-    // TODO: Extract bearer token from Authorization header
-    // TODO: Verify virtual key and get binding
-    // TODO: Route to appropriate provider executor (ChatGPT Web / Gemini Web)
-    // TODO: Transform response to OpenAI format
+    let browser_manager = state
+        .browser_manager
+        .as_ref()
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "Browser manager not available".to_string()))?;
 
-    // Placeholder response for now
+    // 1. Extract Bearer Token
+    let auth_header = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .ok_or((StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string()))?;
+
+    if !auth_header.starts_with("Bearer sk-vt-") {
+        return Err((StatusCode::UNAUTHORIZED, "Invalid token format".to_string()));
+    }
+    let raw_key = auth_header.trim_start_matches("Bearer ").trim();
+
+    // 2. Verify Virtual Key & Get Binding
+    let (key_record, binding_id) = webkeys
+        .verify_virtual_key(raw_key, None)
+        .await
+        .map_err(|e| (StatusCode::UNAUTHORIZED, e))?;
+
+    // 3. Get Provider Binding
+    let binding = webkeys
+        .get_provider_binding_full(&binding_id)
+        .await
+        .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "Binding not found".to_string()))?;
+
+    // 4. Resolve Provider Executor
+    let provider_type = binding.provider_type;
+
+    // 5. Get/Start Browser Session
+    // We use the binding ID as the session ID for 1:1 mapping (or account_id for shared)
+    // For now, 1:1 binding-to-session
+    let session_id = binding.id.clone();
+    let user_data_dir = std::path::PathBuf::from(&binding.profile_path);
+
+    // Ensure session exists
+    if browser_manager.get_page(&session_id).await.is_none() {
+        let config = SessionConfig {
+            id: session_id.clone(),
+            user_data_dir,
+            headless: true, // Force headless for runtime
+            proxy: None, // TODO: Add proxy support from settings/env
+        };
+        browser_manager.start_session(config).await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to start browser session: {}", e)))?;
+    }
+
+    let page = browser_manager.get_page(&session_id).await
+        .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "Failed to get page handle".to_string()))?;
+
+    // 6. Execute Prompt
+    // Select executor
+    let response_text = match provider_type {
+        WebProviderType::ChatGptWeb => {
+            let executor = ChatGptExecutor;
+            executor.ensure_connected(&page).await
+                .map_err(|e| (StatusCode::BAD_GATEWAY, format!("ChatGPT connection failed: {}", e)))?;
+            
+            // Convert messages to single prompt string
+            let prompt = request.messages.iter()
+                .map(|m| format!("{}: {}", m.role, m.content))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+
+            executor.send_message(&page, &prompt).await
+                .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Failed to send message: {}", e)))?;
+            
+            executor.wait_for_response(&page).await
+                .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Failed to get response: {}", e)))?
+        },
+        WebProviderType::GeminiWeb => {
+            let executor = GeminiExecutor;
+            executor.ensure_connected(&page).await
+                .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Gemini connection failed: {}", e)))?;
+            
+            let prompt = request.messages.iter()
+                .map(|m| format!("{}: {}", m.role, m.content))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+
+            executor.send_message(&page, &prompt).await
+                .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Failed to send message: {}", e)))?;
+            
+            executor.wait_for_response(&page).await
+                .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Failed to get response: {}", e)))?
+        }
+    };
+
+    // 7. Return Response
     let response = ChatCompletionResponse {
         id: format!("chatcmpl-{}", uuid::Uuid::new_v4()),
         object: "chat.completion".to_string(),
@@ -1617,16 +1704,19 @@ async fn webkeys_chat_completions(
             index: 0,
             message: ChatCompletionResponseMessage {
                 role: "assistant".to_string(),
-                content: "WebKeys runtime not yet implemented. Milestone 2 complete - API surface ready.".to_string(),
+                content: response_text,
             },
             finish_reason: "stop".to_string(),
         }],
         usage: ChatCompletionUsage {
-            prompt_tokens: 0,
+            prompt_tokens: 0, // Todo: estimate
             completion_tokens: 0,
             total_tokens: 0,
         },
     };
+
+    // Record usage
+    let _ = webkeys.record_usage(&key_record.id, 0, 0).await;
 
     Ok(Json(response))
 }
