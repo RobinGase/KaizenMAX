@@ -28,6 +28,8 @@ futures-util = "0.3"
 async-stream = "0.3"
 base32 = "0.5"
 tempfile = { version = "3", optional = true }
+playwright = "0.0.20"
+async-trait = "0.1.89"
 
 [dev-dependencies]
 tempfile = "3"

@@ -73,6 +73,8 @@ struct AppState {
     next_id: Arc<AtomicU64>,
     /// WebKeys service for virtual key management
     webkeys: Option<WebKeysService>,
+    /// Browser manager for web automation
+    browser_manager: Option<zeroclaw_gateway::webkeys::BrowserManager>,
 }
 
 #[derive(Serialize)]
@@ -2783,6 +2785,21 @@ async fn main() {
         }
     };
 
+    // Initialize Browser Manager
+    let browser_manager = if webkeys.is_some() {
+        let manager = zeroclaw_gateway::webkeys::BrowserManager::new();
+        // Initialize Playwright in background to not block startup
+        let m = manager.clone();
+        tokio::spawn(async move {
+            if let Err(e) = m.initialize().await {
+                tracing::error!("Failed to initialize Playwright: {}", e);
+            }
+        });
+        Some(manager)
+    } else {
+        None
+    };
+
     let system_prompt = inference::load_system_prompt();
     tracing::info!(
         "Loaded Kaizen system prompt ({} chars)",
@@ -2814,6 +2831,7 @@ async fn main() {
         conversations: Arc::new(RwLock::new(HashMap::new())),
         next_id: Arc::new(AtomicU64::new(1)),
         webkeys,
+        browser_manager,
     };
 
     let mode = resolve_bind_mode();
