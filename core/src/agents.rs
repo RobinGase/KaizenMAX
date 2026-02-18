@@ -164,9 +164,11 @@ impl AgentRegistry {
 
         let allowed = match (from, to) {
             (AgentStatus::Idle, AgentStatus::Active) => true,
+            (AgentStatus::Idle, AgentStatus::Blocked) => true,
             (AgentStatus::Active, AgentStatus::ReviewPending) => true,
             (AgentStatus::ReviewPending, AgentStatus::Done) => kaizen_review_approved,
             (AgentStatus::ReviewPending, AgentStatus::Active) => true,
+            (AgentStatus::ReviewPending, AgentStatus::Blocked) => true,
             (AgentStatus::Active, AgentStatus::Blocked) => true,
             (AgentStatus::Blocked, AgentStatus::Active) => true,
             // Idempotent state updates are allowed.
@@ -255,6 +257,38 @@ mod tests {
 
         let result = registry.set_status("a1", AgentStatus::Done, true);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_idle_can_transition_to_blocked_for_operator_stop() {
+        let mut registry = AgentRegistry::new(1);
+        registry
+            .spawn("a1".into(), "Agent1".into(), "t1".into(), "Task1".into())
+            .unwrap();
+
+        registry
+            .set_status("a1", AgentStatus::Blocked, false)
+            .unwrap();
+        assert_eq!(registry.get("a1").unwrap().status, AgentStatus::Blocked);
+    }
+
+    #[test]
+    fn test_review_pending_can_transition_to_blocked_for_operator_stop() {
+        let mut registry = AgentRegistry::new(1);
+        registry
+            .spawn("a1".into(), "Agent1".into(), "t1".into(), "Task1".into())
+            .unwrap();
+        registry
+            .set_status("a1", AgentStatus::Active, false)
+            .unwrap();
+        registry
+            .set_status("a1", AgentStatus::ReviewPending, false)
+            .unwrap();
+
+        registry
+            .set_status("a1", AgentStatus::Blocked, false)
+            .unwrap();
+        assert_eq!(registry.get("a1").unwrap().status, AgentStatus::Blocked);
     }
 
     #[test]

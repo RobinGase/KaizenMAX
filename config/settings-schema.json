@@ -116,9 +116,9 @@
     },
     "inference_provider": {
       "type": "string",
-      "enum": ["anthropic", "openai", "gemini", "nvidia"],
+      "enum": ["anthropic", "openai", "gemini", "gemini-cli", "nvidia"],
       "default": "anthropic",
-      "description": "Active LLM inference provider. API key must be stored in vault."
+      "description": "Active LLM inference provider. API providers require a vault key; gemini-cli uses local OAuth via the Gemini CLI executable."
     },
     "inference_model": {
       "type": "string",

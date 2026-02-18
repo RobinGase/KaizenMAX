@@ -1,157 +1,75 @@
-//! Browser Session Manager
-//!
-//! Handles Playwright instances, persistent contexts, and page lifecycles.
-//! Ensures sessions are kept alive and recovered on failure.
+/// Browser session state manager (chromiumoxide backend).
+///
+/// Tracks per-provider profile directories, authentication state, and
+/// restart counters.  The actual chromiumoxide `Browser` handle is owned
+/// by the executor that uses it; this struct is the shared state that the
+/// health checker and executor both read/write.
+use std::{path::PathBuf, sync::Arc};
+use tokio::sync::RwLock;
 
-use playwright::Playwright;
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    sync::Arc,
-};
-use tokio::sync::Mutex;
-
-/// Browser type enum
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BrowserType {
-    Chromium,
-    Firefox,
-    Webkit,
-}
-
-impl Default for BrowserType {
-    fn default() -> Self {
-        Self::Chromium
-    }
-}
-
-/// Browser session configuration
 #[derive(Debug, Clone)]
-pub struct SessionConfig {
-    pub id: String,
-    pub user_data_dir: PathBuf,
-    pub headless: bool,
-    pub proxy: Option<String>,
+pub struct BrowserState {
+    pub profile_dir: PathBuf,
+    pub authenticated: bool,
+    pub restart_count: u32,
 }
 
-/// Active browser session handle
-pub struct BrowserSession {
-    pub context: playwright::api::BrowserContext,
-    pub page: Option<playwright::api::Page>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub last_active: chrono::DateTime<chrono::Utc>,
-}
-
-/// Manager for all browser sessions
+/// Shared, cloneable handle to a browser session's mutable state.
 #[derive(Clone)]
 pub struct BrowserManager {
-    inner: Arc<Mutex<ManagerInner>>,
-}
-
-struct ManagerInner {
-    playwright: Option<Playwright>,
-    sessions: HashMap<String, BrowserSession>,
+    state: Arc<RwLock<BrowserState>>,
 }
 
 impl BrowserManager {
-    pub fn new() -> Self {
+    /// Create a new manager for the given profile directory.
+    pub fn new(profile_dir: impl Into<PathBuf>) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(ManagerInner {
-                playwright: None,
-                sessions: HashMap::new(),
+            state: Arc::new(RwLock::new(BrowserState {
+                profile_dir: profile_dir.into(),
+                authenticated: false,
+                restart_count: 0,
             })),
         }
     }
 
-    /// Initialize Playwright runtime
-    pub async fn initialize(&self) -> Result<(), String> {
-        let mut inner = self.inner.lock().await;
-        if inner.playwright.is_some() {
-            return Ok(());
-        }
-
-        let pw = Playwright::initialize()
-            .await
-            .map_err(|e| format!("Failed to initialize Playwright: {}", e))?;
-        
-        inner.playwright = Some(pw);
-        tracing::info!("Playwright initialized successfully");
-        Ok(())
+    pub async fn profile_dir(&self) -> PathBuf {
+        self.state.read().await.profile_dir.clone()
     }
 
-    /// Start a persistent browser session (profile)
-    pub async fn start_session(&self, config: SessionConfig) -> Result<(), String> {
-        let mut inner = self.inner.lock().await;
-        
-        let pw = inner.playwright.as_ref()
-            .ok_or_else(|| "Playwright not initialized".to_string())?;
-
-        let chromium = pw.chromium();
-        let launcher = chromium.launcher();
-        
-        let mut launch_options = launcher.headless(config.headless);
-        
-        // Manual persistent profile via args if specific builder missing
-        let user_data_arg = format!("--user-data-dir={}", config.user_data_dir.display());
-        let args = [user_data_arg];
-        launch_options = launch_options.args(&args);
-        
-        if let Some(proxy) = config.proxy {
-            launch_options = launch_options.proxy(playwright::api::ProxySettings {
-                server: proxy,
-                bypass: None,
-                username: None,
-                password: None,
-            });
-        }
-
-        let browser = launch_options
-            .launch()
-            .await
-            .map_err(|e| format!("Failed to launch browser: {}", e))?;
-
-        let context = browser.context_builder()
-            .build()
-            .await
-            .map_err(|e| format!("Failed to create context: {}", e))?;
-
-        let page = context.new_page().await.ok();
-
-        let session = BrowserSession {
-            context,
-            page,
-            created_at: chrono::Utc::now(),
-            last_active: chrono::Utc::now(),
-        };
-
-        inner.sessions.insert(config.id, session);
-        Ok(())
+    pub async fn is_authenticated(&self) -> bool {
+        self.state.read().await.authenticated
     }
 
-    /// Get a page for a session
-    pub async fn get_page(&self, session_id: &str) -> Option<playwright::api::Page> {
-        let mut inner = self.inner.lock().await;
-        let session = inner.sessions.get_mut(session_id)?;
-        
-        session.last_active = chrono::Utc::now();
-        
-        if let Some(_page) = &session.page {
-            // Validate page is still open - explicit check not available, assume valid or handle error later
-            // if page.is_closed() { session.page = session.context.new_page().await.ok(); }
-        } else {
-            session.page = session.context.new_page().await.ok();
-        }
-
-        session.page.clone()
+    pub async fn mark_authenticated(&self, authenticated: bool) {
+        self.state.write().await.authenticated = authenticated;
     }
 
-    /// Close a session
-    pub async fn close_session(&self, session_id: &str) -> Result<(), String> {
-        let mut inner = self.inner.lock().await;
-        if let Some(session) = inner.sessions.remove(session_id) {
-            session.context.close().await
-                .map_err(|e| format!("Failed to close context: {}", e))?;
-        }
-        Ok(())
+    /// Increment restart counter (called after a browser crash/recovery).
+    pub async fn restart(&self) {
+        self.state.write().await.restart_count += 1;
+    }
+
+    pub async fn restart_count(&self) -> u32 {
+        self.state.read().await.restart_count
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BrowserManager;
+
+    #[tokio::test]
+    async fn profile_reuse_and_restart_tracking() {
+        let manager = BrowserManager::new("profiles/gemini");
+        assert!(manager.profile_dir().await.ends_with("profiles/gemini"));
+        assert!(!manager.is_authenticated().await);
+        assert_eq!(manager.restart_count().await, 0);
+
+        manager.mark_authenticated(true).await;
+        assert!(manager.is_authenticated().await);
+
+        manager.restart().await;
+        manager.restart().await;
+        assert_eq!(manager.restart_count().await, 2);
     }
 }

@@ -7,6 +7,7 @@
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use tokio::process::Command;
 
 // ── Provider Enum ──────────────────────────────────────────────────────────
 
@@ -18,6 +19,8 @@ pub enum InferenceProvider {
     OpenAI,
     Gemini,
     Nvidia,
+    #[serde(rename = "gemini-cli")]
+    GeminiCli,
 }
 
 impl InferenceProvider {
@@ -27,17 +30,19 @@ impl InferenceProvider {
             "openai" | "gpt" => Some(Self::OpenAI),
             "gemini" | "google" | "googleai" => Some(Self::Gemini),
             "nvidia" | "nim" => Some(Self::Nvidia),
+            "gemini-cli" | "geminicli" | "google-cli" => Some(Self::GeminiCli),
             _ => None,
         }
     }
 
     /// The vault provider key to look up the API key.
-    pub fn vault_key(&self) -> &'static str {
+    pub fn vault_key(&self) -> Option<&'static str> {
         match self {
-            Self::Anthropic => "anthropic",
-            Self::OpenAI => "openai",
-            Self::Gemini => "gemini",
-            Self::Nvidia => "nvidia",
+            Self::Anthropic => Some("anthropic"),
+            Self::OpenAI => Some("openai"),
+            Self::Gemini => Some("gemini"),
+            Self::Nvidia => Some("nvidia"),
+            Self::GeminiCli => None,
         }
     }
 
@@ -48,6 +53,7 @@ impl InferenceProvider {
             Self::OpenAI => "gpt-4o",
             Self::Gemini => "gemini-1.5-pro",
             Self::Nvidia => "nvidia/llama-3.3-nemotron-super-49b-v1",
+            Self::GeminiCli => "gemini-2.5-flash",
         }
     }
 }
@@ -59,6 +65,7 @@ impl std::fmt::Display for InferenceProvider {
             Self::OpenAI => write!(f, "openai"),
             Self::Gemini => write!(f, "gemini"),
             Self::Nvidia => write!(f, "nvidia"),
+            Self::GeminiCli => write!(f, "gemini-cli"),
         }
     }
 }
@@ -373,6 +380,7 @@ impl InferenceClient {
             InferenceProvider::OpenAI => self.complete_openai(api_key, request).await,
             InferenceProvider::Gemini => self.complete_gemini(api_key, request).await,
             InferenceProvider::Nvidia => self.complete_nvidia(api_key, request).await,
+            InferenceProvider::GeminiCli => self.complete_gemini_cli(request).await,
         }
     }
 
@@ -387,6 +395,9 @@ impl InferenceClient {
             InferenceProvider::OpenAI => self.stream_openai_raw(api_key, request).await,
             InferenceProvider::Gemini => self.stream_gemini_raw(api_key, request).await,
             InferenceProvider::Nvidia => self.stream_nvidia_raw(api_key, request).await,
+            InferenceProvider::GeminiCli => Err(
+                "Gemini CLI streaming is not supported by this endpoint yet. Use non-streaming chat or switch to Gemini API provider for SSE streaming.".to_string()
+            ),
         }
     }
 
@@ -853,6 +864,182 @@ impl InferenceClient {
 
         Ok(resp)
     }
+
+    // ── Gemini CLI (subprocess) ──────────────────────────────────────────
+
+    fn build_gemini_cli_prompt(&self, request: &InferenceRequest) -> String {
+        let mut prompt = String::new();
+
+        if !request.system_prompt.trim().is_empty() {
+            prompt.push_str("System instructions:\n");
+            prompt.push_str(request.system_prompt.trim());
+            prompt.push_str("\n\n");
+        }
+
+        prompt.push_str("Conversation:\n");
+        for message in &request.messages {
+            let role = if message.role.eq_ignore_ascii_case("assistant") {
+                "assistant"
+            } else {
+                "user"
+            };
+            prompt.push_str(&format!("{role}: {}\n", message.content));
+        }
+
+        prompt.push_str("\nRespond as assistant only. Keep the answer concise and complete.");
+        prompt
+    }
+
+    fn parse_gemini_cli_json(
+        &self,
+        stdout: &str,
+    ) -> Result<(String, Option<u32>, Option<u32>, Option<String>), String> {
+        let parse_value = serde_json::from_str::<serde_json::Value>(stdout).or_else(|_| {
+            // Some toolchains prepend logs; try to parse the last JSON line.
+            stdout
+                .lines()
+                .rev()
+                .find_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .ok_or_else(|| serde_json::Error::io(std::io::Error::other("invalid json")))
+        });
+
+        let value = match parse_value {
+            Ok(v) => v,
+            Err(_) => {
+                let text = stdout.trim();
+                if text.is_empty() {
+                    return Err("Gemini CLI returned empty output".to_string());
+                }
+                return Ok((text.to_string(), None, None, None));
+            }
+        };
+
+        if let Some(err_obj) = value.get("error") {
+            let err_text = err_obj
+                .get("message")
+                .and_then(|v| v.as_str())
+                .or_else(|| err_obj.as_str())
+                .unwrap_or("unknown Gemini CLI error")
+                .to_string();
+            return Err(format!("Gemini CLI error: {err_text}"));
+        }
+
+        let response_text = value
+            .get("response")
+            .and_then(|v| v.as_str())
+            .or_else(|| value.get("text").and_then(|v| v.as_str()))
+            .or_else(|| {
+                value
+                    .get("result")
+                    .and_then(|r| r.get("response"))
+                    .and_then(|v| v.as_str())
+            })
+            .unwrap_or("")
+            .trim()
+            .to_string();
+
+        if response_text.is_empty() {
+            return Err("Gemini CLI returned JSON without a response field".to_string());
+        }
+
+        let stats = value
+            .get("stats")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+
+        let read_u32 = |obj: &serde_json::Value, keys: &[&str]| -> Option<u32> {
+            keys.iter().find_map(|k| {
+                obj.get(k)
+                    .and_then(|v| v.as_u64())
+                    .and_then(|n| u32::try_from(n).ok())
+            })
+        };
+
+        let input_tokens = read_u32(
+            &stats,
+            &[
+                "input_tokens",
+                "inputTokens",
+                "prompt_tokens",
+                "promptTokenCount",
+            ],
+        );
+        let output_tokens = read_u32(
+            &stats,
+            &[
+                "output_tokens",
+                "outputTokens",
+                "completion_tokens",
+                "completionTokenCount",
+                "candidateTokenCount",
+                "candidatesTokenCount",
+            ],
+        );
+        let stop_reason = stats
+            .get("stop_reason")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        Ok((response_text, input_tokens, output_tokens, stop_reason))
+    }
+
+    async fn complete_gemini_cli(
+        &self,
+        request: &InferenceRequest,
+    ) -> Result<InferenceResponse, String> {
+        let prompt = self.build_gemini_cli_prompt(request);
+
+        let output = Command::new("gemini")
+            .arg("--model")
+            .arg(&request.model)
+            .arg("--output-format")
+            .arg("json")
+            .arg(prompt)
+            .output()
+            .await
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    "Gemini CLI executable not found. Install `@google/gemini-cli` and ensure `gemini` is on PATH.".to_string()
+                } else {
+                    format!("Failed to launch Gemini CLI: {e}")
+                }
+            })?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        if !output.status.success() {
+            let code = output
+                .status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "terminated".to_string());
+
+            let detail = if !stderr.trim().is_empty() {
+                stderr.trim().to_string()
+            } else if !stdout.trim().is_empty() {
+                stdout.trim().to_string()
+            } else {
+                "unknown error".to_string()
+            };
+
+            return Err(format!(
+                "Gemini CLI failed (exit code {code}): {detail}. If this is first run, execute `gemini` once and complete OAuth login."
+            ));
+        }
+
+        let (content, input_tokens, output_tokens, stop_reason) =
+            self.parse_gemini_cli_json(&stdout)?;
+
+        Ok(InferenceResponse {
+            content,
+            model: request.model.clone(),
+            provider: "gemini-cli".to_string(),
+            input_tokens,
+            output_tokens,
+            stop_reason,
+        })
+    }
 }
 
 /// Load the Kaizen system prompt from the template file.
@@ -909,15 +1096,20 @@ mod tests {
             InferenceProvider::from_str_loose("nvidia"),
             Some(InferenceProvider::Nvidia)
         );
+        assert_eq!(
+            InferenceProvider::from_str_loose("gemini-cli"),
+            Some(InferenceProvider::GeminiCli)
+        );
         assert_eq!(InferenceProvider::from_str_loose("unknown"), None);
     }
 
     #[test]
     fn test_provider_vault_key() {
-        assert_eq!(InferenceProvider::Anthropic.vault_key(), "anthropic");
-        assert_eq!(InferenceProvider::OpenAI.vault_key(), "openai");
-        assert_eq!(InferenceProvider::Gemini.vault_key(), "gemini");
-        assert_eq!(InferenceProvider::Nvidia.vault_key(), "nvidia");
+        assert_eq!(InferenceProvider::Anthropic.vault_key(), Some("anthropic"));
+        assert_eq!(InferenceProvider::OpenAI.vault_key(), Some("openai"));
+        assert_eq!(InferenceProvider::Gemini.vault_key(), Some("gemini"));
+        assert_eq!(InferenceProvider::Nvidia.vault_key(), Some("nvidia"));
+        assert_eq!(InferenceProvider::GeminiCli.vault_key(), None);
     }
 
     #[test]
@@ -930,6 +1122,11 @@ mod tests {
         assert!(InferenceProvider::OpenAI.default_model().contains("gpt"));
         assert!(InferenceProvider::Gemini.default_model().contains("gemini"));
         assert!(InferenceProvider::Nvidia.default_model().contains("nvidia"));
+        assert!(
+            InferenceProvider::GeminiCli
+                .default_model()
+                .contains("gemini")
+        );
     }
 
     #[test]

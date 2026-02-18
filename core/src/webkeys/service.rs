@@ -67,6 +67,16 @@ impl WebKeysService {
         })
     }
 
+    /// Create an in-memory service for tests (no disk I/O).
+    pub async fn new_in_memory() -> Self {
+        let storage = WebKeysStorage::new_in_memory().await;
+        Self {
+            storage,
+            config: WebKeysServiceConfig::default(),
+            rate_limiter: Arc::new(RwLock::new(RateLimiter::default())),
+        }
+    }
+
     /// Generate a new virtual key
     pub async fn create_virtual_key(
         &self,
@@ -131,7 +141,10 @@ impl WebKeysService {
     }
 
     /// Rotate a virtual key (generates new raw key)
-    pub async fn rotate_virtual_key(&self, key_id: &str) -> Result<VirtualKeyCreationResult, String> {
+    pub async fn rotate_virtual_key(
+        &self,
+        key_id: &str,
+    ) -> Result<VirtualKeyCreationResult, String> {
         let existing = self
             .storage
             .get_key(key_id)
@@ -227,7 +240,11 @@ impl WebKeysService {
         }
 
         if let Some(metadata) = request.metadata {
-            existing.metadata = if metadata.is_empty() { None } else { Some(metadata) };
+            existing.metadata = if metadata.is_empty() {
+                None
+            } else {
+                Some(metadata)
+            };
         }
 
         if let Some(rpm) = request.rate_limit_rpm {
@@ -270,10 +287,7 @@ impl WebKeysService {
         // Check rate limits
         if let Some(rpm) = key.rate_limit_rpm {
             if self.is_rate_limited(&key.id, rpm, 60).await {
-                return Err(format!(
-                    "Rate limit exceeded: {} requests per minute",
-                    rpm
-                ));
+                return Err(format!("Rate limit exceeded: {} requests per minute", rpm));
             }
         }
 
@@ -358,7 +372,8 @@ impl WebKeysService {
             request.account_id,
             request.profile_path
         );
-        let binding_fingerprint = compute_binding_fingerprint(&self.config.server_pepper, &binding_fp_input);
+        let binding_fingerprint =
+            compute_binding_fingerprint(&self.config.server_pepper, &binding_fp_input);
 
         let now = Utc::now();
         let binding = WebProviderBinding {

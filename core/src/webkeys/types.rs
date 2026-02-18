@@ -241,3 +241,71 @@ pub struct VerifyVirtualKeyResponse {
     pub selected_binding_id: Option<String>,
     pub error: Option<String>,
 }
+
+// ---------------------------------------------------------------------------
+// OpenAI-compatible chat completion types (used by /v1/chat/completions)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChatCompletionRequest {
+    pub model: Option<String>,
+    pub messages: Vec<ChatMessage>,
+    pub stream: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatCompletionResponse {
+    pub id: String,
+    pub object: String,
+    pub created: i64,
+    pub model: String,
+    pub choices: Vec<ChatChoice>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatChoice {
+    pub index: usize,
+    pub message: ChatMessageResponse,
+    pub finish_reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatMessageResponse {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelsResponse {
+    pub object: String,
+    pub data: Vec<ModelEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelEntry {
+    pub id: String,
+    pub object: String,
+    pub owned_by: String,
+}
+
+// ---------------------------------------------------------------------------
+// OpenAI-compatible error envelope (used by auth.rs and mod.rs)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpenAiErrorEnvelope {
+    pub error: OpenAiErrorBody,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpenAiErrorBody {
+    pub message: String,
+    pub r#type: String,
+    pub code: String,
+}

@@ -19,15 +19,149 @@ use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 
 const API_BASE: &str = "http://127.0.0.1:9100";
+const MIN_PANEL_WIDTH: f64 = 380.0;
+const MIN_PANEL_HEIGHT: f64 = 200.0;
+const MIN_DETACHED_WIDTH: f64 = 420.0;
+const MIN_DETACHED_HEIGHT: f64 = 320.0;
+const MIN_PANEL_X: f64 = 0.0;
+const MIN_PANEL_Y: f64 = 44.0;
+const FLOAT_DRAG_ZONE_HEIGHT: f64 = 64.0;
+const KAIZEN_CHAT_MODES: [&str; 5] = ["yolo", "build", "plan", "reason", "orchestrator"];
+const SUBAGENT_CHAT_MODES: [&str; 2] = ["build", "plan"];
+const CHAT_MODEL_PRESETS: [(&str, &str, &str); 9] = [
+    ("kai-zen", "Kai-Zen (Native Toggle)", "native"),
+    ("openai", "GPT-5.3 Codex", "gpt-5.3-codex"),
+    ("openai", "GPT-4.1 Mini", "gpt-4.1-mini"),
+    ("anthropic", "Claude Sonnet 4", "claude-sonnet-4-20250514"),
+    (
+        "anthropic",
+        "Claude 3.5 Sonnet",
+        "claude-3-5-sonnet-20241022",
+    ),
+    ("gemini", "Gemini 2.5 Pro", "gemini-2.5-pro"),
+    ("gemini", "Gemini 2.5 Flash", "gemini-2.5-flash"),
+    (
+        "nvidia",
+        "Nemotron Super 49B",
+        "nvidia/llama-3.3-nemotron-super-49b-v1",
+    ),
+    ("nvidia", "Llama 3.1 70B", "meta/llama-3.1-70b-instruct"),
+];
+
+fn model_value(provider: &str, model: &str) -> String {
+    format!("{provider}|{model}")
+}
+
+fn parse_model_value(value: &str) -> Option<(String, String)> {
+    let mut parts = value.splitn(2, '|');
+    let provider = parts.next()?.trim();
+    let model = parts.next()?.trim();
+    if provider.is_empty() || model.is_empty() {
+        return None;
+    }
+    Some((provider.to_string(), model.to_string()))
+}
+
+fn normalized_model_values(selected: Option<&Vec<String>>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut values = Vec::new();
+
+    if let Some(existing) = selected {
+        for raw in existing {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if seen.insert(trimmed.to_string()) {
+                values.push(trimmed.to_string());
+            }
+        }
+    }
+
+    values
+}
+
+fn model_values_with_default_fallback(values: &[String], default_chat_model: &str) -> Vec<String> {
+    if values.is_empty() {
+        vec![default_chat_model.to_string()]
+    } else {
+        values.to_vec()
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ChatModelTarget {
+    provider: String,
+    model: String,
+}
+
+fn model_targets_from_values(values: &[String]) -> Vec<ChatModelTarget> {
+    let mut seen = HashSet::new();
+    let mut targets = Vec::new();
+
+    for value in values {
+        if let Some((provider, model)) = parse_model_value(value) {
+            let key = format!("{provider}|{model}");
+            if seen.insert(key) {
+                targets.push(ChatModelTarget { provider, model });
+            }
+        }
+    }
+
+    targets
+}
+
+fn runtime_label(provider: Option<&str>, model: Option<&str>) -> String {
+    if let Some(p) = provider {
+        let normalized = p.trim().to_ascii_lowercase();
+        if matches!(
+            normalized.as_str(),
+            "kai-zen" | "kaizen" | "zeroclaw" | "native"
+        ) {
+            return "Kai-Zen (runtime default)".to_string();
+        }
+    }
+
+    match (provider, model) {
+        (Some(p), Some(m)) => format!("{p} / {m}"),
+        (Some(p), None) => p.to_string(),
+        (None, Some(m)) => m.to_string(),
+        (None, None) => "runtime default".to_string(),
+    }
+}
+
+fn viewport_size() -> (f64, f64) {
+    let size = window().inner_size();
+    (size.width as f64, size.height as f64)
+}
+
+fn clamp_floating_layout(layout: &mut PanelLayout, viewport_w: f64, viewport_h: f64) {
+    let max_x = (viewport_w - layout.width).max(MIN_PANEL_X);
+    let max_y = (viewport_h - layout.height).max(MIN_PANEL_Y);
+    layout.x = layout.x.clamp(MIN_PANEL_X, max_x);
+    layout.y = layout.y.clamp(MIN_PANEL_Y, max_y);
+}
 
 fn native_detach_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| match std::env::var("KAIZEN_ENABLE_NATIVE_DETACH") {
-        Ok(raw) => {
-            let value = raw.trim().to_ascii_lowercase();
-            matches!(value.as_str(), "1" | "true" | "yes" | "on")
-        }
-        Err(_) => false,
+    *ENABLED.get_or_init(|| {
+        let enable = match std::env::var("KAIZEN_ENABLE_NATIVE_DETACH") {
+            Ok(raw) => {
+                let value = raw.trim().to_ascii_lowercase();
+                matches!(value.as_str(), "1" | "true" | "yes" | "on")
+            }
+            Err(_) => false,
+        };
+
+        let unsafe_ack = match std::env::var("KAIZEN_NATIVE_DETACH_UNSAFE_ACK") {
+            Ok(raw) => {
+                let value = raw.trim().to_ascii_lowercase();
+                matches!(value.as_str(), "1" | "true" | "yes" | "on")
+            }
+            Err(_) => false,
+        };
+
+        enable && unsafe_ack
     })
 }
 
@@ -122,6 +256,8 @@ struct CrystalBallEvent {
 #[derive(Clone, Debug, Deserialize)]
 struct ChatResponse {
     reply: String,
+    provider: Option<String>,
+    model: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -130,6 +266,16 @@ struct ChatRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     agent_id: Option<&'a str>,
     clear_history: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selected_models: Option<Vec<ChatModelTarget>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wrap_mode: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -277,6 +423,35 @@ struct OAuthStatusResponse {
     message: String,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct GoogleOAuthAccountPublic {
+    account_id: String,
+    email: Option<String>,
+    scope: Option<String>,
+    expires_at: Option<String>,
+    updated_at: String,
+    has_refresh_token: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct GoogleOAuthStatusResponse {
+    #[allow(dead_code)]
+    provider: String,
+    connected: bool,
+    account_count: usize,
+    accounts: Vec<GoogleOAuthAccountPublic>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct GoogleOAuthStartResponse {
+    #[allow(dead_code)]
+    provider: String,
+    redirect_url: String,
+    state_token: String,
+    #[allow(dead_code)]
+    redirect_uri: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 struct StoreSecretRequest<'a> {
     value: &'a str,
@@ -378,6 +553,52 @@ struct PanelCardData {
     title: String,
     subtitle: String,
     agent: Option<ApiAgent>,
+    edge_accent: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct WorkspaceTile {
+    id: String,
+    name: String,
+    path: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PersistedWorkspaces {
+    paths: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DestructiveAction {
+    Stop,
+    Clear,
+    Remove,
+}
+
+impl DestructiveAction {
+    fn confirm_label(&self) -> &'static str {
+        match self {
+            Self::Stop => "Stop agent",
+            Self::Clear => "Clear chat",
+            Self::Remove => "Remove agent",
+        }
+    }
+
+    fn confirmation_text(&self, target: &str) -> String {
+        match self {
+            Self::Stop => format!("Stop {target}? You can message it again later."),
+            Self::Clear => format!("Clear chat for {target}? This removes the current messages."),
+            Self::Remove => format!("Remove {target}? This cannot be undone."),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingPanelAction {
+    action: DestructiveAction,
+    panel_key: String,
+    panel_title: String,
+    agent_id: String,
 }
 
 #[derive(Props, Clone, PartialEq)]
@@ -387,6 +608,7 @@ struct DetachedWindowProps {
     subtitle: String,
     agent_id: Option<String>,
     admin_token: Option<String>,
+    default_chat_model: String,
 }
 
 fn ui_log_file_path() -> Option<PathBuf> {
@@ -468,6 +690,8 @@ fn App() -> Element {
     let mut gh_status = use_signal(|| None::<GitHubStatusResponse>);
     let mut gh_repos = use_signal(Vec::<GitHubRepoSummary>::new);
     let mut oauth_status = use_signal(HashMap::<String, OAuthStatusResponse>::new);
+    let mut google_oauth_status = use_signal(|| None::<GoogleOAuthStatusResponse>);
+    let mut google_oauth_redirect = use_signal(|| None::<String>);
 
     let mut left_open = use_signal(|| true);
     let mut settings_open = use_signal(|| false);
@@ -478,6 +702,15 @@ fn App() -> Element {
     let mut detached_windows = use_signal(HashMap::<String, WeakDesktopContext>::new);
     let mut drag_state = use_signal(|| None::<DragState>);
     let mut resize_state = use_signal(|| None::<ResizeState>);
+    let mut sending_by_panel = use_signal(HashMap::<String, bool>::new);
+    let mut composer_models_by_panel = use_signal(HashMap::<String, Vec<String>>::new);
+    let mut model_picker_open_by_panel = use_signal(HashMap::<String, bool>::new);
+    let mut composer_mode_by_panel = use_signal(HashMap::<String, String>::new);
+    let mut panel_action_confirm = use_signal(|| None::<PendingPanelAction>);
+
+    let mut workspace_tiles = use_signal(load_workspace_tiles);
+    let mut local_workspace_input = use_signal(String::new);
+    let mut active_workspace_id = use_signal(|| "kaizen-max".to_string());
 
     {
         let token = admin_token.clone();
@@ -528,6 +761,7 @@ fn App() -> Element {
         let mut gh_status_sig = gh_status;
         let mut gh_repos_sig = gh_repos;
         let mut oauth_sig = oauth_status;
+        let mut google_oauth_sig = google_oauth_status;
         use_future(move || {
             let token = token.clone();
             async move {
@@ -541,6 +775,7 @@ fn App() -> Element {
                         gh_status_sig,
                         gh_repos_sig,
                         oauth_sig,
+                        google_oauth_sig,
                     )
                     .await;
 
@@ -577,7 +812,9 @@ fn App() -> Element {
                         detached_map.remove(&key);
                         if let Some(layout) = layouts_map.get_mut(&key) {
                             if layout.mode == PanelMode::Detached {
-                                layout.mode = PanelMode::Docked;
+                                layout.mode = PanelMode::Floating;
+                                layout.width = layout.width.max(MIN_PANEL_WIDTH);
+                                layout.height = layout.height.max(MIN_PANEL_HEIGHT);
                                 layout.z = bump_z(&mut z_sig);
                                 changed = true;
                             }
@@ -602,6 +839,10 @@ fn App() -> Element {
     let ev_snap = events.read().clone();
     let d_snap = drafts.read().clone();
     let m_snap = messages.read().clone();
+    let sending_snap = sending_by_panel.read().clone();
+    let composer_models_snap = composer_models_by_panel.read().clone();
+    let model_picker_open_snap = model_picker_open_by_panel.read().clone();
+    let composer_mode_snap = composer_mode_by_panel.read().clone();
     let layouts_snap = panel_layouts.read().clone();
     let settings_snap = settings_draft.read().clone();
     let settings_is_saving = *settings_busy.read();
@@ -612,10 +853,16 @@ fn App() -> Element {
     let gh_status_snap = gh_status.read().clone();
     let gh_repos_snap = gh_repos.read().clone();
     let oauth_snap = oauth_status.read().clone();
+    let google_oauth_snap = google_oauth_status.read().clone();
+    let google_oauth_redirect_snap = google_oauth_redirect.read().clone();
     let selected_repo = settings_snap
         .as_ref()
         .map(|s| s.selected_github_repo.clone())
         .unwrap_or_default();
+    let default_chat_model = settings_snap
+        .as_ref()
+        .map(|s| model_value(&s.inference_provider, &s.inference_model))
+        .unwrap_or_else(|| model_value("openai", "gpt-5.3-codex"));
 
     let gate_label = g_snap
         .as_ref()
@@ -624,19 +871,50 @@ fn App() -> Element {
     let sidebar_open = *left_open.read();
     let show_settings = *settings_open.read();
     let active_tab = *settings_tab.read();
+    let workspaces_snap = workspace_tiles.read().clone();
+    let local_workspace_input_value = local_workspace_input.read().clone();
+    let pending_panel_action = panel_action_confirm.read().clone();
+    let active_workspace = active_workspace_id.read().clone();
+    let active_workspace_label = workspaces_snap
+        .iter()
+        .find(|ws| ws.id == active_workspace)
+        .map(|ws| ws.name.clone())
+        .unwrap_or_else(|| active_workspace.clone());
+    let profile_name = std::env::var("USERNAME").unwrap_or_else(|_| "Local Operator".to_string());
+    let profile_device =
+        std::env::var("COMPUTERNAME").unwrap_or_else(|_| "This Device".to_string());
+    let profile_initials = profile_name
+        .split_whitespace()
+        .filter_map(|part| part.chars().next())
+        .take(2)
+        .collect::<String>()
+        .to_uppercase();
+    let profile_badge = if profile_initials.is_empty() {
+        "OP".to_string()
+    } else {
+        profile_initials.clone()
+    };
+    let interaction_active = drag_state.read().is_some() || resize_state.read().is_some();
+    let shell_class = if interaction_active {
+        "shell is-dragging"
+    } else {
+        "shell"
+    };
 
     let mut all_panels: Vec<PanelCardData> = vec![PanelCardData {
         key: "kaizen".to_string(),
         title: "Kaizen".to_string(),
         subtitle: format!("Primary planner | {gate_label}"),
         agent: None,
+        edge_accent: false,
     }];
-    for agent in &a_snap {
+    for (idx, agent) in a_snap.iter().enumerate() {
         all_panels.push(PanelCardData {
             key: agent.id.clone(),
             title: agent.name.clone(),
             subtitle: format!("{} | {}", agent.task_id, agent.status.label()),
             agent: Some(agent.clone()),
+            edge_accent: idx == 0,
         });
     }
 
@@ -662,21 +940,23 @@ fn App() -> Element {
         style { {CSS} }
 
         div {
-            class: "shell",
+            class: "{shell_class}",
             onmousemove: {
                 let mut drag_sig = drag_state;
                 let mut resize_sig = resize_state;
                 let mut layouts_sig = panel_layouts;
                 move |evt: Event<MouseData>| {
                     let point = evt.data().client_coordinates();
+                    let (viewport_w, viewport_h) = viewport_size();
 
                     if let Some(dragging) = drag_sig.read().clone() {
                         let dx = point.x - dragging.mouse_start_x;
                         let dy = point.y - dragging.mouse_start_y;
                         let mut layouts_map = layouts_sig.read().clone();
                         if let Some(layout) = layouts_map.get_mut(&dragging.panel_key) {
-                            layout.x = (dragging.panel_start_x + dx).max(8.0);
-                            layout.y = (dragging.panel_start_y + dy).max(52.0);
+                            layout.x = (dragging.panel_start_x + dx).max(MIN_PANEL_X);
+                            layout.y = (dragging.panel_start_y + dy).max(MIN_PANEL_Y);
+                            clamp_floating_layout(layout, viewport_w, viewport_h);
                         }
                         layouts_sig.set(layouts_map);
                     } else if let Some(resizing) = resize_sig.read().clone() {
@@ -684,8 +964,13 @@ fn App() -> Element {
                         let dy = point.y - resizing.mouse_start_y;
                         let mut layouts_map = layouts_sig.read().clone();
                         if let Some(layout) = layouts_map.get_mut(&resizing.panel_key) {
-                            layout.width = (resizing.panel_start_w + dx).max(320.0);
-                            layout.height = (resizing.panel_start_h + dy).max(250.0);
+                            let max_width = (viewport_w - layout.x).max(MIN_PANEL_WIDTH);
+                            let max_height = (viewport_h - layout.y).max(MIN_PANEL_HEIGHT);
+                            layout.width =
+                                (resizing.panel_start_w + dx).clamp(MIN_PANEL_WIDTH, max_width);
+                            layout.height =
+                                (resizing.panel_start_h + dy).clamp(MIN_PANEL_HEIGHT, max_height);
+                            clamp_floating_layout(layout, viewport_w, viewport_h);
                         }
                         layouts_sig.set(layouts_map);
                     }
@@ -705,7 +990,6 @@ fn App() -> Element {
                     }
                 }
             },
-
             header { class: "top-bar",
                 div { class: "top-left",
                     button { class: "toggle-btn",
@@ -715,7 +999,13 @@ fn App() -> Element {
                         },
                         if sidebar_open { "<" } else { ">" }
                     }
-                    h1 { class: "logo", "Kaizen MAX" }
+                    div { class: "brand-lockup",
+                        div { class: "brand-mark" }
+                        div { class: "brand-text",
+                            h1 { class: "logo", "Kaizen MAX" }
+                            span { class: "brand-sub", "Agent Workspace" }
+                        }
+                    }
                     span { class: "top-meta", "{gate_label} | {a_snap.len()} agents | {ev_snap.len()} events" }
                 }
                 div { class: "top-right",
@@ -784,16 +1074,83 @@ fn App() -> Element {
                         }
                         div { class: "sb-section",
                             h4 { class: "sb-label", "Local Workspaces" }
-                            div { class: "ws-item ws-active",
-                                div { class: "ws-dot ws-dot-on" }
-                                span { "Kaizen MAX" }
+                            p { class: "sb-hint", "Attach a local folder to switch context quickly." }
+                            div { class: "workspace-add-row",
+                                input {
+                                    class: "s-input workspace-path-input",
+                                    r#type: "text",
+                                    value: "{local_workspace_input_value}",
+                                    placeholder: "C:\\projects\\my-workspace",
+                                    oninput: {
+                                        let mut local_workspace_input = local_workspace_input;
+                                        move |e: Event<FormData>| {
+                                            local_workspace_input.set(e.value());
+                                        }
+                                    },
+                                }
+                                button {
+                                    class: "btn btn-sm btn-sec",
+                                    onclick: {
+                                        let mut workspace_tiles = workspace_tiles;
+                                        let mut active_workspace_id = active_workspace_id;
+                                        let mut local_workspace_input = local_workspace_input;
+                                        let mut info_sig = info;
+                                        let mut error_sig = error;
+                                        move |_| {
+                                            let path = local_workspace_input.read().trim().to_string();
+                                            if path.is_empty() {
+                                                error_sig.set(Some("Enter a local path first".to_string()));
+                                                return;
+                                            }
+
+                                            let mut tiles = workspace_tiles.read().clone();
+                                            if let Some(existing) = tiles
+                                                .iter()
+                                                .find(|tile| tile.path.as_deref() == Some(path.as_str()))
+                                            {
+                                                active_workspace_id.set(existing.id.clone());
+                                                local_workspace_input.set(String::new());
+                                                info_sig.set(Some("Workspace already attached".to_string()));
+                                                error_sig.set(None);
+                                                return;
+                                            }
+
+                                            let tile = workspace_tile_from_path(&path);
+                                            active_workspace_id.set(tile.id.clone());
+                                            tiles.push(tile);
+                                            workspace_tiles.set(tiles.clone());
+                                            persist_workspace_tiles(&tiles);
+                                            local_workspace_input.set(String::new());
+                                            info_sig.set(Some("Workspace attached".to_string()));
+                                            error_sig.set(None);
+                                        }
+                                    },
+                                    "Attach"
+                                }
                             }
-                            div { class: "ws-item",
-                                div { class: "ws-dot" }
-                                span { "Add workspace..." }
+                            div { class: "workspace-taskbar",
+                                for ws in workspaces_snap.iter() {
+                                    button {
+                                        class: if ws.id == active_workspace { "ws-pill ws-pill-active" } else { "ws-pill" },
+                                        onclick: {
+                                            let id = ws.id.clone();
+                                            let mut active_workspace_id = active_workspace_id;
+                                            move |_| {
+                                                active_workspace_id.set(id.clone());
+                                            }
+                                        },
+                                        span { class: "ws-pill-name", "{ws.name}" }
+                                        if let Some(path) = ws.path.as_ref() {
+                                            span { class: "ws-pill-meta", "{path}" }
+                                        } else {
+                                            span { class: "ws-pill-meta", "{a_snap.len()} agents" }
+                                        }
+                                    }
+                                }
                             }
                         }
                         div { class: "sb-spacer" }
+                        div { class: "sb-bottom-stack",
                         div { class: "sb-section git-section",
                             h4 { class: "sb-label", "GitHub" }
                             if let Some(status) = gh_status_snap.as_ref() {
@@ -868,6 +1225,7 @@ fn App() -> Element {
                                     let mut gh_status_sig = gh_status;
                                     let mut gh_repos_sig = gh_repos;
                                     let mut oauth_sig = oauth_status;
+                                    let mut google_oauth_sig = google_oauth_status;
                                     let mut settings_open_sig = settings_open;
                                     move |_| {
                                         settings_open_sig.set(true);
@@ -882,12 +1240,32 @@ fn App() -> Element {
                                                 gh_status_sig,
                                                 gh_repos_sig,
                                                 oauth_sig,
+                                                google_oauth_sig,
                                             ).await;
                                         });
                                     }
                                 },
                                 "Settings"
                             }
+                        }
+                        div { class: "account-hero",
+                            div { class: "account-top",
+                                div { class: "account-avatar", "{profile_badge}" }
+                                div { class: "account-meta",
+                                    strong { class: "account-name", "{profile_name}" }
+                                    p { class: "account-sub", "Personal Local Profile" }
+                                }
+                            }
+                            div { class: "account-chip-row",
+                                span { class: "account-chip", "{profile_device}" }
+                                span { class: "account-chip", "Workspace: {active_workspace_label}" }
+                            }
+                            button {
+                                class: "btn btn-sm btn-sec account-open-btn",
+                                onclick: move |_| { settings_open.set(true); },
+                                "Open profile settings"
+                            }
+                        }
                         }
                     }
                 }
@@ -900,21 +1278,30 @@ fn App() -> Element {
                                 &panel.title,
                                 &panel.subtitle,
                                 panel.agent.as_ref(),
+                                panel.edge_accent,
                                 layout.mode,
                                 &m_snap,
+                                &sending_snap,
+                                &composer_models_snap,
+                                &model_picker_open_snap,
+                                &composer_mode_snap,
                                 &d_snap,
                                 &mut drafts,
                                 &mut messages,
+                                &mut sending_by_panel,
+                                &mut composer_models_by_panel,
+                                &mut model_picker_open_by_panel,
+                                &mut composer_mode_by_panel,
                                 &mut info,
                                 &mut error,
+                                &default_chat_model,
                                 &admin_token,
                                 &mut agents,
-                                &mut gates,
-                                &mut events,
                                 &mut panel_layouts,
                                 &mut next_z,
                                 &mut detached_windows,
                                 &mut drag_state,
+                                &mut panel_action_confirm,
                             )}
                         }
 
@@ -1024,31 +1411,55 @@ fn App() -> Element {
             }
 
             div { class: "floating-layer",
+                if interaction_active {
+                    div { class: "drag-scrim" }
+                }
                 for (panel, layout) in floating_panels.iter() {
                     div {
                         class: "floating-frame",
                         key: "float-{panel.key}",
                         style: "left:{layout.x}px;top:{layout.y}px;width:{layout.width}px;height:{layout.height}px;z-index:{layout.z};",
+                        onmousedown: {
+                            let k = panel.key.clone();
+                            let mut z_sig = next_z;
+                            let mut layouts_sig = panel_layouts;
+                            move |_| {
+                                let mut map = layouts_sig.read().clone();
+                                if let Some(existing) = map.get_mut(&k) {
+                                    existing.z = bump_z(&mut z_sig);
+                                    layouts_sig.set(map);
+                                }
+                            }
+                        },
                         {card(
                             &panel.key,
                             &panel.title,
                             &panel.subtitle,
                             panel.agent.as_ref(),
+                            panel.edge_accent,
                             PanelMode::Floating,
                             &m_snap,
+                            &sending_snap,
+                            &composer_models_snap,
+                            &model_picker_open_snap,
+                            &composer_mode_snap,
                             &d_snap,
                             &mut drafts,
                             &mut messages,
+                            &mut sending_by_panel,
+                            &mut composer_models_by_panel,
+                            &mut model_picker_open_by_panel,
+                            &mut composer_mode_by_panel,
                             &mut info,
                             &mut error,
+                            &default_chat_model,
                             &admin_token,
                             &mut agents,
-                            &mut gates,
-                            &mut events,
                             &mut panel_layouts,
                             &mut next_z,
                             &mut detached_windows,
                             &mut drag_state,
+                            &mut panel_action_confirm,
                         )}
                         div {
                             class: "floating-resize",
@@ -1102,6 +1513,7 @@ fn App() -> Element {
                                         let mut gh_status_sig = gh_status;
                                         let mut gh_repos_sig = gh_repos;
                                         let mut oauth_sig = oauth_status;
+                                        let mut google_oauth_sig = google_oauth_status;
                                         let mut info_sig = info;
                                         let mut error_sig = error;
                                         move |_| {
@@ -1128,6 +1540,7 @@ fn App() -> Element {
                                                             gh_status_sig,
                                                             gh_repos_sig,
                                                             oauth_sig,
+                                                            google_oauth_sig,
                                                         ).await;
                                                     }
                                                     Err(err) => error_sig.set(Some(err)),
@@ -1178,6 +1591,136 @@ fn App() -> Element {
                                                     },
                                                     option { value: "zeroclaw", "ZeroClaw" }
                                                     option { value: "openclaw_compat", "OpenClaw Compatibility" }
+                                                }
+                                            }
+
+                                            div { class: "setting-row oauth-row",
+                                                strong { "Google OAuth (WebKeys)" }
+                                                if let Some(status) = google_oauth_snap.clone() {
+                                                    p { class: "sb-hint", {format!("Connected accounts: {}", status.account_count)} }
+                                                    p { class: "sb-hint", {format!("Overall connected: {}", if status.connected { "yes" } else { "no" })} }
+                                                } else {
+                                                    p { class: "sb-hint", "Google OAuth status loading..." }
+                                                }
+
+                                                if let Some(url) = google_oauth_redirect_snap.clone() {
+                                                    p { class: "sb-hint", "Open this URL to complete Google OAuth login:" }
+                                                    a {
+                                                        class: "sb-link",
+                                                        href: "{url}",
+                                                        target: "_blank",
+                                                        rel: "noopener noreferrer",
+                                                        "{url}"
+                                                    }
+                                                }
+
+                                                div { class: "inline-actions",
+                                                    button {
+                                                        class: "btn btn-sm btn-sec",
+                                                        onclick: {
+                                                            let token = admin_token.clone();
+                                                            let mut info_sig = info;
+                                                            let mut error_sig = error;
+                                                            let mut google_redirect_sig = google_oauth_redirect;
+                                                            move |_| {
+                                                                let token = token.clone();
+                                                                spawn(async move {
+                                                                    match google_oauth_start_api(token.as_deref()).await {
+                                                                        Ok(start) => {
+                                                                            google_redirect_sig.set(Some(start.redirect_url.clone()));
+                                                                            info_sig.set(Some(format!(
+                                                                                "Google OAuth start ready (state {}). Open the URL to continue.",
+                                                                                start.state_token
+                                                                            )));
+                                                                            error_sig.set(None);
+                                                                        }
+                                                                        Err(err) => error_sig.set(Some(err)),
+                                                                    }
+                                                                });
+                                                            }
+                                                        },
+                                                        "Connect Google"
+                                                    }
+                                                    button {
+                                                        class: "btn btn-sm btn-sec",
+                                                        onclick: {
+                                                            let token = admin_token.clone();
+                                                            let mut info_sig = info;
+                                                            let mut error_sig = error;
+                                                            let mut google_oauth_sig = google_oauth_status;
+                                                            move |_| {
+                                                                let token = token.clone();
+                                                                spawn(async move {
+                                                                    match fetch_google_oauth_status_api(token.as_deref()).await {
+                                                                        Ok(status) => {
+                                                                            let count = status.account_count;
+                                                                            google_oauth_sig.set(Some(status));
+                                                                            info_sig.set(Some(format!("Refreshed Google OAuth status ({} accounts)", count)));
+                                                                            error_sig.set(None);
+                                                                        }
+                                                                        Err(err) => error_sig.set(Some(err)),
+                                                                    }
+                                                                });
+                                                            }
+                                                        },
+                                                        "Refresh Accounts"
+                                                    }
+                                                }
+
+                                                if let Some(status) = google_oauth_snap.clone() {
+                                                    for account in status.accounts {
+                                                        div { class: "oauth-account-card",
+                                                            strong {
+                                                                "{account.email.clone().unwrap_or_else(|| account.account_id.clone())}"
+                                                            }
+                                                            p {
+                                                                class: "sb-hint",
+                                                                "Account ID: {account.account_id}"
+                                                            }
+                                                            p {
+                                                                class: "sb-hint",
+                                                                {format!(
+                                                                    "Scope: {} | Refresh token: {}",
+                                                                    account.scope.clone().unwrap_or_else(|| "(unknown)".to_string()),
+                                                                    if account.has_refresh_token { "yes" } else { "no" }
+                                                                )}
+                                                            }
+                                                            if let Some(exp) = account.expires_at.clone() {
+                                                                p { class: "sb-hint", "Token expires: {exp}" }
+                                                            }
+                                                            p { class: "sb-hint", "Updated: {account.updated_at}" }
+                                                            div { class: "inline-actions",
+                                                                button {
+                                                                    class: "btn btn-sm btn-danger",
+                                                                    onclick: {
+                                                                        let account_id = account.account_id.clone();
+                                                                        let token = admin_token.clone();
+                                                                        let mut info_sig = info;
+                                                                        let mut error_sig = error;
+                                                                        let mut google_oauth_sig = google_oauth_status;
+                                                                        move |_| {
+                                                                            let account_id = account_id.clone();
+                                                                            let token = token.clone();
+                                                                            spawn(async move {
+                                                                                match google_oauth_disconnect_account_api(&account_id, token.as_deref()).await {
+                                                                                    Ok(()) => {
+                                                                                        info_sig.set(Some(format!("Disconnected Google account {}", account_id)));
+                                                                                        error_sig.set(None);
+                                                                                        match fetch_google_oauth_status_api(token.as_deref()).await {
+                                                                                            Ok(status) => google_oauth_sig.set(Some(status)),
+                                                                                            Err(err) => error_sig.set(Some(err)),
+                                                                                        }
+                                                                                    }
+                                                                                    Err(err) => error_sig.set(Some(err)),
+                                                                                }
+                                                                            });
+                                                                        }
+                                                                    },
+                                                                    "Disconnect"
+                                                                }
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         },
@@ -1288,7 +1831,7 @@ fn App() -> Element {
                                         },
                                         SettingsTab::Integrations => rsx! {
                                             h3 { "Integrations and OAuth" }
-                                            p { class: "sb-hint", "OAuth is enabled for OpenAI/Codex and Anthropic in this release." }
+                                            p { class: "sb-hint", "OAuth controls: OpenAI/Codex + Anthropic (legacy), and Google OAuth multi-account for WebKeys/Gemini browser auth." }
                                             div { class: "setting-row",
                                                 label { "Mattermost URL" }
                                                 input {
@@ -1432,6 +1975,7 @@ fn App() -> Element {
                                                     option { value: "anthropic", "Anthropic" }
                                                     option { value: "openai", "OpenAI" }
                                                     option { value: "gemini", "Google Gemini" }
+                                                    option { value: "gemini-cli", "Gemini CLI (OAuth)" }
                                                     option { value: "nvidia", "NVIDIA" }
                                                 }
 
@@ -1597,6 +2141,7 @@ fn App() -> Element {
                                                                 let mut gh_status_sig = gh_status;
                                                                 let mut gh_repos_sig = gh_repos;
                                                                 let mut oauth_sig = oauth_status;
+                                                                let mut google_oauth_sig = google_oauth_status;
                                                                 move |_| {
                                                                     let provider = provider.clone();
                                                                     let value = inputs_sig.read().get(&provider).cloned().unwrap_or_default();
@@ -1621,6 +2166,7 @@ fn App() -> Element {
                                                                                     gh_status_sig,
                                                                                     gh_repos_sig,
                                                                                     oauth_sig,
+                                                                                    google_oauth_sig,
                                                                                 ).await;
                                                                             }
                                                                             Err(err) => error_sig.set(Some(err)),
@@ -1673,6 +2219,7 @@ fn App() -> Element {
                                                                 let mut gh_status_sig = gh_status;
                                                                 let mut gh_repos_sig = gh_repos;
                                                                 let mut oauth_sig = oauth_status;
+                                                                let mut google_oauth_sig = google_oauth_status;
                                                                 move |_| {
                                                                     let provider = provider.clone();
                                                                     let token = token.clone();
@@ -1692,6 +2239,7 @@ fn App() -> Element {
                                                                                     gh_status_sig,
                                                                                     gh_repos_sig,
                                                                                     oauth_sig,
+                                                                                    google_oauth_sig,
                                                                                 ).await;
                                                                             }
                                                                             Err(err) => error_sig.set(Some(err)),
@@ -1701,6 +2249,32 @@ fn App() -> Element {
                                                             },
                                                             "Revoke"
                                                         }
+                                                    }
+                                                }
+
+                                                if cfg.inference_provider == "gemini-cli" {
+                                                    p { class: "sb-hint", "Gemini CLI uses local OAuth via the `gemini` executable (no API key in vault)." }
+                                                    div { class: "inline-actions",
+                                                        button { class: "btn btn-sm btn-sec", onclick: {
+                                                            let mut settings_draft_sig = settings_draft;
+                                                            move |_| {
+                                                                let current_draft = settings_draft_sig.read().clone();
+                                                                if let Some(mut draft) = current_draft {
+                                                                    draft.inference_model = "gemini-2.5-flash".to_string();
+                                                                    settings_draft_sig.set(Some(draft));
+                                                                }
+                                                            }
+                                                        }, "2.5 Flash" }
+                                                        button { class: "btn btn-sm btn-sec", onclick: {
+                                                            let mut settings_draft_sig = settings_draft;
+                                                            move |_| {
+                                                                let current_draft = settings_draft_sig.read().clone();
+                                                                if let Some(mut draft) = current_draft {
+                                                                    draft.inference_model = "gemini-2.5-pro".to_string();
+                                                                    settings_draft_sig.set(Some(draft));
+                                                                }
+                                                            }
+                                                        }, "2.5 Pro" }
                                                     }
                                                 }
                                             }
@@ -1828,6 +2402,133 @@ fn App() -> Element {
                     }
                 }
             }
+
+            if let Some(pending) = pending_panel_action.as_ref() {
+                div {
+                    class: "modal-overlay",
+                    onclick: {
+                        let mut panel_action_confirm = panel_action_confirm;
+                        move |_| {
+                            panel_action_confirm.set(None);
+                        }
+                    },
+                    div {
+                        class: "confirm-modal",
+                        onclick: move |e: Event<MouseData>| { e.stop_propagation(); },
+                        h3 { class: "confirm-title", "Confirm {pending.action.confirm_label()}" }
+                        p { class: "sb-hint", "{pending.action.confirmation_text(&pending.panel_title)}" }
+                        div { class: "confirm-actions",
+                            button {
+                                class: "btn btn-sm btn-sec",
+                                onclick: {
+                                    let mut panel_action_confirm = panel_action_confirm;
+                                    move |_| {
+                                        panel_action_confirm.set(None);
+                                    }
+                                },
+                                "Cancel"
+                            }
+                            button {
+                                class: if pending.action == DestructiveAction::Remove {
+                                    "btn btn-sm btn-danger"
+                                } else {
+                                    "btn btn-sm btn-warn"
+                                },
+                                onclick: {
+                                    let action_template = pending.clone();
+                                    let token = admin_token.clone();
+                                    let mut panel_action_confirm = panel_action_confirm;
+                                    let mut info_sig = info;
+                                    let mut error_sig = error;
+                                    let mut messages_sig = messages;
+                                    let mut agents_sig = agents;
+                                    let mut gates_sig = gates;
+                                    let mut events_sig = events;
+                                    let mut layouts_sig = panel_layouts;
+                                    let mut z_sig = next_z;
+                                    let mut detached_sig = detached_windows;
+                                    move |_| {
+                                        let action = action_template.clone();
+                                        panel_action_confirm.set(None);
+                                        let token = token.clone();
+                                        spawn(async move {
+                                            match action.action {
+                                                DestructiveAction::Stop => {
+                                                    match stop_agent_api(&action.agent_id, token.as_deref()).await {
+                                                        Ok(_) => {
+                                                            info_sig.set(Some(format!("{} stopped", action.panel_title)));
+                                                            error_sig.set(None);
+                                                        }
+                                                        Err(e) => {
+                                                            error_sig.set(Some(e));
+                                                            return;
+                                                        }
+                                                    }
+
+                                                    if let Err(e) = refresh_dashboard_state(
+                                                        token,
+                                                        agents_sig,
+                                                        gates_sig,
+                                                        events_sig,
+                                                        messages_sig,
+                                                        layouts_sig,
+                                                        z_sig,
+                                                        detached_sig,
+                                                    )
+                                                    .await
+                                                    {
+                                                        error_sig.set(Some(e));
+                                                    }
+                                                }
+                                                DestructiveAction::Clear => {
+                                                    messages_sig
+                                                        .write()
+                                                        .insert(action.panel_key.clone(), Vec::new());
+                                                    match clear_agent_api(&action.agent_id, token.as_deref()).await {
+                                                        Ok(()) => {
+                                                            info_sig.set(Some(format!("Chat cleared for {}", action.panel_title)));
+                                                            error_sig.set(None);
+                                                        }
+                                                        Err(e) => error_sig.set(Some(e)),
+                                                    }
+                                                }
+                                                DestructiveAction::Remove => {
+                                                    match remove_agent_api(&action.agent_id, token.as_deref()).await {
+                                                        Ok(()) => {
+                                                            info_sig.set(Some(format!("{} removed", action.panel_title)));
+                                                            error_sig.set(None);
+                                                        }
+                                                        Err(e) => {
+                                                            error_sig.set(Some(e));
+                                                            return;
+                                                        }
+                                                    }
+
+                                                    if let Err(e) = refresh_dashboard_state(
+                                                        token,
+                                                        agents_sig,
+                                                        gates_sig,
+                                                        events_sig,
+                                                        messages_sig,
+                                                        layouts_sig,
+                                                        z_sig,
+                                                        detached_sig,
+                                                    )
+                                                    .await
+                                                    {
+                                                        error_sig.set(Some(e));
+                                                    }
+                                                }
+                                            }
+                                        });
+                                    }
+                                },
+                                "Confirm"
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -1839,6 +2540,7 @@ fn DetachedWindow(props: DetachedWindowProps) -> Element {
     let mut info = use_signal(|| None::<String>);
     let mut error = use_signal(|| None::<String>);
     let mut history_busy = use_signal(|| false);
+    let mut confirm_action = use_signal(|| None::<DestructiveAction>);
 
     {
         let token = props.admin_token.clone();
@@ -1867,6 +2569,45 @@ fn DetachedWindow(props: DetachedWindowProps) -> Element {
     let token = props.admin_token.clone();
     let panel_key = props.panel_key.clone();
     let is_history_busy = *history_busy.read();
+    let can_submit = !is_history_busy && !draft_val.trim().is_empty();
+    let mut composer_models = use_signal(Vec::<String>::new);
+    let mut model_picker_open = use_signal(|| false);
+    let mut composer_mode = use_signal(|| {
+        if aid.is_some() {
+            "build".to_string()
+        } else {
+            "orchestrator".to_string()
+        }
+    });
+    let composer_models_snap = composer_models.read().clone();
+    let selected_model_values = normalized_model_values(Some(&composer_models_snap));
+    let selected_model_values_with_default =
+        model_values_with_default_fallback(&selected_model_values, &props.default_chat_model);
+    let selected_targets = model_targets_from_values(&selected_model_values_with_default);
+    let selected_provider_model = selected_targets
+        .first()
+        .map(|target| (target.provider.clone(), target.model.clone()));
+    let wrap_mode_enabled = selected_targets.len() > 1;
+    let selected_runtime_label = if wrap_mode_enabled {
+        format!("wrap x{} models", selected_targets.len())
+    } else {
+        selected_provider_model
+            .as_ref()
+            .map(|(p, m)| runtime_label(Some(p.as_str()), Some(m.as_str())))
+            .unwrap_or_else(|| "runtime default".to_string())
+    };
+    let selected_models_payload = if wrap_mode_enabled {
+        Some(selected_targets.clone())
+    } else {
+        None
+    };
+    let wrap_mode_payload = if wrap_mode_enabled { Some(true) } else { None };
+    let selected_mode = composer_mode.read().clone();
+    let mode_options = if aid.is_some() {
+        &SUBAGENT_CHAT_MODES[..]
+    } else {
+        &KAIZEN_CHAT_MODES[..]
+    };
 
     rsx! {
         style { {CSS} }
@@ -1913,23 +2654,9 @@ fn DetachedWindow(props: DetachedWindowProps) -> Element {
                         button {
                             class: "btn btn-xs btn-warn",
                             onclick: {
-                                let aid = aid.clone();
-                                let token = token.clone();
-                                let mut info_sig = info;
-                                let mut error_sig = error;
+                                let mut confirm_action = confirm_action;
                                 move |_| {
-                                    if let Some(id) = aid.clone() {
-                                        let token = token.clone();
-                                        spawn(async move {
-                                            match stop_agent_api(&id, token.as_deref()).await {
-                                                Ok(_) => {
-                                                    info_sig.set(Some("Agent stopped".into()));
-                                                    error_sig.set(None);
-                                                }
-                                                Err(e) => error_sig.set(Some(e)),
-                                            }
-                                        });
-                                    }
+                                    confirm_action.set(Some(DestructiveAction::Stop));
                                 }
                             },
                             "Stop"
@@ -1937,25 +2664,9 @@ fn DetachedWindow(props: DetachedWindowProps) -> Element {
                         button {
                             class: "btn btn-xs btn-sec",
                             onclick: {
-                                let aid = aid.clone();
-                                let token = token.clone();
-                                let mut info_sig = info;
-                                let mut error_sig = error;
-                                let mut history_sig = history;
+                                let mut confirm_action = confirm_action;
                                 move |_| {
-                                    history_sig.set(Vec::new());
-                                    if let Some(id) = aid.clone() {
-                                        let token = token.clone();
-                                        spawn(async move {
-                                            match clear_agent_api(&id, token.as_deref()).await {
-                                                Ok(()) => {
-                                                    info_sig.set(Some("Chat cleared".into()));
-                                                    error_sig.set(None);
-                                                }
-                                                Err(e) => error_sig.set(Some(e)),
-                                            }
-                                        });
-                                    }
+                                    confirm_action.set(Some(DestructiveAction::Clear));
                                 }
                             },
                             "Clear"
@@ -1963,22 +2674,12 @@ fn DetachedWindow(props: DetachedWindowProps) -> Element {
                         button {
                             class: "btn btn-xs btn-danger",
                             onclick: {
-                                let aid = aid.clone();
-                                let token = token.clone();
-                                let mut error_sig = error;
+                                let mut confirm_action = confirm_action;
                                 move |_| {
-                                    if let Some(id) = aid.clone() {
-                                        let token = token.clone();
-                                        spawn(async move {
-                                            match remove_agent_api(&id, token.as_deref()).await {
-                                                Ok(()) => window().close(),
-                                                Err(e) => error_sig.set(Some(e)),
-                                            }
-                                        });
-                                    }
+                                    confirm_action.set(Some(DestructiveAction::Remove));
                                 }
                             },
-                            "X"
+                            "Remove"
                         }
                     }
                     button {
@@ -2004,11 +2705,82 @@ fn DetachedWindow(props: DetachedWindowProps) -> Element {
                 div { class: "banner ok", "{i}" }
             }
 
+            if let Some(action) = confirm_action.read().as_ref() {
+                div { class: "confirm-inline",
+                    strong { class: "confirm-inline-title", "Confirm {action.confirm_label()}" }
+                    p { class: "sb-hint", "{action.confirmation_text(&title)}" }
+                    div { class: "confirm-actions",
+                        button {
+                            class: "btn btn-sm btn-sec",
+                            onclick: {
+                                let mut confirm_action = confirm_action;
+                                move |_| {
+                                    confirm_action.set(None);
+                                }
+                            },
+                            "Cancel"
+                        }
+                        button {
+                            class: if *action == DestructiveAction::Remove {
+                                "btn btn-sm btn-danger"
+                            } else {
+                                "btn btn-sm btn-warn"
+                            },
+                            onclick: {
+                                let action = *action;
+                                let aid = aid.clone();
+                                let token = token.clone();
+                                let mut confirm_action = confirm_action;
+                                let mut info_sig = info;
+                                let mut error_sig = error;
+                                let mut history_sig = history;
+                                move |_| {
+                                    confirm_action.set(None);
+                                    if let Some(id) = aid.clone() {
+                                        let token = token.clone();
+                                        spawn(async move {
+                                            match action {
+                                                DestructiveAction::Stop => {
+                                                    match stop_agent_api(&id, token.as_deref()).await {
+                                                        Ok(_) => {
+                                                            info_sig.set(Some("Agent stopped".into()));
+                                                            error_sig.set(None);
+                                                        }
+                                                        Err(e) => error_sig.set(Some(e)),
+                                                    }
+                                                }
+                                                DestructiveAction::Clear => {
+                                                    history_sig.set(Vec::new());
+                                                    match clear_agent_api(&id, token.as_deref()).await {
+                                                        Ok(()) => {
+                                                            info_sig.set(Some("Chat cleared".into()));
+                                                            error_sig.set(None);
+                                                        }
+                                                        Err(e) => error_sig.set(Some(e)),
+                                                    }
+                                                }
+                                                DestructiveAction::Remove => {
+                                                    match remove_agent_api(&id, token.as_deref()).await {
+                                                        Ok(()) => window().close(),
+                                                        Err(e) => error_sig.set(Some(e)),
+                                                    }
+                                                }
+                                            }
+                                        });
+                                    }
+                                }
+                            },
+                            "Confirm"
+                        }
+                    }
+                }
+            }
+
             div { class: "detached-stream",
                 if msg_snap.is_empty() {
                     p { class: "stream-empty", "No messages yet." }
                 }
-                for line in msg_snap.iter().rev().take(20).rev() {
+                for line in msg_snap.iter().rev().take(80).rev() {
                     div {
                         class: if line.role == "user" { "msg msg-you" } else { "msg msg-ai" },
                         span {
@@ -2026,18 +2798,111 @@ fn DetachedWindow(props: DetachedWindowProps) -> Element {
                 }
             }
 
-            div { class: "composer",
-                input {
-                    r#type: "text",
-                    class: "comp-in",
-                    value: draft_val,
-                    placeholder: "Message...",
-                    oninput: move |e: Event<FormData>| draft.set(e.value()),
+            div { class: "composer-toolbar",
+                div { class: "model-picker-summary",
+                    if wrap_mode_enabled {
+                        "Wrap mode on ({selected_targets.len()} models)"
+                    } else {
+                        "Model: {selected_runtime_label}"
+                    }
+                }
+                if *model_picker_open.read() {
+                    div {
+                        class: "model-picker-popover",
+                        p { class: "model-picker-title", "Model selection" }
+                        p { class: "model-picker-hint", "Select one for direct mode, or multiple for wrap mode." }
+                        for (provider, label, model) in CHAT_MODEL_PRESETS {
+                            label {
+                                class: "model-picker-option",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: selected_model_values_with_default
+                                        .iter()
+                                        .any(|entry| entry == &model_value(provider, model)),
+                                    onclick: {
+                                        let provider = provider.to_string();
+                                        let model = model.to_string();
+                                        let mut composer_models = composer_models;
+                                        let default_model_value = props.default_chat_model.clone();
+                                        move |_| {
+                                            let preset_value = model_value(&provider, &model);
+                                            let explicit_selected = {
+                                                let current = composer_models.read().clone();
+                                                normalized_model_values(Some(&current))
+                                            };
+                                            let mut effective_selected = model_values_with_default_fallback(
+                                                &explicit_selected,
+                                                &default_model_value,
+                                            );
+
+                                            if let Some(idx) = effective_selected
+                                                .iter()
+                                                .position(|entry| entry == &preset_value)
+                                            {
+                                                if effective_selected.len() > 1 {
+                                                    effective_selected.remove(idx);
+                                                }
+                                            } else {
+                                                effective_selected.push(preset_value);
+                                            }
+
+                                            let updated_selected =
+                                                normalized_model_values(Some(&effective_selected));
+                                            if updated_selected.is_empty()
+                                                || (updated_selected.len() == 1
+                                                    && updated_selected[0] == default_model_value)
+                                            {
+                                                composer_models.set(Vec::new());
+                                            } else {
+                                                composer_models.set(updated_selected);
+                                            }
+                                        }
+                                    },
+                                }
+                                span { "{label}" }
+                            }
+                        }
+                    }
                 }
                 button {
-                    class: "btn btn-send",
-                    disabled: is_history_busy,
+                    class: if *model_picker_open.read() {
+                        "btn btn-xs btn-sec btn-model-picker-open"
+                    } else {
+                        "btn btn-xs btn-sec"
+                    },
+                    title: "Open model picker",
                     onclick: {
+                        let mut model_picker_open = model_picker_open;
+                        move |_| {
+                            let is_open = *model_picker_open.read();
+                            model_picker_open.set(!is_open);
+                        }
+                    },
+                    if *model_picker_open.read() { "Close picker" } else { "Models" }
+                }
+                div { class: "comp-mode-row",
+                    for mode_name in mode_options.iter() {
+                        button {
+                            class: if *mode_name == selected_mode { "comp-mode-chip comp-mode-chip-active" } else { "comp-mode-chip" },
+                            onclick: {
+                                let mode_name = mode_name.to_string();
+                                move |_| composer_mode.set(mode_name.clone())
+                            },
+                            "{mode_name}"
+                        }
+                    }
+                }
+            }
+
+            div { class: "composer",
+                textarea {
+                    class: "comp-in",
+                    rows: "1",
+                    disabled: is_history_busy,
+                    value: draft_val,
+                    placeholder: "Message your agent...",
+                    oninput: move |e: Event<FormData>| draft.set(e.value()),
+                    onkeydown: {
                         let aid = aid.clone();
                         let token = token.clone();
                         let mut draft_sig = draft;
@@ -2046,7 +2911,18 @@ fn DetachedWindow(props: DetachedWindowProps) -> Element {
                         let mut error_sig = error;
                         let mut busy_sig = history_busy;
                         let title_for_line = title.clone();
-                        move |_| {
+                        let selected_provider_model = selected_provider_model.clone();
+                        let selected_models_payload = selected_models_payload.clone();
+                        let wrap_mode_payload = wrap_mode_payload;
+                        let selected_mode = selected_mode.clone();
+                        let selected_runtime_label = selected_runtime_label.clone();
+                        move |evt: Event<KeyboardData>| {
+                            if evt.key().to_string() != "Enter" || evt.modifiers().shift() {
+                                return;
+                            }
+
+                            evt.prevent_default();
+
                             let currently_busy = *busy_sig.read();
                             if currently_busy {
                                 return;
@@ -2057,19 +2933,54 @@ fn DetachedWindow(props: DetachedWindowProps) -> Element {
                                 return;
                             }
 
+                            busy_sig.set(true);
                             draft_sig.set(String::new());
                             history_sig.write().push(UiMsg::new("user", text.clone()));
 
                             let aid = aid.clone();
                             let token = token.clone();
                             let title_for_line = title_for_line.clone();
+                            let provider_model = selected_provider_model.clone();
+                            let selected_models_payload = selected_models_payload.clone();
+                            let wrap_mode_payload = wrap_mode_payload;
+                            let mode = selected_mode.clone();
+                            let selected_runtime_label = selected_runtime_label.clone();
                             spawn(async move {
-                                match send_chat(&text, aid.as_deref(), token.as_deref()).await {
+                                let provider = if wrap_mode_payload.unwrap_or(false) {
+                                    None
+                                } else {
+                                    provider_model.as_ref().map(|(p, _)| p.as_str())
+                                };
+                                let model = if wrap_mode_payload.unwrap_or(false) {
+                                    None
+                                } else {
+                                    provider_model.as_ref().map(|(_, m)| m.as_str())
+                                };
+                                match send_chat(
+                                    &text,
+                                    aid.as_deref(),
+                                    provider,
+                                    model,
+                                    Some(mode.as_str()),
+                                    selected_models_payload,
+                                    wrap_mode_payload,
+                                    token.as_deref(),
+                                )
+                                .await
+                                {
                                     Ok(reply) => {
                                         history_sig
                                             .write()
                                             .push(UiMsg::new("assistant", reply.reply));
-                                        info_sig.set(Some("Reply received".into()));
+                                        let runtime = if reply.provider.is_some() || reply.model.is_some() {
+                                            runtime_label(
+                                                reply.provider.as_deref(),
+                                                reply.model.as_deref(),
+                                            )
+                                        } else {
+                                            selected_runtime_label.clone()
+                                        };
+                                        info_sig.set(Some(format!("Reply via {runtime}")));
                                         error_sig.set(None);
 
                                         let _ = refresh_detached_history(
@@ -2082,6 +2993,7 @@ fn DetachedWindow(props: DetachedWindowProps) -> Element {
                                         .await;
                                     }
                                     Err(e) => {
+                                        busy_sig.set(false);
                                         error_sig.set(Some(e.clone()));
                                         history_sig.write().push(UiMsg::new(
                                             "system",
@@ -2092,7 +3004,107 @@ fn DetachedWindow(props: DetachedWindowProps) -> Element {
                             });
                         }
                     },
-                    "Send"
+                }
+                button {
+                    class: "btn btn-send",
+                    disabled: !can_submit,
+                    onclick: {
+                        let aid = aid.clone();
+                        let token = token.clone();
+                        let mut draft_sig = draft;
+                        let mut history_sig = history;
+                        let mut info_sig = info;
+                        let mut error_sig = error;
+                        let mut busy_sig = history_busy;
+                        let title_for_line = title.clone();
+                        let selected_provider_model = selected_provider_model.clone();
+                        let selected_models_payload = selected_models_payload.clone();
+                        let wrap_mode_payload = wrap_mode_payload;
+                        let selected_mode = selected_mode.clone();
+                        let selected_runtime_label = selected_runtime_label.clone();
+                        move |_| {
+                            let currently_busy = *busy_sig.read();
+                            if currently_busy {
+                                return;
+                            }
+
+                            let text = draft_sig.read().trim().to_string();
+                            if text.is_empty() {
+                                return;
+                            }
+
+                            busy_sig.set(true);
+                            draft_sig.set(String::new());
+                            history_sig.write().push(UiMsg::new("user", text.clone()));
+
+                            let aid = aid.clone();
+                            let token = token.clone();
+                            let title_for_line = title_for_line.clone();
+                            let provider_model = selected_provider_model.clone();
+                            let selected_models_payload = selected_models_payload.clone();
+                            let wrap_mode_payload = wrap_mode_payload;
+                            let mode = selected_mode.clone();
+                            let selected_runtime_label = selected_runtime_label.clone();
+                            spawn(async move {
+                                let provider = if wrap_mode_payload.unwrap_or(false) {
+                                    None
+                                } else {
+                                    provider_model.as_ref().map(|(p, _)| p.as_str())
+                                };
+                                let model = if wrap_mode_payload.unwrap_or(false) {
+                                    None
+                                } else {
+                                    provider_model.as_ref().map(|(_, m)| m.as_str())
+                                };
+                                match send_chat(
+                                    &text,
+                                    aid.as_deref(),
+                                    provider,
+                                    model,
+                                    Some(mode.as_str()),
+                                    selected_models_payload,
+                                    wrap_mode_payload,
+                                    token.as_deref(),
+                                )
+                                .await
+                                {
+                                    Ok(reply) => {
+                                        history_sig
+                                            .write()
+                                            .push(UiMsg::new("assistant", reply.reply));
+                                        let runtime = if reply.provider.is_some() || reply.model.is_some() {
+                                            runtime_label(
+                                                reply.provider.as_deref(),
+                                                reply.model.as_deref(),
+                                            )
+                                        } else {
+                                            selected_runtime_label.clone()
+                                        };
+                                        info_sig.set(Some(format!("Reply via {runtime}")));
+                                        error_sig.set(None);
+
+                                        let _ = refresh_detached_history(
+                                            aid.clone(),
+                                            token.clone(),
+                                            history_sig,
+                                            error_sig,
+                                            busy_sig,
+                                        )
+                                        .await;
+                                    }
+                                    Err(e) => {
+                                        busy_sig.set(false);
+                                        error_sig.set(Some(e.clone()));
+                                        history_sig.write().push(UiMsg::new(
+                                            "system",
+                                            format!("Error from {title_for_line}: {e}"),
+                                        ));
+                                    }
+                                }
+                            });
+                        }
+                    },
+                    if is_history_busy { "Sending..." } else { "Send" }
                 }
             }
         }
@@ -2121,21 +3133,30 @@ fn card(
     title: &str,
     subtitle: &str,
     agent: Option<&ApiAgent>,
+    edge_accent: bool,
     mode: PanelMode,
     m_snap: &HashMap<String, Vec<UiMsg>>,
+    sending_snap: &HashMap<String, bool>,
+    composer_models_snap: &HashMap<String, Vec<String>>,
+    model_picker_open_snap: &HashMap<String, bool>,
+    composer_mode_snap: &HashMap<String, String>,
     d_snap: &HashMap<String, String>,
     drafts: &mut Signal<HashMap<String, String>>,
     messages: &mut Signal<HashMap<String, Vec<UiMsg>>>,
+    sending: &mut Signal<HashMap<String, bool>>,
+    composer_models: &mut Signal<HashMap<String, Vec<String>>>,
+    model_picker_open: &mut Signal<HashMap<String, bool>>,
+    composer_mode: &mut Signal<HashMap<String, String>>,
     info: &mut Signal<Option<String>>,
     error: &mut Signal<Option<String>>,
+    default_chat_model: &str,
     admin_token: &Option<String>,
     agents: &mut Signal<Vec<ApiAgent>>,
-    gates: &mut Signal<Option<GateSnapshot>>,
-    events: &mut Signal<Vec<CrystalBallEvent>>,
     layouts: &mut Signal<HashMap<String, PanelLayout>>,
     next_z: &mut Signal<u32>,
     detached_windows: &mut Signal<HashMap<String, WeakDesktopContext>>,
     drag_state: &mut Signal<Option<DragState>>,
+    panel_action_confirm: &mut Signal<Option<PendingPanelAction>>,
 ) -> Element {
     let msgs = m_snap.get(key).cloned().unwrap_or_default();
     let draft = d_snap.get(key).cloned().unwrap_or_default();
@@ -2144,66 +3165,267 @@ fn card(
     let subtitle_owned = subtitle.to_string();
     let aid = agent.map(|a| a.id.clone());
     let can_send = key == "kaizen" || aid.is_some();
+    let can_submit = can_send && !draft.trim().is_empty();
     let has_agent = agent.is_some();
+    let is_kaizen = key == "kaizen";
+    let is_sending = sending_snap.get(key).copied().unwrap_or(false);
+    let mode_options = if is_kaizen {
+        &KAIZEN_CHAT_MODES[..]
+    } else {
+        &SUBAGENT_CHAT_MODES[..]
+    };
+    let selected_mode = composer_mode_snap.get(key).cloned().unwrap_or_else(|| {
+        if is_kaizen {
+            "orchestrator".to_string()
+        } else {
+            "build".to_string()
+        }
+    });
+    let selected_model_values = normalized_model_values(composer_models_snap.get(key));
+    let selected_model_values_with_default =
+        model_values_with_default_fallback(&selected_model_values, default_chat_model);
+    let selected_targets = model_targets_from_values(&selected_model_values_with_default);
+    let selected_provider_model = selected_targets
+        .first()
+        .map(|target| (target.provider.clone(), target.model.clone()));
+    let wrap_mode_enabled = selected_targets.len() > 1;
+    let selected_runtime_label = if wrap_mode_enabled {
+        format!("wrap x{} models", selected_targets.len())
+    } else {
+        selected_provider_model
+            .as_ref()
+            .map(|(p, m)| runtime_label(Some(p.as_str()), Some(m.as_str())))
+            .unwrap_or_else(|| "runtime default".to_string())
+    };
+    let is_model_picker_open = model_picker_open_snap.get(key).copied().unwrap_or(false);
     let detach_supported = native_detach_enabled();
 
     let mut d_sig = *drafts;
     let mut m_sig = *messages;
+    let mut sending_sig = *sending;
+    let mut composer_models_sig = *composer_models;
+    let mut model_picker_open_sig = *model_picker_open;
+    let mut composer_mode_sig = *composer_mode;
     let mut i_sig = *info;
     let mut e_sig = *error;
     let mut a_sig = *agents;
-    let mut g_sig = *gates;
-    let mut ev_sig = *events;
     let mut l_sig = *layouts;
     let mut z_sig = *next_z;
     let mut dw_sig = *detached_windows;
     let mut drag_sig = *drag_state;
+    let mut panel_confirm_sig = *panel_action_confirm;
     let token = admin_token.clone();
+    let default_chat_model_owned = default_chat_model.to_string();
 
-    let card_class = if mode == PanelMode::Floating {
-        "card floating-card"
-    } else {
-        "card"
+    // Reusable submit logic for both button and Ctrl+Enter
+    let submit_action = {
+        let k = k.clone();
+        let aid = aid.clone();
+        let token = token.clone();
+        let t = t.clone();
+        let default_model_value = default_chat_model.to_string();
+        let mut d_sig = d_sig;
+        let mut m_sig = m_sig;
+        let mut sending_sig = sending_sig;
+        let mut composer_models_sig = composer_models_sig;
+        let mut i_sig = i_sig;
+        let mut e_sig = e_sig;
+        let mode = selected_mode.clone();
+
+        std::rc::Rc::new(std::cell::RefCell::new(move || {
+            let text = d_sig
+                .read()
+                .get(&k)
+                .cloned()
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            if text.is_empty() {
+                return;
+            }
+            if sending_sig.read().get(&k).copied().unwrap_or(false) {
+                return;
+            }
+
+            let selected_values = normalized_model_values(composer_models_sig.read().get(&k));
+            let selected_values_with_default =
+                model_values_with_default_fallback(&selected_values, &default_model_value);
+            let selected_targets = model_targets_from_values(&selected_values_with_default);
+            let wrap_mode = selected_targets.len() > 1;
+            let primary_target = selected_targets.first().cloned();
+            let primary_provider = if wrap_mode {
+                None
+            } else {
+                primary_target
+                    .as_ref()
+                    .map(|target| target.provider.clone())
+            };
+            let primary_model = if wrap_mode {
+                None
+            } else {
+                primary_target.as_ref().map(|target| target.model.clone())
+            };
+            let selected_models_payload = if wrap_mode {
+                Some(selected_targets.clone())
+            } else {
+                None
+            };
+            let wrap_mode_payload = if wrap_mode { Some(true) } else { None };
+            let runtime_lbl = if wrap_mode {
+                format!("wrap x{} models", selected_targets.len())
+            } else if let Some(target) = primary_target.as_ref() {
+                runtime_label(Some(target.provider.as_str()), Some(target.model.as_str()))
+            } else {
+                "runtime default".to_string()
+            };
+
+            d_sig.write().insert(k.clone(), String::new());
+            m_sig
+                .write()
+                .entry(k.clone())
+                .or_default()
+                .push(UiMsg::new("user", text.clone()));
+            sending_sig.write().insert(k.clone(), true);
+            e_sig.set(None);
+
+            let k_hist = k.clone();
+            let aid_hist = aid.clone();
+            let token_hist = token.clone();
+            let t_hist = t.clone();
+            let primary_provider = primary_provider.clone();
+            let primary_model = primary_model.clone();
+            let selected_models_payload = selected_models_payload.clone();
+            let wrap_mode_payload = wrap_mode_payload;
+            let mode = mode.clone();
+            let runtime_lbl = runtime_lbl.clone();
+
+            spawn(async move {
+                let provider = primary_provider.as_deref();
+                let model = primary_model.as_deref();
+                match send_chat(
+                    &text,
+                    aid_hist.as_deref(),
+                    provider,
+                    model,
+                    Some(mode.as_str()),
+                    selected_models_payload,
+                    wrap_mode_payload,
+                    token_hist.as_deref(),
+                )
+                .await
+                {
+                    Ok(resp) => {
+                        m_sig
+                            .write()
+                            .entry(k_hist.clone())
+                            .or_default()
+                            .push(UiMsg::new("assistant", resp.reply));
+                        let runtime = if resp.provider.is_some() || resp.model.is_some() {
+                            runtime_label(resp.provider.as_deref(), resp.model.as_deref())
+                        } else {
+                            runtime_lbl
+                        };
+                        i_sig.set(Some(format!("Reply via {runtime}")));
+                        sending_sig.write().insert(k_hist.clone(), false);
+
+                        if let Ok(history) =
+                            fetch_chat_history(aid_hist.as_deref(), token_hist.as_deref()).await
+                        {
+                            m_sig.write().insert(k_hist, history);
+                        }
+                    }
+                    Err(e) => {
+                        sending_sig.write().insert(k_hist.clone(), false);
+                        e_sig.set(Some(e.clone()));
+                        m_sig
+                            .write()
+                            .entry(k_hist)
+                            .or_default()
+                            .push(UiMsg::new("system", format!("Error from {t_hist}: {e}")));
+                    }
+                }
+            });
+        }))
+    };
+
+    let card_class = match (mode == PanelMode::Floating, edge_accent, is_kaizen) {
+        (true, true, true) => {
+            "card floating-card card-edge-accent card-kaizen-hero card-kaizen-floating"
+        }
+        (true, false, true) => "card floating-card card-kaizen-hero card-kaizen-floating",
+        (false, true, true) => "card card-edge-accent card-kaizen-hero",
+        (false, false, true) => "card card-kaizen-hero",
+        (true, true, false) => "card floating-card card-edge-accent",
+        (true, false, false) => "card floating-card",
+        (false, true, false) => "card card-edge-accent",
+        (false, false, false) => "card",
     };
 
     rsx! {
         div { class: "{card_class}", key: "{k}",
+            onmousedown: {
+                let k = k.clone();
+                let mut drag_sig = drag_sig;
+                let mut z_sig = z_sig;
+                let mut l_sig = l_sig;
+                move |evt: Event<MouseData>| {
+                    if mode != PanelMode::Floating {
+                        return;
+                    }
+
+                    let local = evt.data().element_coordinates();
+                    let drag_zone_height = if is_kaizen { 96.0 } else { FLOAT_DRAG_ZONE_HEIGHT };
+                    if local.y > drag_zone_height {
+                        return;
+                    }
+
+                    let point = evt.data().client_coordinates();
+                    let mut map = l_sig.read().clone();
+                    let Some(layout) = map.get_mut(&k) else {
+                        return;
+                    };
+
+                    layout.z = bump_z(&mut z_sig);
+                    let snapshot = layout.clone();
+                    l_sig.set(map);
+
+                    drag_sig.set(Some(DragState {
+                        panel_key: k.clone(),
+                        mouse_start_x: point.x,
+                        mouse_start_y: point.y,
+                        panel_start_x: snapshot.x,
+                        panel_start_y: snapshot.y,
+                    }));
+                }
+            },
             div {
                 class: if mode == PanelMode::Floating { "card-head card-head-drag" } else { "card-head" },
                 h2 {
                     class: "card-title",
-                    onmousedown: {
-                        let k = k.clone();
-                        let mut drag_sig = drag_sig;
-                        let mut z_sig = z_sig;
-                        let mut l_sig = l_sig;
-                        move |evt: Event<MouseData>| {
-                            if mode != PanelMode::Floating {
-                                return;
-                            }
-
-                            let point = evt.data().client_coordinates();
-                            let mut map = l_sig.read().clone();
-                            let Some(layout) = map.get_mut(&k) else {
-                                return;
-                            };
-
-                            layout.z = bump_z(&mut z_sig);
-                            let snapshot = layout.clone();
-                            l_sig.set(map);
-
-                            drag_sig.set(Some(DragState {
-                                panel_key: k.clone(),
-                                mouse_start_x: point.x,
-                                mouse_start_y: point.y,
-                                panel_start_x: snapshot.x,
-                                panel_start_y: snapshot.y,
-                            }));
-                        }
-                    },
                     "{t}"
                 }
-                div { class: "card-actions",
+                div {
+                    class: "card-actions",
+                    onmousedown: move |e: Event<MouseData>| e.stop_propagation(),
+                    button {
+                        class: if is_model_picker_open {
+                            "btn btn-xs btn-accent btn-model-toggle"
+                        } else {
+                            "btn btn-xs btn-sec btn-model-toggle"
+                        },
+                        title: "Open model picker",
+                        onclick: {
+                            let k = k.clone();
+                            let mut model_picker_open_sig = model_picker_open_sig;
+                            move |_| {
+                                let mut map = model_picker_open_sig.read().clone();
+                                let current = map.get(&k).copied().unwrap_or(false);
+                                map.insert(k.clone(), !current);
+                                model_picker_open_sig.set(map);
+                            }
+                        },
+                        "M"
+                    }
                     button {
                         class: if mode == PanelMode::Docked { "btn btn-xs btn-accent" } else { "btn btn-xs btn-sec" },
                         title: "Dock this panel",
@@ -2212,10 +3434,20 @@ fn card(
                             let mut l_sig = l_sig;
                             let mut z_sig = z_sig;
                             let mut dw_sig = dw_sig;
+                            let mut drag_sig = drag_sig;
                             move |_| {
-                                if let Some(handle) = dw_sig.write().remove(&k) {
+                                drag_sig.set(None);
+
+                                let removed = {
+                                    let mut map = dw_sig.write();
+                                    map.remove(&k)
+                                };
+
+                                if let Some(handle) = removed {
                                     if let Some(win) = handle.upgrade() {
-                                        win.close();
+                                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                            win.close();
+                                        }));
                                     }
                                 }
 
@@ -2236,12 +3468,14 @@ fn card(
                             let k = k.clone();
                             let mut l_sig = l_sig;
                             let mut z_sig = z_sig;
+                            let mut drag_sig = drag_sig;
                             move |_| {
+                                drag_sig.set(None);
                                 let mut map = l_sig.read().clone();
                                 let layout = map.entry(k.clone()).or_insert_with(|| default_panel_layout(0));
                                 layout.mode = PanelMode::Floating;
-                                layout.width = layout.width.max(360.0);
-                                layout.height = layout.height.max(280.0);
+                                layout.width = layout.width.max(MIN_PANEL_WIDTH);
+                                layout.height = layout.height.max(MIN_PANEL_HEIGHT);
                                 layout.z = bump_z(&mut z_sig);
                                 l_sig.set(map.clone());
                                 persist_layouts(&map);
@@ -2251,7 +3485,11 @@ fn card(
                     }
                     button {
                         class: if mode == PanelMode::Detached { "btn btn-xs btn-accent" } else { "btn btn-xs btn-sec" },
-                        title: if detach_supported { "Detach to native window" } else { "Native detach disabled, switching to floating mode" },
+                        title: if detach_supported {
+                            "Detach to native window"
+                        } else {
+                            "Native detach guarded for stability; using floating mode"
+                        },
                         onclick: {
                             let k = k.clone();
                             let title = t.clone();
@@ -2263,7 +3501,10 @@ fn card(
                             let mut z_sig = z_sig;
                             let mut dw_sig = dw_sig;
                             let mut e_sig = e_sig;
+                            let mut drag_sig = drag_sig;
+                            let default_chat_model_owned = default_chat_model_owned.clone();
                             move |_| {
+                                drag_sig.set(None);
                                 append_ui_diagnostic(&format!("detach requested key={k}"));
 
                                 if !detach_supported {
@@ -2271,13 +3512,13 @@ fn card(
                                     let layout =
                                         map.entry(k.clone()).or_insert_with(|| default_panel_layout(0));
                                     layout.mode = PanelMode::Floating;
-                                    layout.width = layout.width.max(420.0);
-                                    layout.height = layout.height.max(320.0);
+                                    layout.width = layout.width.max(MIN_DETACHED_WIDTH);
+                                    layout.height = layout.height.max(MIN_DETACHED_HEIGHT);
                                     layout.z = bump_z(&mut z_sig);
                                     l_sig.set(map.clone());
                                     persist_layouts(&map);
                                     e_sig.set(Some(
-                                        "Native detach is disabled for stability. Switched to floating mode."
+                                        "Native detach is guarded for stability. Set KAIZEN_ENABLE_NATIVE_DETACH=1 and KAIZEN_NATIVE_DETACH_UNSAFE_ACK=1 to enable it, otherwise floating mode is used."
                                             .to_string(),
                                     ));
                                     append_ui_diagnostic(&format!(
@@ -2311,19 +3552,24 @@ fn card(
                                                 subtitle: subtitle.clone(),
                                                 agent_id: aid.clone(),
                                                 admin_token: token.clone(),
+                                                default_chat_model: default_chat_model_owned.clone(),
                                             },
                                         );
 
                                         let cfg = DesktopConfig::new().with_window(
                                             WindowBuilder::new()
                                                 .with_title(format!("Kaizen MAX | {title}"))
+                                                .with_min_inner_size(LogicalSize::new(
+                                                    MIN_DETACHED_WIDTH,
+                                                    MIN_DETACHED_HEIGHT,
+                                                ))
                                                 .with_inner_size(LogicalSize::new(
-                                                    spawn_layout.width.max(420.0),
-                                                    spawn_layout.height.max(320.0),
+                                                    spawn_layout.width.max(MIN_DETACHED_WIDTH),
+                                                    spawn_layout.height.max(MIN_DETACHED_HEIGHT),
                                                 ))
                                                 .with_position(LogicalPosition::new(
-                                                    spawn_layout.x.max(20.0),
-                                                    spawn_layout.y.max(20.0),
+                                                    spawn_layout.x.max(MIN_PANEL_X),
+                                                    spawn_layout.y.max(MIN_PANEL_Y),
                                                 )),
                                         );
 
@@ -2364,46 +3610,17 @@ fn card(
                             title: "Stop agent",
                             onclick: {
                                 let aid = aid.clone();
-                                let token = token.clone();
-                                let mut i_sig = i_sig;
-                                let mut e_sig = e_sig;
-                                let mut a_sig = a_sig;
-                                let mut g_sig = g_sig;
-                                let mut ev_sig = ev_sig;
-                                let mut m_sig = m_sig;
-                                let mut l_sig = l_sig;
-                                let mut z_sig = z_sig;
-                                let mut dw_sig = dw_sig;
+                                let k = k.clone();
+                                let t = t.clone();
+                                let mut panel_confirm_sig = panel_confirm_sig;
                                 move |_| {
                                     if let Some(id) = aid.clone() {
-                                        let token = token.clone();
-                                        spawn(async move {
-                                            match stop_agent_api(&id, token.as_deref()).await {
-                                                Ok(_) => {
-                                                    i_sig.set(Some("Agent stopped".into()));
-                                                    e_sig.set(None);
-                                                }
-                                                Err(e) => {
-                                                    e_sig.set(Some(e));
-                                                    return;
-                                                }
-                                            }
-
-                                            if let Err(e) = refresh_dashboard_state(
-                                                token,
-                                                a_sig,
-                                                g_sig,
-                                                ev_sig,
-                                                m_sig,
-                                                l_sig,
-                                                z_sig,
-                                                dw_sig,
-                                            )
-                                            .await
-                                            {
-                                                e_sig.set(Some(e));
-                                            }
-                                        });
+                                        panel_confirm_sig.set(Some(PendingPanelAction {
+                                            action: DestructiveAction::Stop,
+                                            panel_key: k.clone(),
+                                            panel_title: t.clone(),
+                                            agent_id: id,
+                                        }));
                                     }
                                 }
                             },
@@ -2414,25 +3631,17 @@ fn card(
                             title: "Clear chat",
                             onclick: {
                                 let aid = aid.clone();
-                                let token = token.clone();
-                                let k2 = k.clone();
-                                let mut i_sig = i_sig;
-                                let mut e_sig = e_sig;
-                                let mut m_sig = m_sig;
+                                let k = k.clone();
+                                let t = t.clone();
+                                let mut panel_confirm_sig = panel_confirm_sig;
                                 move |_| {
-                                    m_sig.write().insert(k2.clone(), Vec::new());
-
                                     if let Some(id) = aid.clone() {
-                                        let token = token.clone();
-                                        spawn(async move {
-                                            match clear_agent_api(&id, token.as_deref()).await {
-                                                Ok(()) => {
-                                                    i_sig.set(Some("Chat cleared".into()));
-                                                    e_sig.set(None);
-                                                }
-                                                Err(e) => e_sig.set(Some(e)),
-                                            }
-                                        });
+                                        panel_confirm_sig.set(Some(PendingPanelAction {
+                                            action: DestructiveAction::Clear,
+                                            panel_key: k.clone(),
+                                            panel_title: t.clone(),
+                                            agent_id: id,
+                                        }));
                                     }
                                 }
                             },
@@ -2443,63 +3652,55 @@ fn card(
                             title: "Remove agent",
                             onclick: {
                                 let aid = aid.clone();
-                                let token = token.clone();
-                                let mut i_sig = i_sig;
-                                let mut e_sig = e_sig;
-                                let mut a_sig = a_sig;
-                                let mut g_sig = g_sig;
-                                let mut ev_sig = ev_sig;
-                                let mut m_sig = m_sig;
-                                let mut l_sig = l_sig;
-                                let mut z_sig = z_sig;
-                                let mut dw_sig = dw_sig;
+                                let k = k.clone();
+                                let t = t.clone();
+                                let mut panel_confirm_sig = panel_confirm_sig;
                                 move |_| {
                                     if let Some(id) = aid.clone() {
-                                        let token = token.clone();
-                                        spawn(async move {
-                                            match remove_agent_api(&id, token.as_deref()).await {
-                                                Ok(()) => {
-                                                    i_sig.set(Some("Agent removed".into()));
-                                                    e_sig.set(None);
-                                                }
-                                                Err(e) => {
-                                                    e_sig.set(Some(e));
-                                                    return;
-                                                }
-                                            }
-
-                                            if let Err(e) = refresh_dashboard_state(
-                                                token,
-                                                a_sig,
-                                                g_sig,
-                                                ev_sig,
-                                                m_sig,
-                                                l_sig,
-                                                z_sig,
-                                                dw_sig,
-                                            )
-                                            .await
-                                            {
-                                                e_sig.set(Some(e));
-                                            }
-                                        });
+                                        panel_confirm_sig.set(Some(PendingPanelAction {
+                                            action: DestructiveAction::Remove,
+                                            panel_key: k.clone(),
+                                            panel_title: t.clone(),
+                                            agent_id: id,
+                                        }));
                                     }
                                 }
                             },
-                            "X"
+                            "Remove"
                         }
                     }
                 }
+                span { class: "comp-runtime", "Runtime: {selected_runtime_label}" }
             }
 
             p { class: "card-sub", "{subtitle}" }
             p { class: "mode-chip", "Mode: {mode.label()}" }
 
+            if is_kaizen {
+                div { class: "kaizen-hero",
+                    div { class: "kaizen-hero-copy",
+                        p { class: "kaizen-hero-kicker", "Kaizen Orchestrator" }
+                        h3 { class: "kaizen-hero-title", "Command Deck" }
+                        p { class: "kaizen-hero-text", "Plan, supervise, and approve every agent before delivery." }
+                    }
+                    div { class: "kaizen-hero-stats",
+                        div { class: "kaizen-stat",
+                            span { class: "kaizen-stat-label", "Active" }
+                            strong { class: "kaizen-stat-val", "{a_sig.read().len()}" }
+                        }
+                        div { class: "kaizen-stat",
+                            span { class: "kaizen-stat-label", "Phase" }
+                            strong { class: "kaizen-stat-val", "{mode.label()}" }
+                        }
+                    }
+                }
+            }
+
             div { class: "card-stream",
                 if msgs.is_empty() {
                     p { class: "stream-empty", if can_send { "No messages yet." } else { "Spawn to chat." } }
                 }
-                for line in msgs.iter().rev().take(12).rev() {
+                for line in msgs.iter().rev().take(80).rev() {
                     div {
                         class: if line.role == "user" { "msg msg-you" } else { "msg msg-ai" },
                         span {
@@ -2517,78 +3718,135 @@ fn card(
                 }
             }
 
+            div { class: "composer-toolbar",
+                div { class: "model-picker-summary",
+                    if wrap_mode_enabled {
+                        "Wrap mode on ({selected_targets.len()} models)"
+                    } else {
+                        "Model: {selected_runtime_label}"
+                    }
+                }
+                if is_model_picker_open {
+                    div {
+                        class: "model-picker-popover",
+                        p { class: "model-picker-title", "Model selection" }
+                        p { class: "model-picker-hint", "Select one for direct mode, or multiple for wrap mode." }
+                        for (provider, label, model) in CHAT_MODEL_PRESETS {
+                            label {
+                                class: "model-picker-option",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: selected_model_values_with_default
+                                        .iter()
+                                        .any(|entry| entry == &model_value(provider, model)),
+                                    onclick: {
+                                        let k = k.clone();
+                                        let provider = provider.to_string();
+                                        let model = model.to_string();
+                                        let mut composer_models_sig = composer_models_sig;
+                                        let default_model_value = default_chat_model.to_string();
+                                        move |_| {
+                                            let preset_value = model_value(&provider, &model);
+                                            let mut map = composer_models_sig.read().clone();
+                                            let explicit_selected =
+                                                normalized_model_values(map.get(&k));
+                                            let mut effective_selected = model_values_with_default_fallback(
+                                                &explicit_selected,
+                                                &default_model_value,
+                                            );
+
+                                            if let Some(idx) = effective_selected
+                                                .iter()
+                                                .position(|entry| entry == &preset_value)
+                                            {
+                                                if effective_selected.len() > 1 {
+                                                    effective_selected.remove(idx);
+                                                }
+                                            } else {
+                                                effective_selected.push(preset_value);
+                                            }
+
+                                            let updated_selected =
+                                                normalized_model_values(Some(&effective_selected));
+                                            if updated_selected.is_empty()
+                                                || (updated_selected.len() == 1
+                                                    && updated_selected[0] == default_model_value)
+                                            {
+                                                map.remove(&k);
+                                            } else {
+                                                map.insert(k.clone(), updated_selected);
+                                            }
+                                            composer_models_sig.set(map);
+                                        }
+                                    },
+                                }
+                                span { "{label}" }
+                            }
+                        }
+                    }
+                }
+                div { class: "comp-mode-row",
+                    for mode_name in mode_options.iter() {
+                        button {
+                            class: if *mode_name == selected_mode {
+                                "comp-mode-chip comp-mode-chip-active"
+                            } else {
+                                "comp-mode-chip"
+                            },
+                            onclick: {
+                                let k = k.clone();
+                                let mode_name = mode_name.to_string();
+                                let mut composer_mode_sig = composer_mode_sig;
+                                move |_| {
+                                    composer_mode_sig.write().insert(k.clone(), mode_name.clone());
+                                }
+                            },
+                            "{mode_name}"
+                        }
+                    }
+                }
+            }
+
             div { class: "composer",
-                input {
-                    r#type: "text",
+                textarea {
                     class: "comp-in",
+                    rows: "1",
                     disabled: !can_send,
                     value: draft,
-                    placeholder: if can_send { "Message..." } else { "Not active" },
+                    placeholder: if can_send { "Message your agent..." } else { "Not active" },
                     oninput: {
                         let k = k.clone();
                         move |e: Event<FormData>| {
                             d_sig.write().insert(k.clone(), e.value());
                         }
                     },
-                }
-                button {
-                    class: "btn btn-send",
-                    disabled: !can_send,
-                    onclick: {
+                    onkeydown: {
                         let k = k.clone();
-                        let aid = aid.clone();
-                        let token = token.clone();
-                        let t = t.clone();
                         let mut d_sig = d_sig;
-                        let mut m_sig = m_sig;
-                        let mut i_sig = i_sig;
-                        let mut e_sig = e_sig;
-                        move |_| {
-                            let text = d_sig
-                                .read()
-                                .get(&k)
-                                .cloned()
-                                .unwrap_or_default()
-                                .trim()
-                                .to_string();
-                            if text.is_empty() {
+                        let submit = submit_action.clone();
+                        move |evt: Event<KeyboardData>| {
+                            let key = evt.key().to_string();
+                            if key == "Escape" {
+                                d_sig.write().insert(k.clone(), String::new());
                                 return;
                             }
 
-                            d_sig.write().insert(k.clone(), String::new());
-                            m_sig.write().entry(k.clone()).or_default().push(UiMsg::new("user", text.clone()));
-                            e_sig.set(None);
-
-                            let aid = aid.clone();
-                            let token = token.clone();
-                            let k_hist = k.clone();
-                            let t = t.clone();
-                            spawn(async move {
-                                match send_chat(&text, aid.as_deref(), token.as_deref()).await {
-                                    Ok(resp) => {
-                                        m_sig
-                                            .write()
-                                            .entry(k_hist.clone())
-                                            .or_default()
-                                            .push(UiMsg::new("assistant", resp.reply));
-                                        i_sig.set(Some("Reply received".into()));
-
-                                        if let Ok(history) = fetch_chat_history(aid.as_deref(), token.as_deref()).await {
-                                            m_sig.write().insert(k_hist.clone(), history);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        e_sig.set(Some(e.clone()));
-                                        m_sig.write().entry(k_hist).or_default().push(UiMsg::new(
-                                            "system",
-                                            format!("Error from {t}: {e}"),
-                                        ));
-                                    }
-                                }
-                            });
+                            let ctrl = evt.modifiers().ctrl() || evt.modifiers().meta();
+                            if key == "Enter" && ctrl {
+                                evt.prevent_default();
+                                (submit.borrow_mut())();
+                            }
                         }
                     },
-                    "Send"
+                }
+                button {
+                    class: "btn btn-send",
+                    disabled: !can_submit || is_sending,
+                    onclick: {
+                        let submit = submit_action.clone();
+                        move |_| (submit.borrow_mut())()
+                    },
+                    if is_sending { "Sending..." } else { "Send" }
                 }
             }
         }
@@ -2641,6 +3899,7 @@ fn normalize_panel_layouts(
     agents: &[ApiAgent],
     next_z: &mut u32,
 ) -> bool {
+    let (viewport_w, viewport_h) = viewport_size();
     let mut changed = false;
     let mut valid_keys = HashSet::new();
     valid_keys.insert("kaizen".to_string());
@@ -2668,22 +3927,50 @@ fn normalize_panel_layouts(
         }
 
         if let Some(layout) = layouts.get_mut(key) {
-            if layout.width < 320.0 {
-                layout.width = 320.0;
+            let (min_w, min_h) = if layout.mode == PanelMode::Detached {
+                (MIN_DETACHED_WIDTH, MIN_DETACHED_HEIGHT)
+            } else {
+                (MIN_PANEL_WIDTH, MIN_PANEL_HEIGHT)
+            };
+
+            if layout.width < min_w {
+                layout.width = min_w;
                 changed = true;
             }
-            if layout.height < 250.0 {
-                layout.height = 250.0;
+            if layout.height < min_h {
+                layout.height = min_h;
                 changed = true;
             }
-            if layout.x < 8.0 {
-                layout.x = 8.0;
-                changed = true;
+
+            if layout.mode == PanelMode::Floating || layout.mode == PanelMode::Detached {
+                let previous_x = layout.x;
+                let previous_y = layout.y;
+
+                // Monitor Fallback:
+                // We clamp to the main window's viewport as a proxy for "safe primary area".
+                // This ensures that if a monitor is missing (or window was far off-screen),
+                // it is pulled back into view.
+                let max_width = viewport_w.max(min_w);
+                let max_height = viewport_h.max(min_h);
+
+                if layout.width > max_width {
+                    layout.width = max_width;
+                    changed = true;
+                }
+                if layout.height > max_height {
+                    layout.height = max_height;
+                    changed = true;
+                }
+
+                clamp_floating_layout(layout, viewport_w, viewport_h);
+                if (layout.x - previous_x).abs() > f64::EPSILON
+                    || (layout.y - previous_y).abs() > f64::EPSILON
+                {
+                    changed = true;
+                }
             }
-            if layout.y < 52.0 {
-                layout.y = 52.0;
-                changed = true;
-            }
+
+            // Docked panels ignore x/y/w/h, so we don't clamp them.
 
             if layout.z >= *next_z {
                 *next_z = layout.z.saturating_add(1);
@@ -2712,9 +3999,11 @@ fn load_layouts() -> HashMap<String, PanelLayout> {
         return HashMap::new();
     };
 
+    let allow_detach = native_detach_enabled();
+
     for layout in parsed.values_mut() {
-        if layout.mode == PanelMode::Detached {
-            layout.mode = PanelMode::Docked;
+        if layout.mode == PanelMode::Detached && !allow_detach {
+            layout.mode = PanelMode::Floating;
         }
     }
 
@@ -2735,6 +4024,91 @@ fn persist_layouts(layouts: &HashMap<String, PanelLayout>) {
     }
 }
 
+fn workspace_file_path() -> Option<PathBuf> {
+    let appdata = std::env::var("APPDATA").ok()?;
+    Some(
+        PathBuf::from(appdata)
+            .join("KaizenMAX")
+            .join("workspaces.json"),
+    )
+}
+
+fn workspace_tile_from_path(path: &str) -> WorkspaceTile {
+    let trimmed = path.trim();
+    let normalized = trimmed.replace('\\', "/").to_ascii_lowercase();
+    let name = PathBuf::from(trimmed)
+        .file_name()
+        .map(|segment| segment.to_string_lossy().to_string())
+        .filter(|segment| !segment.trim().is_empty())
+        .unwrap_or_else(|| trimmed.to_string());
+
+    WorkspaceTile {
+        id: format!("local:{normalized}"),
+        name,
+        path: Some(trimmed.to_string()),
+    }
+}
+
+fn load_workspace_tiles() -> Vec<WorkspaceTile> {
+    let mut tiles = vec![WorkspaceTile {
+        id: "kaizen-max".to_string(),
+        name: "Kaizen MAX".to_string(),
+        path: None,
+    }];
+
+    let Some(path) = workspace_file_path() else {
+        return tiles;
+    };
+
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return tiles;
+    };
+
+    let Ok(saved) = serde_json::from_str::<PersistedWorkspaces>(&raw) else {
+        return tiles;
+    };
+
+    let mut seen = HashSet::new();
+    for saved_path in saved.paths {
+        let trimmed = saved_path.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let key = trimmed.replace('\\', "/").to_ascii_lowercase();
+        if !seen.insert(key) {
+            continue;
+        }
+        tiles.push(workspace_tile_from_path(trimmed));
+    }
+
+    tiles
+}
+
+fn persist_workspace_tiles(tiles: &[WorkspaceTile]) {
+    let Some(path) = workspace_file_path() else {
+        return;
+    };
+
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let mut paths = Vec::new();
+    for tile in tiles {
+        if let Some(path) = tile.path.as_ref() {
+            let trimmed = path.trim();
+            if !trimmed.is_empty() {
+                paths.push(trimmed.to_string());
+            }
+        }
+    }
+
+    let payload = PersistedWorkspaces { paths };
+    if let Ok(json) = serde_json::to_vec_pretty(&payload) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
 fn prune_detached_windows(
     detached: &mut Signal<HashMap<String, WeakDesktopContext>>,
     valid_keys: &HashSet<String>,
@@ -2750,12 +4124,19 @@ fn prune_detached_windows(
         return;
     }
 
-    let mut map = detached.write();
-    for key in stale {
-        if let Some(handle) = map.remove(&key) {
-            if let Some(win) = handle.upgrade() {
+    let handles_to_close: Vec<WeakDesktopContext> = {
+        let mut map = detached.write();
+        stale
+            .into_iter()
+            .filter_map(|key| map.remove(&key))
+            .collect()
+    };
+
+    for handle in handles_to_close {
+        if let Some(win) = handle.upgrade() {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 win.close();
-            }
+            }));
         }
     }
 }
@@ -2803,20 +4184,26 @@ const CSS: &str = r#"
 .shell{min-height:100vh;display:flex;flex-direction:column;background:#0f1923;color:#e4ecf5;font-family:'Segoe UI','Inter',-apple-system,sans-serif;font-size:14px;position:relative}
 
 .top-bar{display:flex;align-items:center;justify-content:space-between;padding:12px 20px;background:linear-gradient(90deg,#151f2e,#1a2840);border-bottom:1px solid #2c3f58;gap:14px;flex-shrink:0;z-index:10}
-.top-left{display:flex;align-items:center;gap:12px}
+.top-left{display:flex;align-items:center;gap:12px;min-width:0}
 .top-right{display:flex;align-items:center;gap:8px}
 .toggle-btn{background:#233448;color:#8da5be;border:1px solid #35506e;border-radius:6px;width:26px;height:26px;cursor:pointer;font-size:13px;display:flex;align-items:center;justify-content:center}
 .toggle-btn:hover{background:#2f4560;color:#c8daf0}
-.logo{font-size:24px;font-weight:700;color:#f0f6ff}
+.brand-lockup{display:flex;align-items:center;gap:10px;min-width:0}
+.brand-mark{width:28px;height:28px;flex-shrink:0;border-radius:8px;background:linear-gradient(145deg,#53a4ff 0%,#2d5ac2 46%,#5f2de2 100%);box-shadow:0 8px 18px rgba(61,104,199,.35),inset 0 0 0 1px rgba(255,255,255,.16);position:relative;overflow:hidden}
+.brand-mark::before{content:"";position:absolute;inset:-6px 11px;background:linear-gradient(180deg,rgba(255,255,255,.95),rgba(255,230,110,.9));transform:rotate(32deg)}
+.brand-text{display:flex;flex-direction:column;min-width:0}
+.logo{font-size:20px;font-weight:700;color:#f0f6ff;line-height:1.05;letter-spacing:.2px}
+.brand-sub{font-size:10px;letter-spacing:1.2px;text-transform:uppercase;color:#86a6c4;line-height:1.1}
 .top-meta{font-size:12px;color:#8ca4bd}
 
 .btn{border:none;border-radius:8px;cursor:pointer;font-size:13px;font-weight:500;padding:7px 13px;transition:background .12s,transform .06s}
 .btn:hover{filter:brightness(1.12)}
 .btn:active{transform:scale(.97)}
+.btn:focus-visible,.comp-in:focus-visible,.s-input:focus-visible,.modal-close:focus-visible{outline:2px solid #6fb0ff;outline-offset:2px}
 .btn-sec{background:#283d56;color:#d0e0f2;border:1px solid #3b5874}
 .btn-accent{background:#3d8b65;color:#effff6}
-.btn-send{background:#4389e0;color:#fff;border-radius:0 8px 8px 0;padding:7px 14px}
-.btn-send:disabled{background:#2c3f55;color:#5d7a96;cursor:default}
+.btn-send{background:linear-gradient(180deg,#57a4ff,#3d84db);color:#fff;border-left:1px solid #35506d;border-radius:0;padding:8px 14px}
+.btn-send:disabled{background:#2c3f55;color:#5d7a96;cursor:default;border-left-color:#2f435b}
 .btn-sm{font-size:11px;padding:5px 9px}
 .btn-xs{font-size:10px;padding:3px 7px;border-radius:5px}
 .btn-warn{background:#7a6520;color:#ffe8a0}
@@ -2844,32 +4231,82 @@ const CSS: &str = r#"
 .ws-active{background:#223650;color:#e6f0ff}
 .ws-dot{width:8px;height:8px;border-radius:50%;background:#4a6580;flex-shrink:0}
 .ws-dot-on{background:#4dd88a}
+.workspace-taskbar{display:flex;flex-direction:column;gap:8px}
+.workspace-add-row{display:flex;gap:6px;align-items:center}
+.workspace-path-input{flex:1;min-width:0;font-size:12px}
+.ws-pill{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 10px;border-radius:10px;border:1px solid #2a425e;background:#162637;color:#c4d8ed;font-size:12px;cursor:pointer;text-align:left;transition:all .12s}
+.ws-pill:hover{border-color:#4a78a8;background:#1e3247}
+.ws-pill-active{border-color:#62a8f7;background:linear-gradient(90deg,#20384f,#1a2f44);box-shadow:0 0 0 1px rgba(98,168,247,.25)}
+.ws-pill-name{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ws-pill-meta{font-size:10px;color:#86a7c6;flex-shrink:0}
+.ws-add{justify-content:center;border-style:dashed;color:#9eb8d4}
+.sb-bottom-stack{display:flex;flex-direction:column;gap:10px}
+.account-hero{border:1px solid #35506d;background:linear-gradient(155deg,#1a2b3f,#182739 50%,#142232);border-radius:12px;padding:10px;display:flex;flex-direction:column;gap:9px}
+.account-top{display:flex;align-items:center;gap:9px}
+.account-avatar{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;background:linear-gradient(145deg,#58a3ff,#6f4de7);color:#fff;box-shadow:0 0 0 2px rgba(255,255,255,.08)}
+.account-meta{display:flex;flex-direction:column;min-width:0}
+.account-name{font-size:13px;color:#e6f1ff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.account-sub{font-size:11px;color:#8aa8c5}
+.account-chip-row{display:flex;flex-wrap:wrap;gap:6px}
+.account-chip{font-size:10px;padding:3px 8px;border-radius:999px;border:1px solid #35506d;color:#9cc0df;background:#152436}
+.account-open-btn{width:100%}
 
 .center{flex:1;padding:16px;overflow-y:auto;background:#111c2a;position:relative}
 .grid{display:flex;flex-wrap:wrap;gap:14px;align-items:flex-start;position:relative;z-index:1}
 
-.card{width:320px;min-height:340px;background:#1b2a3d;border:1px solid #314a66;border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:8px;transition:border-color .12s,box-shadow .12s;overflow:hidden}
+.card{width:380px;min-height:340px;background:#1b2a3d;border:1px solid #314a66;border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:8px;transition:border-color .12s,box-shadow .12s;overflow:hidden}
 .card:hover{border-color:#4a8dd4;box-shadow:0 4px 18px rgba(74,141,212,.10)}
+.card-edge-accent{border-color:#3c4956;box-shadow:inset 0 0 0 1px rgba(10,12,16,.72),inset 0 0 0 2px rgba(170,180,192,.14)}
+.card-edge-accent:hover{border-color:#5f6c79;box-shadow:0 4px 18px rgba(74,141,212,.08),inset 0 0 0 1px rgba(10,12,16,.8),inset 0 0 0 2px rgba(186,195,206,.18)}
 .floating-card{width:100%;height:100%;min-height:0}
 .card-add{border:2px dashed #384f6a;background:transparent;cursor:pointer;display:flex;align-items:center;justify-content:center;min-height:340px}
 .card-add:hover{border-color:#5a8abf;background:rgba(90,138,191,.05)}
 .add-inner{display:flex;flex-direction:column;align-items:center;gap:8px;color:#5a7d9e;font-size:14px}
 .add-icon{font-size:34px;color:#4a7aa6}
-.card-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
-.card-head-drag{cursor:move}
+.card-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding-top:1px}
+.card-head-drag{cursor:grab;user-select:none}
+.card-head-drag:active{cursor:grabbing}
+.is-dragging .card-head-drag{cursor:grabbing}
+.card-kaizen-hero{background:radial-gradient(120% 110% at 10% -10%,rgba(98,168,247,.16),transparent 38%),radial-gradient(100% 90% at 92% -18%,rgba(123,94,250,.14),transparent 44%),#1b2a3d}
+.card-kaizen-floating{box-shadow:0 18px 46px rgba(16,34,62,.5),0 0 0 1px rgba(98,168,247,.22)}
 .card-title{font-size:18px;font-weight:700;color:#f2f8ff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .card-actions{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}
+.btn-model-toggle{min-width:24px;padding:3px 8px;font-weight:700}
 .card-sub{font-size:11px;color:#7a99b5;margin-top:-2px}
 .mode-chip{font-size:10px;color:#9dc3e5;background:#203247;border:1px solid #35506d;border-radius:999px;padding:2px 8px;display:inline-flex;align-self:flex-start}
-.card-stream{flex:1;background:#141f2e;border:1px solid #283e56;border-radius:8px;padding:8px;overflow-y:auto;min-height:100px;max-height:220px;display:flex;flex-direction:column;gap:5px}
+.kaizen-hero{position:relative;display:flex;justify-content:space-between;gap:12px;padding:10px;border:1px solid #32567d;border-radius:10px;background:linear-gradient(130deg,rgba(32,55,80,.92),rgba(24,41,61,.95));overflow:hidden}
+.kaizen-hero::after{content:"";position:absolute;width:110px;height:110px;right:-34px;top:-50px;border-radius:50%;background:radial-gradient(circle,rgba(106,181,239,.35),transparent 68%);pointer-events:none}
+.kaizen-hero-copy{display:flex;flex-direction:column;gap:2px;z-index:1}
+.kaizen-hero-kicker{font-size:10px;letter-spacing:.8px;text-transform:uppercase;color:#8eb6db}
+.kaizen-hero-title{font-size:16px;line-height:1.1;color:#eef6ff}
+.kaizen-hero-text{font-size:11px;color:#9bbddc;max-width:280px}
+.kaizen-hero-stats{display:flex;flex-direction:column;gap:6px;z-index:1}
+.kaizen-stat{padding:5px 8px;border:1px solid #365779;border-radius:8px;background:#15283b;display:flex;flex-direction:column;align-items:flex-end;min-width:86px}
+.kaizen-stat-label{font-size:9px;color:#87aac8;text-transform:uppercase;letter-spacing:.7px}
+.kaizen-stat-val{font-size:13px;color:#e6f3ff}
+.card-stream{flex:1;background:#141f2e;border:1px solid #283e56;border-radius:8px;padding:8px;overflow-y:auto;min-height:100px;display:flex;flex-direction:column;gap:5px}
 .stream-empty{color:#5b7d9a;font-size:12px}
 .msg{padding:5px 9px;border-radius:8px;font-size:12px;line-height:1.4;max-width:95%}
 .msg-you{background:#253d58;color:#d8e8f8;align-self:flex-end;border-bottom-right-radius:2px}
 .msg-ai{background:#1e3048;color:#c8ddf0;align-self:flex-start;border-bottom-left-radius:2px}
 .msg-role{font-weight:600;margin-right:5px;font-size:10px;color:#8aafcc}
-.composer{display:flex;gap:0}
-.comp-in{flex:1;background:#141f2e;border:1px solid #3a5572;border-right:none;border-radius:8px 0 0 8px;padding:8px 10px;color:#e0ecf8;font-size:12px;outline:none}
-.comp-in:focus{border-color:#4a8dd4}
+.composer-toolbar{display:flex;flex-direction:column;align-items:stretch;gap:7px}
+.comp-model{min-width:180px;max-width:220px;background:#152436;border:1px solid #35506d;border-radius:8px;padding:6px 9px;color:#d5e7fb;font-size:11px;outline:none}
+.comp-model:focus{border-color:#62a8f7}
+.model-picker-summary{font-size:11px;color:#9ab8d4}
+.model-picker-popover{border:1px solid #35506d;border-radius:10px;background:#132336;padding:8px;display:flex;flex-direction:column;gap:6px;max-height:220px;overflow-y:auto}
+.model-picker-title{font-size:11px;font-weight:600;color:#e4f0ff}
+.model-picker-hint{font-size:10px;color:#7fa4c6}
+.model-picker-option{display:flex;align-items:center;gap:7px;color:#c7ddf4;font-size:11px}
+.model-picker-option input{accent-color:#62a8f7}
+.comp-mode-row{display:flex;align-items:center;gap:6px;flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;padding-bottom:2px}
+.comp-mode-chip{background:#182a3d;border:1px solid #35506d;color:#9ec2e2;border-radius:999px;padding:4px 8px;font-size:10px;line-height:1;cursor:pointer;text-transform:capitalize}
+.comp-mode-chip:hover{border-color:#4a8dd4;color:#cde6ff}
+.comp-mode-chip-active{background:#23466b;border-color:#62a8f7;color:#eff7ff}
+.comp-runtime{font-size:10px;color:#7fa4c6;white-space:nowrap;margin-left:auto}
+.composer{display:flex;gap:0;background:#101b2a;border:1px solid #35506d;border-radius:10px;overflow:hidden;transition:border-color .14s,box-shadow .14s}
+.composer:focus-within{border-color:#62a8f7;box-shadow:0 0 0 3px rgba(98,168,247,.17)}
+.comp-in{flex:1;background:transparent;border:none;padding:10px 12px;color:#e0ecf8;font-size:12px;outline:none;resize:none;min-height:40px;max-height:180px;font-family:inherit;line-height:1.35}
 .comp-in:disabled{background:#0f1820;color:#4a6580}
 
 .right{width:295px;min-width:295px;background:#131e2c;border-left:1px solid #263a52;padding:14px 12px;display:flex;flex-direction:column;gap:16px;overflow-y:auto}
@@ -2893,7 +4330,10 @@ const CSS: &str = r#"
 
 .floating-layer{position:fixed;inset:0;z-index:60;pointer-events:none}
 .floating-frame{position:absolute;pointer-events:auto;display:flex;flex-direction:column;background:transparent}
-.floating-resize{position:absolute;right:3px;bottom:3px;width:14px;height:14px;cursor:nwse-resize;background:linear-gradient(135deg,transparent 0%,transparent 45%,#4a8dd4 45%,#4a8dd4 55%,transparent 55%,transparent 100%)}
+.floating-resize{position:absolute;right:2px;bottom:2px;width:24px;height:24px;border-radius:6px;cursor:nwse-resize;opacity:.9;background:linear-gradient(135deg,transparent 0%,transparent 45%,#6aa8eb 45%,#6aa8eb 55%,transparent 55%,transparent 100%)}
+.floating-resize:hover{opacity:1;filter:brightness(1.1)}
+.drag-scrim{position:fixed;inset:0;z-index:59;pointer-events:auto}
+.is-dragging,.is-dragging *{user-select:none}
 
 .detached-shell{min-height:100vh;background:#111c2a;color:#e4ecf5;display:flex;flex-direction:column;padding:14px;gap:10px}
 .detached-head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}
@@ -2905,6 +4345,11 @@ const CSS: &str = r#"
 
 .modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(6,12,22,.72);display:flex;align-items:center;justify-content:center;z-index:1000}
 .modal{background:#1a2840;border:1px solid #3b5874;border-radius:14px;width:700px;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.45)}
+.confirm-modal{background:#1a2840;border:1px solid #3b5874;border-radius:12px;max-width:420px;width:calc(100% - 24px);padding:16px;display:flex;flex-direction:column;gap:10px;box-shadow:0 20px 60px rgba(0,0,0,.45)}
+.confirm-title{font-size:16px;color:#f0f6ff}
+.confirm-actions{display:flex;justify-content:flex-end;gap:8px}
+.confirm-inline{background:#182739;border:1px solid #35506d;border-radius:10px;padding:10px;display:flex;flex-direction:column;gap:7px}
+.confirm-inline-title{font-size:13px;color:#e6f1ff}
 .modal-header{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid #2c3f58}
 .modal-header h2{font-size:20px;color:#f0f6ff}
 .modal-close{background:#283d56;color:#b0c4da;border:1px solid #3b5874;border-radius:6px;width:28px;height:28px;cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center}
@@ -2929,6 +4374,27 @@ const CSS: &str = r#"
   .left{width:100%;min-width:0;border-right:none;border-bottom:1px solid #263a52}
   .center{padding:12px}
   .card{width:100%}
+  .top-meta{display:none}
+
+  .composer{position:sticky;bottom:0;z-index:8;margin-top:8px;border-radius:12px}
+  .comp-in{font-size:16px;min-height:44px}
+  .btn-send{min-width:64px;min-height:44px}
+  .composer-toolbar{gap:8px}
+  .comp-model{max-width:none;min-width:0}
+  .comp-runtime{margin-left:0}
+  .workspace-taskbar{flex-direction:row;overflow-x:auto;padding-bottom:2px}
+  .ws-pill{min-width:180px}
+  .account-hero{padding:9px}
+
+  .floating-layer{position:static;inset:auto;display:flex;flex-direction:column;gap:12px;pointer-events:auto;z-index:2;margin-top:12px}
+  .floating-frame{position:relative !important;left:auto !important;top:auto !important;width:100% !important;height:auto !important;min-height:360px}
+  .floating-resize{display:none}
+}
+
+@media (pointer: coarse){
+  .btn-xs{font-size:12px;padding:7px 10px;border-radius:8px}
+  .card-actions{gap:6px}
+  .toggle-btn{width:34px;height:34px}
 }
 "#;
 
@@ -2976,6 +4442,7 @@ async fn refresh_settings_bundle(
     mut gh_status_sig: Signal<Option<GitHubStatusResponse>>,
     mut gh_repos_sig: Signal<Vec<GitHubRepoSummary>>,
     mut oauth_sig: Signal<HashMap<String, OAuthStatusResponse>>,
+    mut google_oauth_sig: Signal<Option<GoogleOAuthStatusResponse>>,
 ) -> Result<(), String> {
     let settings = fetch_settings_api(t).await?;
     settings_current_sig.set(Some(settings.clone()));
@@ -3019,6 +4486,11 @@ async fn refresh_settings_bundle(
         }
     }
     oauth_sig.set(oauth_map);
+
+    match fetch_google_oauth_status_api(t).await {
+        Ok(status) => google_oauth_sig.set(Some(status)),
+        Err(_) => google_oauth_sig.set(None),
+    }
 
     Ok(())
 }
@@ -3250,6 +4722,55 @@ async fn oauth_disconnect_api(provider: &str, t: Option<&str>) -> Result<(), Str
     }
 }
 
+async fn fetch_google_oauth_status_api(
+    t: Option<&str>,
+) -> Result<GoogleOAuthStatusResponse, String> {
+    rj(Client::new().get(u("/api/webkeys/oauth/google/status")), t).await
+}
+
+async fn google_oauth_start_api(t: Option<&str>) -> Result<GoogleOAuthStartResponse, String> {
+    let response = ah(Client::new().post(u("/api/webkeys/oauth/google/start")), t)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if response.status().is_success() {
+        response
+            .json::<GoogleOAuthStartResponse>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err(format!(
+            "{} {}",
+            response.status(),
+            response.text().await.unwrap_or_default()
+        ))
+    }
+}
+
+async fn google_oauth_disconnect_account_api(
+    account_id: &str,
+    t: Option<&str>,
+) -> Result<(), String> {
+    let response = ah(
+        Client::new().delete(u(&format!("/api/webkeys/oauth/google/{account_id}"))),
+        t,
+    )
+    .send()
+    .await
+    .map_err(|e| e.to_string())?;
+
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} {}",
+            response.status(),
+            response.text().await.unwrap_or_default()
+        ))
+    }
+}
+
 async fn fetch_chat_history(agent_id: Option<&str>, t: Option<&str>) -> Result<Vec<UiMsg>, String> {
     let path = match agent_id {
         Some(id) => format!("/api/chat/history?agent_id={id}&limit=100"),
@@ -3285,6 +4806,11 @@ async fn fetch_all_histories(agents: &[ApiAgent], t: Option<&str>) -> HashMap<St
 async fn send_chat(
     msg: &str,
     agent_id: Option<&str>,
+    provider: Option<&str>,
+    model: Option<&str>,
+    mode: Option<&str>,
+    selected_models: Option<Vec<ChatModelTarget>>,
+    wrap_mode: Option<bool>,
     t: Option<&str>,
 ) -> Result<ChatResponse, String> {
     rj(
@@ -3292,6 +4818,11 @@ async fn send_chat(
             message: msg,
             agent_id,
             clear_history: false,
+            provider,
+            model,
+            mode,
+            selected_models,
+            wrap_mode,
         }),
         t,
     )

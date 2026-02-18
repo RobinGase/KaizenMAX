@@ -1,38 +1,29 @@
 {
   "$schema": "./settings-schema.json",
   "_comment": "Kaizen MAX default settings (Section 7 of implementation_plan.md). Personal workflow defaults.",
-
-  "runtime_engine": "zeroclaw",
-  "openclaw_compat_enabled": false,
-
-  "auto_spawn_subagents": false,
-  "max_subagents": 5,
-
-  "main_chat_pinned": true,
-  "new_agent_chat_default_state": "closed",
-  "allow_direct_user_to_subagent_chat": true,
-
-  "crystal_ball_enabled": true,
-  "crystal_ball_default_open": false,
-
-  "hard_gates_enabled": true,
-  "require_human_smoke_test_before_deploy": true,
-
-  "provider_inference_only": true,
-
-  "credentials_ui_enabled": true,
-  "oauth_ui_enabled": true,
   "agent_name_editable_after_spawn": true,
-  "secrets_storage_mode": "encrypted_vault",
-  "write_plaintext_secrets_to_env": false,
-  "show_only_masked_secrets_in_ui": true,
-
-  "mattermost_url": "",
-  "mattermost_channel_id": "",
-  "selected_github_repo": "",
-
-  "inference_provider": "anthropic",
-  "inference_model": "claude-sonnet-4-20250514",
+  "allow_direct_user_to_subagent_chat": true,
+  "auto_spawn_subagents": false,
+  "credentials_ui_enabled": true,
+  "crystal_ball_default_open": false,
+  "crystal_ball_enabled": true,
+  "hard_gates_enabled": true,
   "inference_max_tokens": 4096,
-  "inference_temperature": 0.7
+  "inference_model": "claude-sonnet-4-20250514",
+  "inference_provider": "gemini",
+  "inference_temperature": 0.699999988079071,
+  "main_chat_pinned": true,
+  "mattermost_channel_id": "",
+  "mattermost_url": "",
+  "max_subagents": 1,
+  "new_agent_chat_default_state": "closed",
+  "oauth_ui_enabled": true,
+  "openclaw_compat_enabled": false,
+  "provider_inference_only": true,
+  "require_human_smoke_test_before_deploy": true,
+  "runtime_engine": "zeroclaw",
+  "secrets_storage_mode": "encrypted_vault",
+  "selected_github_repo": "RobinGase/Kai-zen-Tunnel",
+  "show_only_masked_secrets_in_ui": true,
+  "write_plaintext_secrets_to_env": false
 }

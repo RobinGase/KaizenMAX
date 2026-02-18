@@ -57,6 +57,60 @@ pub struct KaizenSettings {
     pub inference_max_tokens: u32,
     #[serde(default = "default_inference_temperature")]
     pub inference_temperature: f32,
+    /// WebKeys subsystem configuration
+    #[serde(default)]
+    pub webkeys: WebkeysSettings,
+}
+
+/// WebKeys configuration (virtual key + browser automation settings)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebkeysSettings {
+    /// Enable the /v1/* OpenAI-compatible surface and virtual key management
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Default provider ID to route requests when the key has no explicit preference
+    #[serde(default = "default_webkeys_provider")]
+    pub default_provider: String,
+    /// Default model to use when none is specified in the request
+    #[serde(default = "default_webkeys_model")]
+    pub default_model: String,
+    /// Base directory for browser profiles (chromiumoxide sessions)
+    /// Defaults to %APPDATA%\KaizenMAX\browser-profiles on Windows
+    #[serde(default = "default_webkeys_profile_dir")]
+    pub profile_dir: String,
+    /// Maximum browser session restarts before the session is considered dead
+    #[serde(default = "default_webkeys_max_restarts")]
+    pub max_restarts: u32,
+}
+
+fn default_webkeys_provider() -> String {
+    "gemini-web".to_string()
+}
+fn default_webkeys_model() -> String {
+    "gemini-2.0-flash".to_string()
+}
+fn default_webkeys_profile_dir() -> String {
+    // Windows: %APPDATA%\KaizenMAX\browser-profiles
+    // Fallback for non-Windows CI
+    std::env::var("APPDATA")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map(|base| format!("{base}\\KaizenMAX\\browser-profiles"))
+        .unwrap_or_else(|_| ".kaizen/browser-profiles".to_string())
+}
+fn default_webkeys_max_restarts() -> u32 {
+    3
+}
+
+impl Default for WebkeysSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            default_provider: default_webkeys_provider(),
+            default_model: default_webkeys_model(),
+            profile_dir: default_webkeys_profile_dir(),
+            max_restarts: default_webkeys_max_restarts(),
+        }
+    }
 }
 
 fn default_encrypted_vault() -> String {
@@ -103,6 +157,7 @@ impl Default for KaizenSettings {
             inference_model: "claude-sonnet-4-20250514".to_string(),
             inference_max_tokens: 4096,
             inference_temperature: 0.7,
+            webkeys: WebkeysSettings::default(),
         }
     }
 }
@@ -134,6 +189,10 @@ pub struct SettingsPatch {
     pub inference_model: Option<String>,
     pub inference_max_tokens: Option<u32>,
     pub inference_temperature: Option<f32>,
+    pub webkeys_enabled: Option<bool>,
+    pub webkeys_default_provider: Option<String>,
+    pub webkeys_default_model: Option<String>,
+    pub webkeys_profile_dir: Option<String>,
 }
 
 fn default_max_subagents() -> u32 {
@@ -305,6 +364,18 @@ impl KaizenSettings {
         }
         if let Some(value) = patch.inference_temperature {
             self.inference_temperature = value;
+        }
+        if let Some(value) = patch.webkeys_enabled {
+            self.webkeys.enabled = value;
+        }
+        if let Some(value) = patch.webkeys_default_provider {
+            self.webkeys.default_provider = value;
+        }
+        if let Some(value) = patch.webkeys_default_model {
+            self.webkeys.default_model = value;
+        }
+        if let Some(value) = patch.webkeys_profile_dir {
+            self.webkeys.profile_dir = value;
         }
     }
 

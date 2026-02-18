@@ -7,6 +7,7 @@ pub mod crystal_ball;
 pub mod event_archive;
 pub mod gate_engine;
 pub mod inference;
+pub mod providers;
 pub mod settings;
 pub mod vault;
 pub mod webkeys;

@@ -12,6 +12,7 @@ data/
 # ----- Rust / core -----
 core/target/
 ui-rs/target/
+ui-dioxus/target/
 **/*.rs.bk
 
 # ----- Node / UI -----

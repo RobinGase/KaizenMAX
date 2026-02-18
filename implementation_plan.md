@@ -180,60 +180,62 @@ KaizenMAX/
 
 ## 13) Phased Execution Plan (Proceeding Steps)
 
+Status legend: `[x] done`, `[~] partial/in progress`, `[ ] pending`
+
 ### Phase L0 - Plan Refresh and Alignment
-- Refresh implementation plan to match the new vision.
-- Lock priority order around agent chat workspace first.
+- [x] Refresh implementation plan to match the new vision.
+- [x] Lock priority order around agent chat workspace first.
 
 ### Phase L1 - Settings Consolidation Shell
-- Remove config-heavy controls from sidebars.
-- Implement main settings surface and tab navigation shell.
-- Move right and left sidebar settings links to the central settings surface.
+- [~] Remove config-heavy controls from sidebars.
+- [x] Implement main settings surface and tab navigation shell.
+- [~] Move right and left sidebar settings links to the central settings surface.
 
 ### Phase L2 - Agent Canvas Foundation
-- Build robust card grid with room for many agents.
-- Standardize card actions and status display.
-- Ensure chat send/receive reliability across many cards.
+- [x] Build robust card grid with room for many agents.
+- [x] Standardize card actions and status display.
+- [~] Ensure chat send/receive reliability across many cards.
 
 ### Phase L3 - Floating Panels
-- Add draggable and resizable floating chat panels.
-- Add z-order handling and focus behavior.
-- Add per-panel mode switch between docked and floating.
+- [x] Add draggable and resizable floating chat panels.
+- [x] Add z-order handling and focus behavior.
+- [x] Add per-panel mode switch between docked and floating.
 
 ### Phase L4 - Detached Multi-Monitor Windows
-- Add detachable native chat windows.
-- Sync detached windows with shared state store.
-- Persist and restore detached placement safely.
+- [~] Add detachable native chat windows.
+- [~] Sync detached windows with shared state store.
+- [~] Persist and restore detached placement safely.
 
 ### Phase L5 - Agent Lifecycle Controls
-- Implement remove, clear, stop actions end-to-end.
-- Add confirmations for destructive actions where needed.
-- Keep actions fast and visible on every agent chatbox.
+- [x] Implement remove, clear, stop actions end-to-end.
+- [x] Add confirmations for destructive actions where needed.
+- [x] Keep actions fast and visible on every agent chatbox.
 
 ### Phase L6 - Workspace Hub and GH Integration
-- Add local workspace selector.
-- Add Git workspace connect via GH CLI status bridge.
-- Display repo and branch context in sidebar.
+- [~] Add local workspace selector.
+- [x] Add Git workspace connect via GH CLI status bridge.
+- [x] Display repo and branch context in sidebar.
 
 ### Phase L7 - Language and Usability Pass
-- Replace unclear terms with plain language labels.
-- Reduce cognitive load in right sidebar.
-- Add concise help text and better empty states.
+- [~] Replace unclear terms with plain language labels.
+- [x] Reduce cognitive load in right sidebar.
+- [~] Add concise help text and better empty states.
 
 ### Phase L8 - Validation and Release Gate
-- Functional tests for multi-agent chat flow.
-- Layout persistence tests including monitor change fallback.
-- Security regression checks against existing secret policies.
-- Launcher validation for core + Dioxus app lifecycle.
+- [x] Functional tests for multi-agent chat flow.
+- [~] Layout persistence tests including monitor change fallback.
+- [x] Security regression checks against existing secret policies.
+- [x] Launcher validation for core + Dioxus app lifecycle.
 
 ## 14) Immediate Sprint Checklist (Now)
 - [x] Refresh plan with new priorities and proceeding steps.
-- [ ] Build central settings shell and move sidebar configs into it.
-- [ ] Simplify right sidebar to workflow and activity only.
-- [ ] Implement floating drag and resize for agent chat panels.
-- [ ] Implement detachable native chat windows across monitors.
-- [ ] Add agent remove/clear/stop backend and UI wiring.
-- [ ] Add workspace hub local path and Git context support.
-- [ ] Run integration and security regression pass.
+- [~] Build central settings shell and move sidebar configs into it.
+- [x] Simplify right sidebar to workflow and activity only.
+- [x] Implement floating drag and resize for agent chat panels.
+- [~] Implement detachable native chat windows across monitors.
+- [x] Add agent remove/clear/stop backend and UI wiring.
+- [~] Add workspace hub local path and Git context support.
+- [x] Run integration and security regression pass.
 
 ## 15) Success Criteria for This Cycle
 - Agent chats are the fastest path in the app.

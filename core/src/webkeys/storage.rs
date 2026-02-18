@@ -47,6 +47,7 @@ pub struct WebKeysStorage {
 
 struct StorageInner {
     data_dir: PathBuf,
+    in_memory: bool,
     keys: HashMap<String, VirtualKeyRecord>,
     bindings: HashMap<String, WebProviderBinding>,
     usage: HashMap<String, VirtualKeyUsage>,
@@ -66,6 +67,7 @@ impl WebKeysStorage {
 
         let inner = StorageInner {
             data_dir,
+            in_memory: false,
             keys: HashMap::new(),
             bindings: HashMap::new(),
             usage: HashMap::new(),
@@ -116,9 +118,12 @@ impl WebKeysStorage {
         Ok(())
     }
 
-    /// Save all data to disk
+    /// Save all data to disk (no-op for in-memory stores).
     async fn save_all(&self) -> Result<(), String> {
         let inner = self.inner.read().await;
+        if inner.in_memory {
+            return Ok(());
+        }
 
         // Save virtual keys
         let keys_store = VirtualKeysStore {
@@ -276,6 +281,21 @@ impl WebKeysStorage {
             inner.usage.remove(key_id);
         }
         self.save_all().await
+    }
+
+    /// Create a transient in-memory store (for tests and ephemeral scenarios).
+    /// No files are read or written.
+    pub async fn new_in_memory() -> Self {
+        let inner = StorageInner {
+            data_dir: std::env::temp_dir().join("kaizen_webkeys_inmem"),
+            in_memory: true,
+            keys: HashMap::new(),
+            bindings: HashMap::new(),
+            usage: HashMap::new(),
+        };
+        Self {
+            inner: Arc::new(RwLock::new(inner)),
+        }
     }
 }
 
