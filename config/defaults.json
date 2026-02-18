@@ -29,6 +29,7 @@
 
   "mattermost_url": "",
   "mattermost_channel_id": "",
+  "selected_github_repo": "",
 
   "inference_provider": "anthropic",
   "inference_model": "claude-sonnet-4-20250514",

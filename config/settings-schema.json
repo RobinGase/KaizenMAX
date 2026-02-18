@@ -63,6 +63,11 @@
       "default": "",
       "description": "Mattermost channel ID used for Crystal Ball bridge messages."
     },
+    "selected_github_repo": {
+      "type": "string",
+      "default": "",
+      "description": "Selected GitHub repository in owner/name format used by Workspace Hub."
+    },
     "hard_gates_enabled": {
       "type": "boolean",
       "default": true,
@@ -111,7 +116,7 @@
     },
     "inference_provider": {
       "type": "string",
-      "enum": ["anthropic", "openai"],
+      "enum": ["anthropic", "openai", "gemini", "nvidia"],
       "default": "anthropic",
       "description": "Active LLM inference provider. API key must be stored in vault."
     },

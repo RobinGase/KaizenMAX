@@ -3,7 +3,7 @@
     Start Kaizen MAX pipeline.
 
 .DESCRIPTION
-    Starts ZeroClaw core and UI processes under a Windows Job Object.
+    Starts ZeroClaw core and Rust UI processes under a Windows Job Object.
     If one process exits, the remaining processes are stopped.
     If the terminal closes, the Job Object ensures child processes are terminated.
     Use -InitEnv to create .env from .env.example when .env is missing.
@@ -201,11 +201,22 @@ function Start-ExecutableProcess {
         [string]$Name,
         [string]$ExecutablePath,
         [string]$WorkingDirectory,
-        [IntPtr]$JobHandle
+        [IntPtr]$JobHandle,
+        [switch]$NoNewWindow
     )
 
     Write-Host "[Kaizen MAX] Starting ${Name}: $ExecutablePath" -ForegroundColor Green
-    $process = Start-Process -FilePath $ExecutablePath -WorkingDirectory $WorkingDirectory -PassThru
+    $startArgs = @{
+        FilePath = $ExecutablePath
+        WorkingDirectory = $WorkingDirectory
+        PassThru = $true
+    }
+
+    if ($NoNewWindow) {
+        $startArgs["NoNewWindow"] = $true
+    }
+
+    $process = Start-Process @startArgs
 
     try {
         Add-ProcessToJob -JobHandle $JobHandle -Process $process
@@ -239,13 +250,98 @@ function Stop-ProcessTree {
     & taskkill /PID $Process.Id /T /F *> $null
 }
 
+function Stop-StaleKaizenProcesses {
+    param([string]$RepoRoot)
+
+    $repoRootLower = $RepoRoot.ToLowerInvariant()
+    $selfPid = $PID
+
+    $stale = Get-CimInstance Win32_Process | Where-Object {
+        if ($PSItem.ProcessId -eq $selfPid) {
+            return $false
+        }
+
+        $name = if ($null -eq $PSItem.Name) { "" } else { $PSItem.Name.ToLowerInvariant() }
+        $cmd = if ($null -eq $PSItem.CommandLine) { "" } else { $PSItem.CommandLine.ToLowerInvariant() }
+
+        if ($name -eq "ui-dioxus.exe" -or $name -eq "zeroclaw-gateway.exe") {
+            return $true
+        }
+
+        if ($name -eq "powershell.exe" -and $cmd -like "*start-max.ps1*") {
+            return $true
+        }
+
+        if ($name -eq "cargo.exe") {
+            return ($cmd -like "*$repoRootLower*\\core*") -or ($cmd -like "*$repoRootLower*\\ui-dioxus*")
+        }
+
+        return $false
+    }
+
+    foreach ($proc in $stale) {
+        try {
+            Stop-Process -Id $proc.ProcessId -Force -ErrorAction Stop
+            Write-Host "[Kaizen MAX] Stopped stale process $($proc.Name) (PID $($proc.ProcessId))" -ForegroundColor Yellow
+        } catch {
+            Write-Host "[Kaizen MAX] Failed to stop stale process PID $($proc.ProcessId): $($_.Exception.Message)" -ForegroundColor Red
+        }
+    }
+}
+
+function Write-UiCrashReport {
+    param(
+        [int]$ExitCode,
+        [string]$RepoRoot
+    )
+
+    $logsDir = Join-Path $RepoRoot "logs"
+    if (-not (Test-Path $logsDir)) {
+        New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
+    }
+
+    $reportPath = Join-Path $logsDir "ui-crash-last.txt"
+    $exitHex = [System.BitConverter]::ToUInt32([System.BitConverter]::GetBytes([int]$ExitCode), 0)
+    $lines = New-Object System.Collections.Generic.List[string]
+
+    $lines.Add("timestamp_utc=$((Get-Date).ToUniversalTime().ToString('o'))")
+    $lines.Add("exit_code_signed=$ExitCode")
+    $lines.Add(("exit_code_hex=0x{0:X8}" -f $exitHex))
+    $lines.Add("")
+
+    $events = Get-WinEvent -FilterHashtable @{ LogName = "Application"; StartTime = (Get-Date).AddMinutes(-10) } -ErrorAction SilentlyContinue |
+        Where-Object {
+            ($PSItem.Id -eq 1000 -or $PSItem.Id -eq 1001) -and
+            $null -ne $PSItem.Message -and
+            ($PSItem.Message -like "*ui-dioxus.exe*" -or $PSItem.Message -like "*zeroclaw-gateway.exe*")
+        } |
+        Select-Object -First 3
+
+    $eventList = @($events)
+    if ($eventList.Count -eq 0) {
+        $lines.Add("No recent Application Error/Windows Error Reporting events for ui-dioxus.exe in the last 10 minutes.")
+    } else {
+        foreach ($event in $eventList) {
+            $lines.Add("event_time=$($event.TimeCreated.ToUniversalTime().ToString('o'))")
+            $lines.Add("event_id=$($event.Id)")
+            $lines.Add("provider=$($event.ProviderName)")
+            $lines.Add("message=$($event.Message)")
+            $lines.Add("")
+        }
+    }
+
+    Set-Content -Path $reportPath -Value $lines -Encoding UTF8
+    Write-Host "[Kaizen MAX] Wrote UI crash report: $reportPath" -ForegroundColor Yellow
+}
+
 Ensure-EnvironmentFile -Path $EnvFile -CreateIfMissing:$InitEnv
 Load-EnvironmentFile -Path $EnvFile
 Write-Host "[Kaizen MAX] Loaded environment from $EnvFile" -ForegroundColor Cyan
 
-$repoRoot = Resolve-Path "$PSScriptRoot\.."
+$repoRoot = (Resolve-Path "$PSScriptRoot\..").Path
 $coreDir = Join-Path $repoRoot "core"
-$uiDir = Join-Path $repoRoot "ui"
+$uiDir = Join-Path $repoRoot "ui-dioxus"
+Stop-StaleKaizenProcesses -RepoRoot $repoRoot
 $jobHandle = New-KillOnCloseJob
 
 $started = New-Object System.Collections.Generic.List[object]
@@ -255,7 +351,7 @@ try {
     if (-not $UIOnly) {
         $coreExe = Join-Path $coreDir "target\release\zeroclaw-gateway.exe"
         if (Test-Path $coreExe) {
-            $coreProcess = Start-ExecutableProcess -Name "ZeroClaw Core" -ExecutablePath $coreExe -WorkingDirectory $coreDir -JobHandle $jobHandle
+            $coreProcess = Start-ExecutableProcess -Name "ZeroClaw Core" -ExecutablePath $coreExe -WorkingDirectory $coreDir -JobHandle $jobHandle -NoNewWindow
         } else {
             Write-Host "[Kaizen MAX] Release core binary not found. Using cargo run." -ForegroundColor Yellow
             $coreProcess = Start-CommandProcess -Name "ZeroClaw Core" -WorkingDirectory $coreDir -Command "cargo run" -JobHandle $jobHandle
@@ -268,19 +364,13 @@ try {
     }
 
     if (-not $CoreOnly) {
-        $desktopCandidates = @(
-            (Join-Path $uiDir "desktop\KaizenMAX.exe"),
-            (Join-Path $uiDir "dist\KaizenMAX.exe"),
-            (Join-Path $uiDir "build\KaizenMAX.exe")
-        )
+        $uiExe = Join-Path $uiDir "target\release\ui-dioxus.exe"
 
-        $desktopExe = $desktopCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-
-        if ($desktopExe) {
-            $uiProcess = Start-ExecutableProcess -Name "Kaizen MAX UI" -ExecutablePath $desktopExe -WorkingDirectory $uiDir -JobHandle $jobHandle
+        if (Test-Path $uiExe) {
+            $uiProcess = Start-ExecutableProcess -Name "Kaizen MAX UI" -ExecutablePath $uiExe -WorkingDirectory $uiDir -JobHandle $jobHandle
         } else {
-            Write-Host "[Kaizen MAX] Packaged UI not found. Using npm run dev." -ForegroundColor Yellow
-            $uiProcess = Start-CommandProcess -Name "Kaizen MAX UI" -WorkingDirectory $uiDir -Command "npm run dev" -JobHandle $jobHandle
+            Write-Host "[Kaizen MAX] Release Dioxus UI binary not found. Using cargo run." -ForegroundColor Yellow
+            $uiProcess = Start-CommandProcess -Name "Kaizen MAX UI" -WorkingDirectory $uiDir -Command "cargo run" -JobHandle $jobHandle
         }
 
         $started.Add([PSCustomObject]@{
@@ -299,6 +389,10 @@ try {
         $single.Process.WaitForExit()
         $exitCode = $single.Process.ExitCode
         Write-Host "[Kaizen MAX] $($single.Name) exited with code $exitCode" -ForegroundColor Yellow
+
+        if ($single.Name -eq "Kaizen MAX UI" -and $exitCode -ne 0) {
+            Write-UiCrashReport -ExitCode $exitCode -RepoRoot $repoRoot
+        }
     } else {
         Write-Host "[Kaizen MAX] Pipeline is running. If any process exits, all processes are stopped." -ForegroundColor Cyan
         $trigger = $null
@@ -317,6 +411,10 @@ try {
 
         $exitCode = $trigger.Process.ExitCode
         Write-Host "[Kaizen MAX] $($trigger.Name) exited with code $exitCode. Stopping remaining processes." -ForegroundColor Yellow
+
+        if ($trigger.Name -eq "Kaizen MAX UI" -and $exitCode -ne 0) {
+            Write-UiCrashReport -ExitCode $exitCode -RepoRoot $repoRoot
+        }
     }
 } finally {
     foreach ($entry in $started) {

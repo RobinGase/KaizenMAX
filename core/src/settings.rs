@@ -47,6 +47,8 @@ pub struct KaizenSettings {
     pub mattermost_url: String,
     #[serde(default)]
     pub mattermost_channel_id: String,
+    #[serde(default)]
+    pub selected_github_repo: String,
     #[serde(default = "default_inference_provider")]
     pub inference_provider: String,
     #[serde(default = "default_inference_model")]
@@ -96,6 +98,7 @@ impl Default for KaizenSettings {
             show_only_masked_secrets_in_ui: true,
             mattermost_url: String::new(),
             mattermost_channel_id: String::new(),
+            selected_github_repo: String::new(),
             inference_provider: "anthropic".to_string(),
             inference_model: "claude-sonnet-4-20250514".to_string(),
             inference_max_tokens: 4096,
@@ -126,6 +129,7 @@ pub struct SettingsPatch {
     pub show_only_masked_secrets_in_ui: Option<bool>,
     pub mattermost_url: Option<String>,
     pub mattermost_channel_id: Option<String>,
+    pub selected_github_repo: Option<String>,
     pub inference_provider: Option<String>,
     pub inference_model: Option<String>,
     pub inference_max_tokens: Option<u32>,
@@ -221,6 +225,9 @@ impl KaizenSettings {
         } else if let Ok(val) = std::env::var("CRYSTAL_BALL_CHANNEL") {
             self.mattermost_channel_id = val;
         }
+        if let Ok(val) = std::env::var("KAIZEN_SELECTED_GITHUB_REPO") {
+            self.selected_github_repo = val;
+        }
     }
 
     pub fn apply_patch(&mut self, patch: SettingsPatch) {
@@ -284,6 +291,9 @@ impl KaizenSettings {
         if let Some(value) = patch.mattermost_channel_id {
             self.mattermost_channel_id = value;
         }
+        if let Some(value) = patch.selected_github_repo {
+            self.selected_github_repo = value;
+        }
         if let Some(value) = patch.inference_provider {
             self.inference_provider = value;
         }
@@ -309,8 +319,33 @@ impl KaizenSettings {
             }
         }
 
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| format!("Failed to serialize settings: {e}"))?;
+        let current_value =
+            serde_json::to_value(self).map_err(|e| format!("Failed to serialize settings: {e}"))?;
+        let current_map = match current_value {
+            serde_json::Value::Object(map) => map,
+            _ => return Err("Settings serialized into unexpected non-object value".to_string()),
+        };
+
+        let mut merged = serde_json::Map::new();
+        if let Ok(existing_text) = std::fs::read_to_string(&path) {
+            if let Ok(serde_json::Value::Object(existing)) =
+                serde_json::from_str::<serde_json::Value>(&existing_text)
+            {
+                if let Some(schema) = existing.get("$schema") {
+                    merged.insert("$schema".to_string(), schema.clone());
+                }
+                if let Some(comment) = existing.get("_comment") {
+                    merged.insert("_comment".to_string(), comment.clone());
+                }
+            }
+        }
+
+        for (key, value) in current_map {
+            merged.insert(key, value);
+        }
+
+        let json = serde_json::to_string_pretty(&serde_json::Value::Object(merged))
+            .map_err(|e| format!("Failed to encode settings JSON: {e}"))?;
 
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, json).map_err(|e| format!("Failed to write settings tmp: {e}"))?;

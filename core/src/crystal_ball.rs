@@ -463,6 +463,24 @@ pub fn redact_sensitive(message: &str) -> String {
         masked = masked.replace(key, "[REDACTED]");
     }
 
+    // Common token formats and sensitive key/value pairs.
+    let bearer_regex = Regex::new(r"(?i)bearer\s+[a-z0-9_\-\.=]{12,}").expect("valid bearer regex");
+    masked = bearer_regex
+        .replace_all(masked.as_str(), "Bearer [REDACTED_TOKEN]")
+        .to_string();
+
+    let sk_token_regex = Regex::new(r"\bsk-[A-Za-z0-9_\-]{12,}\b").expect("valid sk token regex");
+    masked = sk_token_regex
+        .replace_all(masked.as_str(), "[REDACTED_SECRET]")
+        .to_string();
+
+    let kv_regex =
+        Regex::new(r"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*([A-Za-z0-9_\-\.=]{6,})")
+            .expect("valid key-value redaction regex");
+    masked = kv_regex
+        .replace_all(masked.as_str(), "$1=[REDACTED]")
+        .to_string();
+
     let admin_regex = Regex::new(r"ADMIN_[A-Z0-9_]+").expect("valid admin regex");
     admin_regex
         .replace_all(masked.as_str(), "[REDACTED_ADMIN]")
@@ -488,5 +506,14 @@ mod tests {
         let output = redact_sensitive(input);
         assert!(output.contains("[REDACTED_ADMIN]"));
         assert!(!output.contains("ADMIN_HARD_GATES_ENABLED"));
+    }
+
+    #[test]
+    fn redacts_common_secret_token_shapes() {
+        let input = "Authorization: Bearer sk-abcdeFGHIJ1234567890 token=supersecretvalue";
+        let output = redact_sensitive(input);
+        assert!(!output.contains("supersecretvalue"));
+        assert!(!output.contains("sk-abcdeFGHIJ1234567890"));
+        assert!(output.contains("[REDACTED_TOKEN]") || output.contains("[REDACTED_SECRET]"));
     }
 }

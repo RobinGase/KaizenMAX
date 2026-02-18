@@ -7,9 +7,11 @@
 *.pem
 *.key
 credentials.json
+data/
 
 # ----- Rust / core -----
 core/target/
+ui-rs/target/
 **/*.rs.bk
 
 # ----- Node / UI -----

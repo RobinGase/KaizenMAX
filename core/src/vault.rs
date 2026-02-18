@@ -9,19 +9,13 @@
 //! 2) Managed key file at KAIZEN_VAULT_KEY_PATH (auto-generated on first run)
 
 use aes_gcm::{
-    aead::{Aead, KeyInit, OsRng},
     Aes256Gcm, Nonce,
+    aead::{Aead, KeyInit, OsRng},
 };
-use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashMap,
-    convert::TryInto,
-    fs,
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{collections::HashMap, convert::TryInto, fs, path::PathBuf, sync::Arc};
 use tokio::sync::RwLock;
 
 /// Metadata returned to callers. Never contains the raw secret.
@@ -29,6 +23,8 @@ use tokio::sync::RwLock;
 pub struct SecretMetadata {
     pub provider: String,
     pub configured: bool,
+    pub key_id: String,
+    pub created_at: String,
     pub last_updated: String,
     pub last4: String,
     pub secret_type: String,
@@ -37,16 +33,29 @@ pub struct SecretMetadata {
 /// Internal encrypted entry persisted to disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct EncryptedEntry {
+    /// Provider id (e.g. openai, anthropic).
+    #[serde(default)]
+    provider: String,
+    /// Vault key slot identifier.
+    #[serde(default = "default_key_id")]
+    key_id: String,
     /// Base64-encoded ciphertext (AES-256-GCM).
     ciphertext: String,
     /// Base64-encoded 12-byte nonce.
     nonce: String,
+    /// ISO 8601 timestamp when record was first created.
+    #[serde(default)]
+    created_at: String,
     /// Last 4 characters of the original plaintext (for masked display).
     last4: String,
     /// ISO 8601 timestamp of last update.
     last_updated: String,
     /// Type: "api_key", "oauth_access", "oauth_refresh", "oauth_client_secret".
     secret_type: String,
+}
+
+fn default_key_id() -> String {
+    "vault-key-v1".to_string()
 }
 
 /// Thread-safe vault handle.
@@ -80,8 +89,7 @@ fn default_vault_path() -> PathBuf {
 
 fn default_key_path() -> PathBuf {
     PathBuf::from(
-        std::env::var("KAIZEN_VAULT_KEY_PATH")
-            .unwrap_or_else(|_| "../data/vault.key".to_string()),
+        std::env::var("KAIZEN_VAULT_KEY_PATH").unwrap_or_else(|_| "../data/vault.key".to_string()),
     )
 }
 
@@ -90,18 +98,38 @@ fn parse_key_b64(value: &str, source: &str) -> Result<[u8; 32], String> {
         .decode(value.trim())
         .map_err(|e| format!("{source} is not valid base64: {e}"))?;
 
-    let key: [u8; 32] = key_bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| format!("{source} must be exactly 32 bytes (got {})", key_bytes.len()))?;
+    let key: [u8; 32] = key_bytes.as_slice().try_into().map_err(|_| {
+        format!(
+            "{source} must be exactly 32 bytes (got {})",
+            key_bytes.len()
+        )
+    })?;
 
     Ok(key)
 }
 
 fn load_entries(path: &PathBuf) -> Result<HashMap<String, EncryptedEntry>, String> {
     if path.exists() {
-        let content = fs::read_to_string(path).map_err(|e| format!("Failed to read vault file: {e}"))?;
-        serde_json::from_str(&content).map_err(|e| format!("Failed to parse vault file: {e}"))
+        let content =
+            fs::read_to_string(path).map_err(|e| format!("Failed to read vault file: {e}"))?;
+        let mut entries: HashMap<String, EncryptedEntry> = serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse vault file: {e}"))?;
+
+        // Backward compatibility: hydrate newer metadata fields when loading
+        // legacy vault files that predate key_id/provider/created_at.
+        for (provider_key, entry) in entries.iter_mut() {
+            if entry.provider.trim().is_empty() {
+                entry.provider = provider_key.clone();
+            }
+            if entry.key_id.trim().is_empty() {
+                entry.key_id = default_key_id();
+            }
+            if entry.created_at.trim().is_empty() {
+                entry.created_at = entry.last_updated.clone();
+            }
+        }
+
+        Ok(entries)
     } else {
         Ok(HashMap::new())
     }
@@ -115,8 +143,8 @@ impl SecretVault {
             .map_err(|_| "ADMIN_VAULT_KEY not set. Cannot initialize secret vault.".to_string())?;
 
         let key = parse_key_b64(&key_b64, "ADMIN_VAULT_KEY")?;
-        let cipher = Aes256Gcm::new_from_slice(&key)
-            .map_err(|e| format!("Failed to create cipher: {e}"))?;
+        let cipher =
+            Aes256Gcm::new_from_slice(&key).map_err(|e| format!("Failed to create cipher: {e}"))?;
 
         let path = default_vault_path();
         let entries = load_entries(&path)?;
@@ -153,7 +181,10 @@ impl SecretVault {
         let (key, bootstrap_created) = if key_path.exists() {
             let content = fs::read_to_string(&key_path)
                 .map_err(|e| format!("Failed to read vault key file: {e}"))?;
-            (parse_key_b64(content.trim(), "KAIZEN_VAULT_KEY_PATH file")?, false)
+            (
+                parse_key_b64(content.trim(), "KAIZEN_VAULT_KEY_PATH file")?,
+                false,
+            )
         } else {
             if let Some(parent) = key_path.parent() {
                 if !parent.exists() {
@@ -185,8 +216,8 @@ impl SecretVault {
 
     /// Create a vault with an explicit key and path (for testing).
     pub fn new(key: &[u8; 32], path: PathBuf) -> Result<Self, String> {
-        let cipher = Aes256Gcm::new_from_slice(key)
-            .map_err(|e| format!("Failed to create cipher: {e}"))?;
+        let cipher =
+            Aes256Gcm::new_from_slice(key).map_err(|e| format!("Failed to create cipher: {e}"))?;
 
         let entries = load_entries(&path)?;
 
@@ -226,8 +257,16 @@ impl SecretVault {
         let now = chrono::Utc::now().to_rfc3339();
 
         let entry = EncryptedEntry {
+            provider: provider.to_string(),
+            key_id: default_key_id(),
             ciphertext: B64.encode(&ciphertext),
             nonce: B64.encode(nonce_bytes),
+            created_at: inner
+                .entries
+                .get(provider)
+                .map(|prev| prev.created_at.clone())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| now.clone()),
             last4: last4.clone(),
             last_updated: now.clone(),
             secret_type: secret_type.to_string(),
@@ -239,6 +278,13 @@ impl SecretVault {
         Ok(SecretMetadata {
             provider: provider.to_string(),
             configured: true,
+            key_id: default_key_id(),
+            created_at: inner
+                .entries
+                .get(provider)
+                .map(|v| v.created_at.clone())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| now.clone()),
             last_updated: now,
             last4,
             secret_type: secret_type.to_string(),
@@ -261,12 +307,18 @@ impl SecretVault {
             .map_err(|e| format!("Failed to decode nonce: {e}"))?;
 
         let nonce = Nonce::from_slice(&nonce_bytes);
-        let plaintext = inner
+        let mut plaintext = inner
             .cipher
             .decrypt(nonce, ciphertext.as_ref())
             .map_err(|e| format!("Decryption failed: {e}"))?;
 
-        String::from_utf8(plaintext).map_err(|e| format!("Decrypted value is not valid UTF-8: {e}"))
+        let result = std::str::from_utf8(&plaintext)
+            .map_err(|e| format!("Decrypted value is not valid UTF-8: {e}"))?
+            .to_string();
+
+        // Best-effort wipe of plaintext bytes once materialized into String.
+        plaintext.fill(0);
+        Ok(result)
     }
 
     /// Remove a stored secret and persist.
@@ -286,6 +338,16 @@ impl SecretVault {
             .map(|(provider, entry)| SecretMetadata {
                 provider: provider.clone(),
                 configured: true,
+                key_id: if entry.key_id.is_empty() {
+                    default_key_id()
+                } else {
+                    entry.key_id.clone()
+                },
+                created_at: if entry.created_at.is_empty() {
+                    entry.last_updated.clone()
+                } else {
+                    entry.created_at.clone()
+                },
                 last_updated: entry.last_updated.clone(),
                 last4: entry.last4.clone(),
                 secret_type: entry.secret_type.clone(),
@@ -308,8 +370,8 @@ fn persist(inner: &VaultInner) -> Result<(), String> {
         }
     }
 
-    let json =
-        serde_json::to_string_pretty(&inner.entries).map_err(|e| format!("Serialize error: {e}"))?;
+    let json = serde_json::to_string_pretty(&inner.entries)
+        .map_err(|e| format!("Serialize error: {e}"))?;
 
     let tmp_path = inner.path.with_extension("json.tmp");
     fs::write(&tmp_path, &json).map_err(|e| format!("Failed to write vault tmp: {e}"))?;
@@ -367,6 +429,8 @@ mod tests {
         assert!(meta.configured);
         assert_eq!(meta.last4, "cdef");
         assert_eq!(meta.provider, "openai");
+        assert_eq!(meta.key_id, "vault-key-v1");
+        assert!(!meta.created_at.is_empty());
 
         let decrypted = vault.decrypt("openai").await.unwrap();
         assert_eq!(decrypted, "sk-test-1234567890abcdef");
@@ -375,6 +439,10 @@ mod tests {
         let disk_content = fs::read_to_string(&path).unwrap();
         assert!(!disk_content.contains("sk-test-1234567890abcdef"));
         assert!(disk_content.contains("openai"));
+        assert!(disk_content.contains("key_id"));
+        assert!(disk_content.contains("created_at"));
+        assert!(disk_content.contains("nonce"));
+        assert!(disk_content.contains("ciphertext"));
 
         fs::remove_file(&path).ok();
     }
@@ -395,6 +463,8 @@ mod tests {
         assert_eq!(list[0].provider, "anthropic");
         assert_eq!(list[0].last4, "9999");
         assert!(list[0].configured);
+        assert_eq!(list[0].key_id, "vault-key-v1");
+        assert!(!list[0].created_at.is_empty());
 
         // Ensure the list serialization contains no raw secret
         let json = serde_json::to_string(&list).unwrap();

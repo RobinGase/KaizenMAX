@@ -9,3 +9,4 @@ pub mod gate_engine;
 pub mod inference;
 pub mod settings;
 pub mod vault;
+pub mod webkeys;

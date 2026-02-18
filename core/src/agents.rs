@@ -130,6 +130,16 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// Remove an agent from the registry entirely.
+    pub fn remove(&mut self, agent_id: &str) -> Result<SubAgent, String> {
+        let idx = self
+            .agents
+            .iter()
+            .position(|a| a.id == agent_id)
+            .ok_or_else(|| format!("Agent not found: {agent_id}"))?;
+        Ok(self.agents.remove(idx))
+    }
+
     /// Transition an agent to a new status.
     ///
     /// Enforced rules (from policy):

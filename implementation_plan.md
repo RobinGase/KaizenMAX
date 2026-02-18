@@ -1,279 +1,249 @@
-# Kaizen MAX - Implementation Plan
+# Kaizen MAX - Implementation Plan (Refreshed)
 
 ## 1) Product Identity
 - **Brand:** Kaizen
 - **Product:** MAX
-- **Display name in UI/docs:** **Kaizen MAX**
+- **Display name:** **Kaizen MAX**
 - **Primary AI name:** **Kaizen**
 
-## 2) Product Goal
-Build a Windows-first developer cockpit that integrates ZeroClaw (Rust runtime) + Nex_Alignment so you can:
-- Talk mainly to **Kaizen** (reason/review/plan/code).
-- Spawn sub-agents **only when you request it**.
-- Watch each agent in its own toggleable chat panel.
-- Enforce strict review gates before completion/deploy.
-- Keep terminal-level workflow functionality available from UI settings.
+## 2) Current Context
+- This plan replaces the previous status snapshot that marked implementation as complete.
+- Frontend direction is now **Dioxus desktop** on branch `DioxusFrontend`.
+- Previous egui exploration is preserved on branch `RustEguiTestBranch`.
+- The UI is now in active redesign to match the user vision and prioritize agent workflow speed.
 
-## 3) Core Operating Principles
-- **Single-main-agent default:** Kaizen is primary.
-- **User-controlled orchestration:** no auto-spawn; sub-agents are created only on explicit instruction.
-- **Hardware-aware mode:** optimized for normal use, with optional scale-up for swarms when you explicitly request it.
-- **Hard integrity gates:** no task can be finalized without required approvals.
-- **No hardcoded personas in code:** rely on settings/config surfaces.
-- **Settings-first control plane:** all major features are toggleable in the UI settings menu.
-- **Node-free default stack:** Node.js runtime is removed from the baseline architecture.
-- **Secrets-first security:** API keys and OAuth tokens must be encrypted at rest and never returned in plaintext by API, UI, logs, or events.
-- **No-public-secret exposure:** secrets must never be transmitted over public networks in plaintext. Local mode binds to loopback only; remote mode requires private networking + TLS.
+## 3) Product Goal
+Build a Windows-first developer cockpit that integrates ZeroClaw core with a high-velocity multi-agent workspace so the team can:
+- Talk mainly to **Kaizen**.
+- Spawn and operate sub-agents quickly.
+- Manage many agent chats without losing context.
+- Enforce review and deployment gates safely.
+- Use local and Git-connected workspaces from one interface.
 
-## 4) Repository Layout
+## 4) Locked Priorities (User-Directed)
+
+### P0 - Agent Chat Workspace First
+- Agent chats must be fully functional before broad settings polish.
+- Chat interface must support:
+  - free drag
+  - free placement
+  - free resize
+  - detached windows on other monitors
+- Agent controls must be obvious and fast: add, remove, clear, stop.
+
+### P1 - Sidebar Clarity and Workspace Hub
+- Left sidebar becomes a **Workspace Hub**.
+- It must support local workspaces and Git-connected workspaces.
+- GitHub CLI connection state and workspace context must be visible.
+
+### P2 - Settings Consolidation
+- Technical settings are removed from sidebars.
+- Use one main settings surface with tabbed sections.
+- Terms must be plain-language by default, with advanced details hidden behind explicit expanders.
+
+## 5) Core Operating Principles
+- **Kaizen-first orchestration:** Kaizen remains primary planner/reviewer.
+- **User-controlled spawn:** no hidden auto-spawn behavior.
+- **Fast operator loop:** optimize for speed of creating, steering, and finishing agent tasks.
+- **Settings-first control plane:** advanced controls exist, but are not visually overwhelming.
+- **Security-first:** secret handling constraints remain strict and non-negotiable.
+
+## 6) Repository Layout
 ```text
 KaizenMAX/
-  core/                  # ZeroClaw runtime/gateway (Rust binary-first)
-  ui/                    # Kaizen MAX dashboard (React + TypeScript)
+  core/                  # ZeroClaw runtime/gateway (Rust)
+  ui-dioxus/             # Active desktop frontend (Dioxus)
+  ui/                    # Legacy frontend assets
   protocol/              # Nex_Alignment fork and MCP assets
-  compat/                # Optional compatibility adapters (disabled by default)
+  compat/                # Optional compatibility adapters
   scripts/
-    start-max.ps1        # Start workflow (native UI + ZeroClaw core)
+    start-max.ps1        # Start core + desktop app
   implementation_plan.md
 ```
 
-## 5) Runtime Strategy (ZeroClaw-First, No WSL)
-Given local memory constraints and your efficiency target, Kaizen MAX uses a ZeroClaw-first baseline:
-- **Recommended default:** native Windows UI + native ZeroClaw core binary.
-- **Why:** removes Node.js baseline overhead and avoids WSL translation overhead.
-- **Inference mode:** provider-hosted inference APIs only (no local open-weight model hosting).
-- **Desktop requirement:** Kaizen MAX app runs natively on Windows.
+## 7) Target Information Architecture
 
-Optional mode:
-- Remote Linux ZeroClaw core + native Windows UI (for offloading CPU/RAM while keeping the same runtime).
+### Top Header (Modern, Minimal)
+- Kaizen MAX title and lightweight workflow status.
+- Quick actions: Refresh, Next Step.
+- Settings entry remains available but does not expose all config inline.
 
-Compatibility mode (off by default):
-- Optional OpenClaw/Node bridge can be added later if a required feature is missing.
-- Node.js is not part of the default runtime stack.
+### Left Sidebar (Workspace Hub)
+- Workspace list and active workspace indicator.
+- Local workspace attach/select flows.
+- Git workspace connect flow via GH CLI.
+- Compact integration panel: auth status, repo, branch, sync hints.
+- Settings access icon at top-right of sidebar.
 
-Avoid by default:
-- WSL2 runtime for core services.
-- Docker Desktop + WSL2 for day-to-day operation.
+### Center Area (Agent Canvas)
+- Multi-agent chat canvas based on the user layout vision.
+- Each agent card can run as:
+  - docked card
+  - floating panel
+  - detached native window
+- Chat remains the primary center interaction.
 
-### Hardware Guidance (Provider Inference Only)
-- **GPU requirement:** none.
-- **Local desktop minimum:** 16 GB RAM, modern 6-core CPU, NVMe SSD.
-- **Preferred local desktop:** 32 GB RAM, 8+ core CPU for heavier orchestration.
-- **Remote core minimum:** 2 vCPU, 4 GB RAM, 50 GB SSD.
-- **Remote core recommended:** 4 vCPU, 8 GB RAM, 100 GB SSD.
-- **Remote heavy mode (10-20 agents):** 8 vCPU, 16 GB RAM, 200 GB SSD.
+### Right Sidebar (Workflow-Only Rail)
+- Keep this rail focused and understandable:
+  - active agents summary
+  - current workflow phase
+  - recent activity feed
+- Remove deep config controls from this rail.
 
-## 6) UX and Interaction Model
+## 8) Agent Chat Workspace Requirements (Highest Priority)
 
-### Main Workspace
-- Kaizen chat is always visible.
-- Agent list/panel shows current agents and status.
-- Clicking an agent toggles that agent chat open/closed.
+### Window Modes
+- **Docked:** card in canvas grid.
+- **Floating:** draggable/resizable panel inside main window.
+- **Detached:** native window that can move to another monitor.
 
-### Multi-Chat Behavior
-- Every spawned agent gets its own chat context.
-- New agent chats are **created closed by default**.
-- User can talk directly to any agent or route all requests through Kaizen.
+### Interaction Requirements
+- Drag by header region.
+- Resize from corners/edges.
+- Bring-to-front support for overlapping windows.
+- Snap optional, free movement default.
 
-### Agent Personalization
-- User assigns agent names at spawn time.
-- User can rename agents after spawn via UI or API.
-- Renamed identities are reflected everywhere: panel, chat windows, Crystal Ball feed.
+### Persistence Requirements
+- Save per-workspace layout state:
+  - position
+  - size
+  - mode (docked/floating/detached)
+  - z-order
+  - detached monitor placement metadata
+- Restore layout on startup with safe fallback if monitor topology changed.
 
-### Crystal Ball Feed
-- Mattermost-backed feed for **AI:AI:HUMAN** communications.
-- Twitch-style scroll feed, draggable/resizable overlay.
-- Agent usernames match user-assigned agent names.
+### Chat Controls Per Agent
+- Send message.
+- Clear chat.
+- Stop agent work.
+- Remove agent from active board.
 
-## 7) Settings-First Feature Toggles (Personal Defaults)
+## 9) Settings System Redesign
 
-All major features are toggleable in the settings menu. Default profile reflects your personal workflow:
+### Main Settings Surface
+- One centralized settings modal/page with tabs:
+  - General
+  - Workspaces
+  - Agents and Workflow
+  - Integrations
+  - Models and Providers
+  - Security and Secrets
+  - Advanced
 
-- Every new feature ships behind a settings toggle before becoming default-on.
+### UX Rules
+- Replace unclear internal terms with plain language.
+- Advanced terminology appears only in explicit advanced sections.
+- Include short helper text where a user action can cause confusion.
 
-- `runtime_engine`: `zeroclaw` (default), `openclaw_compat` (disabled/off).
-- `auto_spawn_subagents`: `false`.
-- `max_subagents`: `5`.
-- `main_chat_pinned`: `true`.
-- `new_agent_chat_default_state`: `closed`.
-- `allow_direct_user_to_subagent_chat`: `true`.
-- `crystal_ball_enabled`: `true`.
-- `crystal_ball_default_open`: `false`.
-- `hard_gates_enabled`: `true`.
-- `require_human_smoke_test_before_deploy`: `true`.
-- `provider_inference_only`: `true`.
-- `credentials_ui_enabled`: `true`.
-- `oauth_ui_enabled`: `true`.
-- `agent_name_editable_after_spawn`: `true`.
-- `secrets_storage_mode`: `encrypted_vault`.
-- `write_plaintext_secrets_to_env`: `false`.
-- `show_only_masked_secrets_in_ui`: `true`.
+## 10) Workspace Integration Plan
 
-## 8) Orchestration and Gate Logic
+### Local Workspace
+- Add local path selector.
+- Persist recent workspaces.
+- Show current path and active project metadata.
 
-### Master Planner
-- Kaizen acts as the master planner/reasoner.
-- Kaizen can orchestrate up to a configurable limit (default max: 5).
-- Kaizen assigns task slices and monitors progress.
+### Git Workspace
+- Add GH CLI-backed connect flow.
+- Show connection health and auth state.
+- Show repo, branch, and basic status summary.
+- Phase 1 is read-focused, with controlled actions added later.
 
-### Enforced State Machine (Hard Gates)
-```text
-Plan -> Execute (Sub-Agents) -> Review (Nex_Alignment) -> Human Smoke Test -> Deploy
-```
+### Safety
+- No arbitrary command execution from UI.
+- Use allowlisted backend actions for workspace and Git operations.
 
-Hard-gate rules:
-- No agent may finalize output without Kaizen approval.
-- Required review checkpoint: **Passed Reasoners Test**.
-- If review fails, flow returns to Execute/Review until passed.
+## 11) Backend API Roadmap for Agentic Workflow
 
-## 9) Nex_Alignment Integration Plan
+### Existing Endpoints (already used)
+- `POST /api/chat`
+- `GET/POST /api/agents`
+- `PATCH /api/agents/{agent_id}` (rename)
+- `PATCH /api/agents/{agent_id}/status`
+- `GET /api/gates`
+- `POST /api/gates/advance`
+- `GET /api/events`
 
-### Alignment Audit First
-1. Inventory ZeroClaw native review/approval tools.
-2. Inventory Nex_Alignment MCP tools.
-3. Build collision matrix.
-4. Identify only critical parity gaps that require a compatibility adapter.
+### New or Expanded Endpoints (planned)
+- `DELETE /api/agents/{agent_id}` for remove from active board.
+- `POST /api/agents/{agent_id}/clear` for chat reset.
+- `POST /api/agents/{agent_id}/stop` for explicit halt.
+- Workspace endpoints for local and Git connection state.
+- GH integration endpoints with strict backend allowlist.
 
-### Collision Handling
-- If ZeroClaw already has equivalent native gates, deprecate overlapping local protocol tools.
-- If missing, bridge Nex MCP tools into gateway/tool layer.
-- If still missing, implement optional adapters in `compat/` without changing the default runtime.
+## 12) Security Baseline (Unchanged and Mandatory)
+- Secrets encrypted at rest.
+- No plaintext secret exposure in API, UI, logs, events, or archive.
+- Local mode binds to loopback only.
+- Remote mode requires private networking and TLS.
+- CORS allowlist enforced.
+- Redaction middleware and leak tests remain release gates.
 
-### Prompt/Template Injection
-- Inject core Nex tenets into ZeroClaw system prompt and `AGENTS.md` templates.
-- Ensure all spawned agents inherit the same governance baseline.
+## 13) Phased Execution Plan (Proceeding Steps)
 
-## 10) ZeroClaw Feature Parity Requirement
-- UI settings must expose terminal-level functionality where feasible.
-- Personas/behavior are controlled through settings/config, not hardcoded app logic.
-- Keep gateway/tool controls available in UI for power use.
-- If parity gaps are found, isolate them behind optional compatibility adapters in `compat/`.
-- **OAuth and API key lifecycle must be fully manageable in UI** (create/update/revoke/test), with encrypted backend handling.
+### Phase L0 - Plan Refresh and Alignment
+- Refresh implementation plan to match the new vision.
+- Lock priority order around agent chat workspace first.
 
-## 11) Security and Compliance Baseline
-- **CompTIA Cloud+-aligned architecture posture** (operationally applied).
-- **Zero-Trust** service-to-service model.
-- **Secure at rest:** all provider keys and OAuth tokens encrypted before persistence (AES-256-GCM envelope encryption).
-- **Secure in transit:** TLS required for remote mode; local mode loopback-only by default.
-- **Secure by design** defaults.
-- `.env` governance keys use **`ADMIN_`** prefix convention.
-- `.env` stores non-secret config and secret references only; raw secret values are never written to `.env`.
-- No API endpoint, UI panel, log, archive, or event feed may expose plaintext secrets.
+### Phase L1 - Settings Consolidation Shell
+- Remove config-heavy controls from sidebars.
+- Implement main settings surface and tab navigation shell.
+- Move right and left sidebar settings links to the central settings surface.
 
-### Credential and OAuth Hard Requirements
-- API keys and OAuth credentials are entered via UI settings only, never manual `.env` text editing.
-- Values are stored in an encrypted secret vault (write-only API), not plaintext config files.
-- UI only displays masked metadata: `configured` status, `last_updated` timestamp, optional `last4` characters.
-- OAuth access/refresh tokens are encrypted and never rendered back to users.
-- Secret leak checks are **release-gate tests** that must pass before any version is declared production-ready.
+### Phase L2 - Agent Canvas Foundation
+- Build robust card grid with room for many agents.
+- Standardize card actions and status display.
+- Ensure chat send/receive reliability across many cards.
 
-### Network Security Controls
-- Local mode: core binds to `127.0.0.1` only, no public listen.
-- Remote mode: private network + TLS/mTLS + authenticated connections.
-- CORS allowlist required (permissive mode removed before production).
-- Global request/response redaction middleware for secret patterns.
+### Phase L3 - Floating Panels
+- Add draggable and resizable floating chat panels.
+- Add z-order handling and focus behavior.
+- Add per-panel mode switch between docked and floating.
 
-## 12) Kubernetes/Cloud Deployment Blueprint
+### Phase L4 - Detached Multi-Monitor Windows
+- Add detachable native chat windows.
+- Sync detached windows with shared state store.
+- Persist and restore detached placement safely.
 
-A deployment blueprint is the production contract for how Kaizen MAX runs, scales, and stays secure.
+### Phase L5 - Agent Lifecycle Controls
+- Implement remove, clear, stop actions end-to-end.
+- Add confirmations for destructive actions where needed.
+- Keep actions fast and visible on every agent chatbox.
 
-### Blueprint Scope
-- `zeroclaw-gateway` Deployment + Service.
-- `ui` Deployment + Service/Ingress.
-- Persistent volume for Crystal Ball archive and audit data.
-- Secret management via Kubernetes Secrets + external secret manager/KMS integration.
-- NetworkPolicy (default deny + explicit allow paths only).
-- RBAC least-privilege roles for runtime, operators, and admin functions.
-- Pod security context, resource requests/limits, health probes.
-- Observability stack: logs, metrics, traces, audit events.
+### Phase L6 - Workspace Hub and GH Integration
+- Add local workspace selector.
+- Add Git workspace connect via GH CLI status bridge.
+- Display repo and branch context in sidebar.
 
-### Why This Matters
-- Repeatable deployments across environments.
-- Stronger secret isolation and auditability.
-- Safer scale-up for multi-agent workloads.
-- Faster incident response and rollback.
+### Phase L7 - Language and Usability Pass
+- Replace unclear terms with plain language labels.
+- Reduce cognitive load in right sidebar.
+- Add concise help text and better empty states.
 
-## 13) Implementation Phases
+### Phase L8 - Validation and Release Gate
+- Functional tests for multi-agent chat flow.
+- Layout persistence tests including monitor change fallback.
+- Security regression checks against existing secret policies.
+- Launcher validation for core + Dioxus app lifecycle.
 
-### Phase A - Bootstrap
-- Create repo structure and clone `core` (ZeroClaw), `ui`, and `protocol` sources.
-- Install dependencies and verify baseline health.
+## 14) Immediate Sprint Checklist (Now)
+- [x] Refresh plan with new priorities and proceeding steps.
+- [ ] Build central settings shell and move sidebar configs into it.
+- [ ] Simplify right sidebar to workflow and activity only.
+- [ ] Implement floating drag and resize for agent chat panels.
+- [ ] Implement detachable native chat windows across monitors.
+- [ ] Add agent remove/clear/stop backend and UI wiring.
+- [ ] Add workspace hub local path and Git context support.
+- [ ] Run integration and security regression pass.
 
-### Phase B - Alignment Audit
-- Complete MCP/native gate comparison for ZeroClaw + Nex_Alignment.
-- Document deprecate-vs-bridge decisions and any compatibility gaps.
+## 15) Success Criteria for This Cycle
+- Agent chats are the fastest path in the app.
+- Multi-chat operation works with drag, resize, and detach.
+- Sidebars are clean and not overloaded with technical settings.
+- Users can understand workflow terms without internal knowledge.
+- Workspace context is visible and actionable from the left sidebar.
+- Security and secret-handling guarantees remain intact.
 
-### Phase C - UI Foundation
-- Build Kaizen main chat + agent panel.
-- Implement toggleable per-agent chat windows.
-- Add drag/resize support for chats and overlays.
-
-### Phase D - Orchestration Layer
-- Implement Kaizen orchestration commands.
-- Add explicit sub-agent spawn/close controls.
-- Add configurable max-subagent limit.
-
-### Phase E - Crystal Ball Comms
-- Integrate Mattermost (self-hosted).
-- Build live interaction feed mapping channels/users to agents.
-
-### Phase F - Hard Gate Engine
-- Implement enforced state transitions and lock conditions.
-- Block finalization until review + smoke-test pass.
-
-### Phase G - Windows Operations
-- Add `scripts/start-max.ps1` to start native Windows UI and native/remote ZeroClaw core.
-- Configure multi-workspace access model.
-
-### Phase H - Security + Infra
-- Apply env/admin controls, secrets handling, and policy defaults.
-- Define K8s deployment blueprint and rollout strategy.
-
-### Phase I - Credentials, OAuth, and Secret Vault
-- Add encrypted secret vault service in core (AES-256-GCM, OS keystore/KMS backed).
-- Add write-only secret API endpoints (set/revoke/test; masked GET responses only).
-- Add UI settings forms for provider API keys (enter, update, revoke, test connection).
-- Add OAuth connect/callback/refresh/disconnect flows.
-- Ensure `.env` receives only secret references, never raw values.
-- Auto-reload runtime clients after credential save (no manual restart required).
-
-### Phase J - Agent Personalization
-- Add post-spawn agent rename capability (`PATCH /api/agents/{agent_id}` with `{ name }`).
-- Enforce validation: length, charset, uniqueness, reserved name checks.
-- Reflect renamed identities in agent panel, chat windows, and Crystal Ball feed instantly.
-
-### Phase K - Security Validation Gate (Release Blocker)
-- **At-rest test:** inspect persisted store; only ciphertext present.
-- **API test:** fetch settings/secrets metadata; zero plaintext values in any response.
-- **Network test:** packet capture during key save and OAuth flow; zero plaintext key hits.
-- **Log test:** scan app logs and Crystal Ball archive for secret patterns; zero hits.
-- **Access test:** unauthorized user cannot view or modify secrets.
-- **Regression test:** existing runtime flows still work with decrypted in-memory use only.
-- **CORS test:** confirm permissive mode is removed and allowlist is enforced.
-- All tests must pass before any version is declared production-ready.
-
-## 14) Success Criteria
-- Kaizen MAX opens with Kaizen as primary chat.
-- Sub-agents are manual and capped, with per-agent toggle chat windows.
-- User can rename spawned agents and see updated names everywhere.
-- Crystal Ball feed shows AI:AI:HUMAN interactions live.
-- Hard-gate state machine blocks unauthorized finalization.
-- ZeroClaw settings/capabilities are manageable via UI.
-- OAuth and provider keys are fully managed in UI with encrypted storage.
-- No plaintext secrets are exposed in API, UI, logs, events, or network paths.
-- Governance conventions (`ADMIN_`, alignment checks) are active.
-
-## 15) Execution Status Snapshot
-
-All implementation phases are complete. Application is fully functional for local use.
-
-- Phase A bootstrap is complete.
-- Phase B parity audit is complete with collision matrix documentation.
-- Phases C and D UI foundation and orchestration controls are implemented.
-- Phase E Crystal Ball local stream, Mattermost bridge, validation, and smoke tooling are implemented.
-- Phase F hard gate controls are implemented in runtime state machine and API paths.
-- Phase G startup workflow is implemented and hardened (Job Object lifecycle, orphan protection).
-- Phase H security controls include masking, archive retention, integrity audit, and CORS allowlist enforcement.
-- Phase I complete: encrypted vault (AES-256-GCM), secret API endpoints (store/revoke/test/list with masked responses), OAuth flow endpoints, and credential management UI in settings.
-- Phase J complete: post-spawn agent rename via PATCH API with validation (length/charset/uniqueness/reserved names), inline rename UI in agent panel, reflected in chat windows and Crystal Ball feed.
-- Phase K complete: vault at-rest encryption tests (5 tests), API masked-response tests, CORS allowlist enforced, secret redaction in logs/events, regression tests passing (26 total Rust tests, TypeScript build clean).
+## 16) Execution Status Snapshot
+- **Foundation status:** core APIs and Dioxus base UI are running.
+- **Current phase:** L1 to L2 transition.
+- **Next focus:** settings consolidation shell and chat workspace controls.

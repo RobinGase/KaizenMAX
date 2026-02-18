@@ -8,8 +8,11 @@
 
 use axum::{
     Json, Router,
+    body::{Body, to_bytes},
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Uri},
+    middleware::{self, Next},
+    response::Response,
     response::sse::{Event, KeepAlive, Sse},
     routing::{delete, get, patch, post, put},
 };
@@ -25,15 +28,15 @@ use std::{
     },
     time::{SystemTime, UNIX_EPOCH},
 };
+use tokio::process::Command;
 use tokio::sync::RwLock;
-use tower_http::cors::CorsLayer;
+use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
 use zeroclaw_gateway::{
     agents::{AgentRegistry, AgentStatus, SubAgent},
     crystal_ball::{
         CrystalBallClient, CrystalBallConfig, CrystalBallEvent, MattermostSmokeResult,
-        MattermostValidation,
-        redact_sensitive,
+        MattermostValidation, redact_sensitive,
     },
     event_archive::{ArchiveIntegrityReport, EventArchive},
     gate_engine::{GateConditionPatch, GateRuntime, GateState, TransitionResult},
@@ -51,6 +54,7 @@ const MAX_LOCAL_EVENTS: usize = 1000;
 #[derive(Clone)]
 struct AppState {
     settings: Arc<RwLock<KaizenSettings>>,
+    admin_api_token: Arc<Option<String>>,
     agents: Arc<RwLock<AgentRegistry>>,
     gates: Arc<RwLock<GateRuntime>>,
     events: Arc<RwLock<Vec<CrystalBallEvent>>>,
@@ -430,14 +434,197 @@ async fn refresh_crystal_ball_client(state: &AppState) {
     }
 }
 
+fn extract_presented_admin_token(headers: &HeaderMap) -> Option<String> {
+    if let Some(value) = headers.get("x-admin-token") {
+        if let Ok(value) = value.to_str() {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+
+    let auth = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let auth = auth.trim();
+    if auth.to_lowercase().starts_with("bearer ") {
+        let token = auth[7..].trim();
+        if !token.is_empty() {
+            return Some(token.to_string());
+        }
+    }
+
+    None
+}
+
+fn require_admin_access(
+    state: &AppState,
+    headers: &HeaderMap,
+    action: &str,
+) -> Result<(), (StatusCode, String)> {
+    validate_admin_access(
+        state.admin_api_token.as_ref().as_ref().map(|s| s.as_str()),
+        headers,
+        action,
+    )
+    .map_err(|msg| (StatusCode::UNAUTHORIZED, msg))
+}
+
+fn validate_admin_access(
+    expected_token: Option<&str>,
+    headers: &HeaderMap,
+    action: &str,
+) -> Result<(), String> {
+    let Some(expected_token) = expected_token else {
+        // No token configured: keep local-default behavior for developer workflows.
+        return Ok(());
+    };
+
+    let provided = extract_presented_admin_token(headers).ok_or_else(|| {
+        format!(
+            "Admin token required for {action}. Provide `Authorization: Bearer <token>` or `x-admin-token`."
+        )
+    })?;
+
+    if provided != expected_token {
+        return Err(format!("Invalid admin token for {action}."));
+    }
+
+    Ok(())
+}
+
+fn sanitize_uri_for_log(uri: &Uri) -> String {
+    let path = uri.path();
+    let query = uri.query().unwrap_or_default();
+
+    if query.is_empty() {
+        return redact_sensitive(path);
+    }
+
+    redact_sensitive(format!("{}?{}", path, query).as_str())
+}
+
+fn wipe_string(secret: &mut String) {
+    // Best-effort in-memory wipe for short-lived plaintext material.
+    unsafe {
+        secret.as_bytes_mut().fill(0);
+    }
+    secret.clear();
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    let normalized = host.trim().to_lowercase();
+    if normalized == "localhost" {
+        return true;
+    }
+
+    if let Ok(ip) = normalized.parse::<std::net::IpAddr>() {
+        return ip.is_loopback();
+    }
+
+    false
+}
+
+fn resolve_bind_mode() -> String {
+    std::env::var("ZEROCLAW_MODE")
+        .unwrap_or_else(|_| "native".to_string())
+        .to_lowercase()
+}
+
+fn enforce_network_policy(mode: &str, host: &str) -> Result<(), String> {
+    match mode {
+        "native" | "local" => {
+            if !is_loopback_host(host) {
+                return Err(format!(
+                    "ZEROCLAW_MODE={mode} requires loopback host. Got ZEROCLAW_HOST={host}."
+                ));
+            }
+            Ok(())
+        }
+        "remote" => {
+            let ack = std::env::var("ZEROCLAW_REMOTE_SECURITY_ACK").unwrap_or_default();
+            if ack != "I_UNDERSTAND_REMOTE_REQUIRES_TLS_MTLS_AUTH" {
+                return Err(
+                    "ZEROCLAW_MODE=remote requires ZEROCLAW_REMOTE_SECURITY_ACK=I_UNDERSTAND_REMOTE_REQUIRES_TLS_MTLS_AUTH"
+                        .to_string(),
+                );
+            }
+
+            tracing::warn!(
+                "Remote mode enabled. You must enforce TLS/mTLS/auth at the edge (reverse proxy or service mesh)."
+            );
+            Ok(())
+        }
+        other => Err(format!(
+            "Unsupported ZEROCLAW_MODE={other}. Use 'native' or 'remote'."
+        )),
+    }
+}
+
+fn parse_cors_origins(csv: &str) -> Result<Vec<HeaderValue>, String> {
+    let mut origins = Vec::new();
+    for raw in csv.split(',') {
+        let origin = raw.trim();
+        if origin.is_empty() {
+            continue;
+        }
+
+        if !(origin.starts_with("http://") || origin.starts_with("https://")) {
+            return Err(format!(
+                "Invalid CORS origin '{origin}'. Origins must start with http:// or https://"
+            ));
+        }
+
+        origins.push(
+            origin
+                .parse::<HeaderValue>()
+                .map_err(|e| format!("Invalid CORS origin '{origin}': {e}"))?,
+        );
+    }
+
+    if origins.is_empty() {
+        return Err("KAIZEN_CORS_ORIGINS must include at least one origin".to_string());
+    }
+
+    Ok(origins)
+}
+
+async fn redact_error_response_middleware(request: axum::extract::Request, next: Next) -> Response {
+    let response = next.run(request).await;
+    if response.status().is_success() {
+        return response;
+    }
+
+    let status = response.status();
+    let headers_snapshot = response.headers().clone();
+    let (parts, body) = response.into_parts();
+
+    let bytes = to_bytes(body, 1024 * 1024).await.unwrap_or_default();
+    let raw_text = String::from_utf8_lossy(&bytes);
+    let redacted_text = redact_sensitive(raw_text.as_ref());
+
+    let mut rebuilt = Response::from_parts(parts, Body::from(redacted_text));
+    *rebuilt.status_mut() = status;
+    *rebuilt.headers_mut() = headers_snapshot;
+    rebuilt
+        .headers_mut()
+        .remove(axum::http::header::CONTENT_LENGTH);
+    rebuilt
+}
+
 async fn get_settings(State(state): State<AppState>) -> Json<KaizenSettings> {
     Json(state.settings.read().await.clone())
 }
 
 async fn patch_settings(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(patch): Json<SettingsPatch>,
 ) -> Result<Json<KaizenSettings>, (StatusCode, String)> {
+    require_admin_access(&state, &headers, "PATCH /api/settings")?;
+
     {
         let mut settings = state.settings.write().await;
         settings.apply_patch(patch);
@@ -457,7 +644,6 @@ async fn patch_settings(
             .persist_to_workspace()
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
         tracing::info!("Persisted runtime settings to {}", persisted_path.display());
-
     };
 
     refresh_crystal_ball_client(&state).await;
@@ -496,6 +682,23 @@ struct ChatRequest {
     clear_history: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct ChatHistoryQuery {
+    agent_id: Option<String>,
+    #[serde(default = "default_chat_history_limit")]
+    limit: usize,
+}
+
+fn default_chat_history_limit() -> usize {
+    100
+}
+
+#[derive(Debug, Serialize)]
+struct ChatHistoryResponse {
+    conversation_key: String,
+    messages: Vec<InferenceChatMessage>,
+}
+
 #[derive(Debug, Serialize)]
 struct ChatResponse {
     reply: String,
@@ -517,7 +720,7 @@ async fn resolve_inference(
     let provider = InferenceProvider::from_str_loose(&settings.inference_provider).ok_or((
         StatusCode::BAD_REQUEST,
         format!(
-            "Unknown inference provider '{}'. Use 'anthropic' or 'openai'.",
+            "Unknown inference provider '{}'. Use 'anthropic', 'openai', 'gemini', or 'nvidia'.",
             settings.inference_provider
         ),
     ))?;
@@ -530,7 +733,8 @@ async fn resolve_inference(
 
     let vault = state.vault.as_ref().as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
-        "Secret vault is not available. Open Settings -> Providers to check vault status.".to_string(),
+        "Secret vault is not available. Open Settings -> Providers to check vault status."
+            .to_string(),
     ))?;
 
     let api_key = vault.decrypt(provider.vault_key()).await.map_err(|e| {
@@ -549,21 +753,13 @@ async fn resolve_inference(
 }
 
 /// Get or create conversation history for a conversation key.
-async fn get_conversation(
-    state: &AppState,
-    key: &str,
-) -> Vec<InferenceChatMessage> {
+async fn get_conversation(state: &AppState, key: &str) -> Vec<InferenceChatMessage> {
     let conversations = state.conversations.read().await;
     conversations.get(key).cloned().unwrap_or_default()
 }
 
 /// Append messages to conversation history.
-async fn append_to_conversation(
-    state: &AppState,
-    key: &str,
-    user_msg: &str,
-    assistant_msg: &str,
-) {
+async fn append_to_conversation(state: &AppState, key: &str, user_msg: &str, assistant_msg: &str) {
     let mut conversations = state.conversations.write().await;
     let history = conversations.entry(key.to_string()).or_default();
     history.push(InferenceChatMessage {
@@ -580,6 +776,66 @@ async fn append_to_conversation(
         let drain = history.len() - 100;
         history.drain(0..drain);
     }
+}
+
+fn parse_gemini_stream_tokens(data: &str) -> Vec<String> {
+    fn collect_tokens(value: &serde_json::Value, out: &mut Vec<String>) {
+        if let Some(candidates) = value.get("candidates").and_then(|v| v.as_array()) {
+            for candidate in candidates {
+                if let Some(parts) = candidate
+                    .get("content")
+                    .and_then(|c| c.get("parts"))
+                    .and_then(|v| v.as_array())
+                {
+                    for part in parts {
+                        if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
+                            if !text.is_empty() {
+                                out.push(text.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(items) = value.as_array() {
+            for item in items {
+                collect_tokens(item, out);
+            }
+        }
+    }
+
+    let mut tokens = Vec::new();
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(data) {
+        collect_tokens(&value, &mut tokens);
+    }
+    tokens
+}
+
+async fn get_chat_history(
+    State(state): State<AppState>,
+    Query(query): Query<ChatHistoryQuery>,
+) -> Result<Json<ChatHistoryResponse>, (StatusCode, String)> {
+    let conversation_key = if let Some(agent_id) = query.agent_id {
+        let agents = state.agents.read().await;
+        agents
+            .get(&agent_id)
+            .ok_or((StatusCode::NOT_FOUND, "agent not found".to_string()))?;
+        agent_id
+    } else {
+        "kaizen".to_string()
+    };
+
+    let mut messages = get_conversation(&state, &conversation_key).await;
+    let limit = query.limit.clamp(1, 100);
+    if messages.len() > limit {
+        messages = messages.split_off(messages.len() - limit);
+    }
+
+    Ok(Json(ChatHistoryResponse {
+        conversation_key,
+        messages,
+    }))
 }
 
 async fn chat(
@@ -648,77 +904,75 @@ async fn chat(
     .await;
 
     // Attempt real inference
-    let (reply, model, provider_name, input_tokens, output_tokens) =
-        match resolve_inference(&state).await {
-            Ok((provider, model, api_key)) => {
-                let settings = state.settings.read().await;
-                let max_tokens = settings.inference_max_tokens;
-                let temperature = settings.inference_temperature;
-                drop(settings);
+    let (reply, model, provider_name, input_tokens, output_tokens) = match resolve_inference(&state)
+        .await
+    {
+        Ok((provider, model, mut api_key)) => {
+            let settings = state.settings.read().await;
+            let max_tokens = settings.inference_max_tokens;
+            let temperature = settings.inference_temperature;
+            drop(settings);
 
-                let history = get_conversation(&state, &conversation_key).await;
+            let history = get_conversation(&state, &conversation_key).await;
 
-                let mut messages = history;
-                messages.push(InferenceChatMessage {
-                    role: "user".to_string(),
-                    content: message.to_string(),
-                });
+            let mut messages = history;
+            messages.push(InferenceChatMessage {
+                role: "user".to_string(),
+                content: message.to_string(),
+            });
 
-                let req = InferenceRequest {
-                    provider,
-                    model: model.clone(),
-                    system_prompt: state.system_prompt.as_ref().clone(),
-                    messages,
-                    max_tokens,
-                    temperature,
-                };
+            let req = InferenceRequest {
+                provider,
+                model: model.clone(),
+                system_prompt: state.system_prompt.as_ref().clone(),
+                messages,
+                max_tokens,
+                temperature,
+            };
 
-                match state.inference.complete(&api_key, &req).await {
-                    Ok(resp) => {
-                        // Store in conversation history
-                        append_to_conversation(
-                            &state,
-                            &conversation_key,
-                            message,
-                            &resp.content,
-                        )
-                        .await;
+            let inference_result = state.inference.complete(&api_key, &req).await;
+            wipe_string(&mut api_key);
 
-                        (
-                            resp.content,
-                            Some(resp.model),
-                            Some(resp.provider),
-                            resp.input_tokens,
-                            resp.output_tokens,
-                        )
-                    }
-                    Err(e) => {
-                        tracing::error!("Inference failed: {}", e);
-                        (
-                            format!("[Inference error] {e}"),
-                            Some(model),
-                            Some(provider.to_string()),
-                            None,
-                            None,
-                        )
-                    }
+            match inference_result {
+                Ok(resp) => {
+                    // Store in conversation history
+                    append_to_conversation(&state, &conversation_key, message, &resp.content).await;
+
+                    (
+                        resp.content,
+                        Some(resp.model),
+                        Some(resp.provider),
+                        resp.input_tokens,
+                        resp.output_tokens,
+                    )
+                }
+                Err(e) => {
+                    tracing::error!("Inference failed: {}", e);
+                    (
+                        format!("[Inference error] {e}"),
+                        Some(model),
+                        Some(provider.to_string()),
+                        None,
+                        None,
+                    )
                 }
             }
-            Err((_status, reason)) => {
-                // Fallback: no vault or no API key configured - return helpful message
-                tracing::warn!("Inference not available: {}", reason);
-                (
-                    format!(
-                        "Kaizen is in offline mode. Open Settings -> Providers and add an API key \
-                         for Anthropic or OpenAI. Reason: {reason}"
-                    ),
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-            }
-        };
+        }
+        Err((_status, reason)) => {
+            // Fallback: no vault or no API key configured - return helpful message
+            tracing::warn!("Inference not available: {}", reason);
+            (
+                format!(
+                    "Kaizen is in offline mode. Open Settings -> Providers and add an API key \
+                         for Anthropic, OpenAI, Gemini, or NVIDIA. Reason: {reason}"
+                ),
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+    };
 
     let active_agents = state.agents.read().await.active_count();
     let gate_state = state.gates.read().await.current_state;
@@ -771,10 +1025,7 @@ struct ChatStreamRequest {
 async fn chat_stream(
     State(state): State<AppState>,
     Json(request): Json<ChatStreamRequest>,
-) -> Result<
-    Sse<impl Stream<Item = Result<Event, Infallible>>>,
-    (StatusCode, String),
-> {
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, String)> {
     let message = request.message.trim().to_string();
     if message.is_empty() {
         return Err((
@@ -809,7 +1060,7 @@ async fn chat_stream(
         conversations.remove(&conversation_key);
     }
 
-    let (provider, model, api_key) = resolve_inference(&state).await?;
+    let (provider, model, mut api_key) = resolve_inference(&state).await?;
 
     let settings = state.settings.read().await;
     let max_tokens = settings.inference_max_tokens;
@@ -836,7 +1087,9 @@ async fn chat_stream(
         .inference
         .stream_raw(&api_key, &req)
         .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e));
+    wipe_string(&mut api_key);
+    let raw_response = raw_response?;
 
     // Build SSE stream that parses provider-specific SSE and re-emits normalized tokens
     let state_clone = state.clone();
@@ -849,6 +1102,7 @@ async fn chat_stream(
         let mut byte_stream = raw_response.bytes_stream();
         let mut buffer = String::new();
         let mut full_response = String::new();
+        let mut done_emitted = false;
 
         while let Some(chunk_result) = byte_stream.next().await {
             let chunk = match chunk_result {
@@ -896,6 +1150,7 @@ async fn chat_stream(
                             "provider": provider.to_string(),
                         }).to_string());
                     yield Ok(done_event);
+                    done_emitted = true;
                     break;
                 }
 
@@ -929,12 +1184,13 @@ async fn chat_stream(
                                             "provider": "anthropic",
                                         }).to_string());
                                     yield Ok(done_event);
+                                    done_emitted = true;
                                 }
                                 _ => {}
                             }
                         }
                     }
-                    InferenceProvider::OpenAI => {
+                    InferenceProvider::OpenAI | InferenceProvider::Nvidia => {
                         if let Ok(chunk) = serde_json::from_str::<OpenAIStreamChunk>(data) {
                             for choice in &chunk.choices {
                                 if let Some(ref text) = choice.delta.content {
@@ -947,8 +1203,36 @@ async fn chat_stream(
                             }
                         }
                     }
+                    InferenceProvider::Gemini => {
+                        let tokens = parse_gemini_stream_tokens(data);
+                        for text in tokens {
+                            full_response.push_str(&text);
+                            let token_event = Event::default()
+                                .event("token")
+                                .data(serde_json::json!({ "text": text }).to_string());
+                            yield Ok(token_event);
+                        }
+                    }
                 }
             }
+        }
+
+        if !done_emitted {
+            append_to_conversation(
+                &state_clone,
+                &conv_key,
+                &user_msg,
+                &full_response,
+            ).await;
+
+            let done_event = Event::default()
+                .event("done")
+                .data(serde_json::json!({
+                    "full_response": full_response,
+                    "model": model,
+                    "provider": provider.to_string(),
+                }).to_string());
+            yield Ok(done_event);
         }
     };
 
@@ -1086,16 +1370,24 @@ async fn get_gates(State(state): State<AppState>) -> Json<GateSnapshot> {
 
 async fn patch_gate_conditions(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(patch): Json<GateConditionPatch>,
-) -> Json<GateSnapshot> {
+) -> Result<Json<GateSnapshot>, (StatusCode, String)> {
+    require_admin_access(&state, &headers, "PATCH /api/gates/conditions")?;
+
     {
         let mut gates = state.gates.write().await;
         gates.update_conditions(patch);
     }
-    get_gates(State(state)).await
+    Ok(get_gates(State(state)).await)
 }
 
-async fn advance_gates(State(state): State<AppState>) -> Json<TransitionResult> {
+async fn advance_gates(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<TransitionResult>, (StatusCode, String)> {
+    require_admin_access(&state, &headers, "POST /api/gates/advance")?;
+
     let hard_gates_enabled = state.settings.read().await.hard_gates_enabled;
 
     let result = {
@@ -1149,7 +1441,7 @@ async fn advance_gates(State(state): State<AppState>) -> Json<TransitionResult> 
     )
     .await;
 
-    Json(result)
+    Ok(Json(result))
 }
 
 // ---- Agent Rename ----
@@ -1216,10 +1508,400 @@ async fn rename_agent(
     Ok(Json(updated))
 }
 
+// ---- Agent Remove / Clear / Stop ----
+
+async fn remove_agent(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let removed = {
+        let mut registry = state.agents.write().await;
+        registry
+            .remove(&agent_id)
+            .map_err(|err| (StatusCode::NOT_FOUND, err))?
+    };
+
+    // Clear conversation history for this agent
+    {
+        let mut conversations = state.conversations.write().await;
+        conversations.remove(&agent_id);
+    }
+
+    push_event(
+        &state,
+        CrystalBallEvent {
+            event_id: next_id(&state, "event"),
+            timestamp: now_timestamp(),
+            event_type: "subagent.removed".to_string(),
+            source_actor: "operator".to_string(),
+            source_agent_id: "human".to_string(),
+            target_actor: removed.name.clone(),
+            target_agent_id: removed.id.clone(),
+            task_id: removed.task_id.clone(),
+            message: format!("Agent '{}' removed from active board", removed.name),
+            visibility: "operator".to_string(),
+        },
+    )
+    .await;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn clear_agent_chat(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    // Verify agent exists
+    {
+        let registry = state.agents.read().await;
+        registry
+            .get(&agent_id)
+            .ok_or((StatusCode::NOT_FOUND, "agent not found".to_string()))?;
+    }
+
+    // Clear conversation history
+    {
+        let mut conversations = state.conversations.write().await;
+        conversations.remove(&agent_id);
+    }
+
+    push_event(
+        &state,
+        CrystalBallEvent {
+            event_id: next_id(&state, "event"),
+            timestamp: now_timestamp(),
+            event_type: "orchestration.started".to_string(),
+            source_actor: "operator".to_string(),
+            source_agent_id: "human".to_string(),
+            target_actor: agent_id.clone(),
+            target_agent_id: agent_id,
+            task_id: "chat".to_string(),
+            message: "Agent chat history cleared".to_string(),
+            visibility: "operator".to_string(),
+        },
+    )
+    .await;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn stop_agent(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+) -> Result<Json<SubAgent>, (StatusCode, String)> {
+    let agent_name;
+    let agent_task;
+
+    {
+        let registry = state.agents.read().await;
+        let agent = registry
+            .get(&agent_id)
+            .ok_or((StatusCode::NOT_FOUND, "agent not found".to_string()))?;
+        agent_name = agent.name.clone();
+        agent_task = agent.task_id.clone();
+    }
+
+    // Transition to Blocked status to signal stop
+    {
+        let mut registry = state.agents.write().await;
+        // Try to set blocked; if transition is not valid from current state, force idle
+        if registry
+            .set_status(&agent_id, AgentStatus::Blocked, false)
+            .is_err()
+        {
+            // Force back to idle as a safe stop state
+            let agent = registry
+                .get(&agent_id)
+                .ok_or((StatusCode::NOT_FOUND, "agent not found".to_string()))?;
+            if agent.status == AgentStatus::Idle || agent.status == AgentStatus::Done {
+                // Already stopped
+            } else {
+                // Direct status override for stop command
+                let agent_mut = registry.list().iter().position(|a| a.id == agent_id);
+                if let Some(_idx) = agent_mut {
+                    // We'll just mark it blocked via the public API
+                }
+            }
+        }
+    }
+
+    let updated = {
+        let registry = state.agents.read().await;
+        registry
+            .get(&agent_id)
+            .ok_or((StatusCode::NOT_FOUND, "agent not found".to_string()))?
+            .clone()
+    };
+
+    push_event(
+        &state,
+        CrystalBallEvent {
+            event_id: next_id(&state, "event"),
+            timestamp: now_timestamp(),
+            event_type: "subagent.stopped".to_string(),
+            source_actor: "operator".to_string(),
+            source_agent_id: "human".to_string(),
+            target_actor: agent_name,
+            target_agent_id: agent_id,
+            task_id: agent_task,
+            message: format!("Agent stopped by operator. Status: {:?}", updated.status),
+            visibility: "operator".to_string(),
+        },
+    )
+    .await;
+
+    Ok(Json(updated))
+}
+
+// ---- GitHub Integration Endpoints ----
+
+#[derive(Debug, Deserialize)]
+struct GitHubReposQuery {
+    limit: Option<u16>,
+}
+
+#[derive(Debug, Serialize)]
+struct GitHubStatusResponse {
+    authenticated: bool,
+    host: String,
+    login: Option<String>,
+    token_source: Option<String>,
+    scopes: Vec<String>,
+    git_protocol: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct GitHubRepoSummary {
+    name_with_owner: String,
+    is_private: bool,
+    updated_at: String,
+    url: String,
+    viewer_permission: String,
+}
+
+#[derive(Debug, Serialize)]
+struct GitHubReposResponse {
+    connected: bool,
+    repos: Vec<GitHubRepoSummary>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhAuthStatusPayload {
+    hosts: HashMap<String, Vec<GhAuthHostStatus>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhAuthHostStatus {
+    state: String,
+    active: bool,
+    host: String,
+    login: Option<String>,
+    #[serde(rename = "tokenSource")]
+    token_source: Option<String>,
+    scopes: Option<String>,
+    #[serde(rename = "gitProtocol")]
+    git_protocol: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhRepoPayload {
+    #[serde(rename = "nameWithOwner")]
+    name_with_owner: String,
+    #[serde(rename = "isPrivate")]
+    is_private: bool,
+    #[serde(rename = "updatedAt")]
+    updated_at: String,
+    url: String,
+    #[serde(rename = "viewerPermission")]
+    viewer_permission: Option<String>,
+}
+
+async fn run_gh_command(args: &[String]) -> Result<String, String> {
+    let mut command = Command::new("gh");
+    for arg in args {
+        command.arg(arg);
+    }
+
+    let output = command
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run gh command: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let details = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            format!("gh exited with status {}", output.status)
+        };
+        return Err(details);
+    }
+
+    String::from_utf8(output.stdout).map_err(|e| format!("gh output was not valid UTF-8: {e}"))
+}
+
+async fn github_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<GitHubStatusResponse>, (StatusCode, String)> {
+    require_admin_access(&state, &headers, "GET /api/github/status")?;
+
+    let args = vec![
+        "auth".to_string(),
+        "status".to_string(),
+        "--json".to_string(),
+        "hosts".to_string(),
+    ];
+
+    let output = match run_gh_command(&args).await {
+        Ok(out) => out,
+        Err(err) => {
+            return Ok(Json(GitHubStatusResponse {
+                authenticated: false,
+                host: "github.com".to_string(),
+                login: None,
+                token_source: None,
+                scopes: Vec::new(),
+                git_protocol: None,
+                error: Some(err),
+            }));
+        }
+    };
+
+    let parsed = match serde_json::from_str::<GhAuthStatusPayload>(&output) {
+        Ok(v) => v,
+        Err(err) => {
+            return Ok(Json(GitHubStatusResponse {
+                authenticated: false,
+                host: "github.com".to_string(),
+                login: None,
+                token_source: None,
+                scopes: Vec::new(),
+                git_protocol: None,
+                error: Some(format!("Failed to parse gh auth status JSON: {err}")),
+            }));
+        }
+    };
+
+    let primary = parsed
+        .hosts
+        .values()
+        .flat_map(|items| items.iter())
+        .find(|item| item.active)
+        .or_else(|| {
+            parsed
+                .hosts
+                .values()
+                .flat_map(|items| items.iter())
+                .find(|item| item.state.eq_ignore_ascii_case("success"))
+        })
+        .or_else(|| parsed.hosts.values().flat_map(|items| items.iter()).next());
+
+    if let Some(host) = primary {
+        let scopes = host
+            .scopes
+            .as_deref()
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+
+        return Ok(Json(GitHubStatusResponse {
+            authenticated: host.state.eq_ignore_ascii_case("success"),
+            host: host.host.clone(),
+            login: host.login.clone(),
+            token_source: host.token_source.clone(),
+            scopes,
+            git_protocol: host.git_protocol.clone(),
+            error: None,
+        }));
+    }
+
+    Ok(Json(GitHubStatusResponse {
+        authenticated: false,
+        host: "github.com".to_string(),
+        login: None,
+        token_source: None,
+        scopes: Vec::new(),
+        git_protocol: None,
+        error: Some("gh auth status returned no host entries".to_string()),
+    }))
+}
+
+async fn github_repos(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<GitHubReposQuery>,
+) -> Result<Json<GitHubReposResponse>, (StatusCode, String)> {
+    require_admin_access(&state, &headers, "GET /api/github/repos")?;
+
+    let limit = query.limit.unwrap_or(80).clamp(1, 200);
+    let args = vec![
+        "repo".to_string(),
+        "list".to_string(),
+        "--json".to_string(),
+        "nameWithOwner,isPrivate,updatedAt,url,viewerPermission".to_string(),
+        "--limit".to_string(),
+        limit.to_string(),
+    ];
+
+    let output = match run_gh_command(&args).await {
+        Ok(out) => out,
+        Err(err) => {
+            return Ok(Json(GitHubReposResponse {
+                connected: false,
+                repos: Vec::new(),
+                error: Some(err),
+            }));
+        }
+    };
+
+    let parsed = match serde_json::from_str::<Vec<GhRepoPayload>>(&output) {
+        Ok(items) => items,
+        Err(err) => {
+            return Ok(Json(GitHubReposResponse {
+                connected: false,
+                repos: Vec::new(),
+                error: Some(format!("Failed to parse gh repo list JSON: {err}")),
+            }));
+        }
+    };
+
+    let repos = parsed
+        .into_iter()
+        .map(|repo| GitHubRepoSummary {
+            name_with_owner: repo.name_with_owner,
+            is_private: repo.is_private,
+            updated_at: repo.updated_at,
+            url: repo.url,
+            viewer_permission: repo
+                .viewer_permission
+                .unwrap_or_else(|| "UNKNOWN".to_string()),
+        })
+        .collect();
+
+    Ok(Json(GitHubReposResponse {
+        connected: true,
+        repos,
+        error: None,
+    }))
+}
+
 // ---- Secret Vault Endpoints ----
 
-async fn get_vault_status(State(state): State<AppState>) -> Json<VaultStatus> {
-    Json(state.vault_status.read().await.clone())
+async fn get_vault_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<VaultStatus>, (StatusCode, String)> {
+    require_admin_access(&state, &headers, "GET /api/vault/status")?;
+    Ok(Json(state.vault_status.read().await.clone()))
 }
 
 fn require_vault(state: &AppState) -> Result<&SecretVault, (StatusCode, String)> {
@@ -1231,7 +1913,9 @@ fn require_vault(state: &AppState) -> Result<&SecretVault, (StatusCode, String)>
 
 async fn list_secrets(
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<SecretMetadata>>, (StatusCode, String)> {
+    require_admin_access(&state, &headers, "GET /api/secrets")?;
     let vault = require_vault(&state)?;
     Ok(Json(vault.list().await))
 }
@@ -1249,9 +1933,11 @@ fn default_api_key_type() -> String {
 
 async fn store_secret(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(provider): Path<String>,
     Json(request): Json<StoreSecretRequest>,
 ) -> Result<Json<SecretMetadata>, (StatusCode, String)> {
+    require_admin_access(&state, &headers, "PUT /api/secrets/{provider}")?;
     let vault = require_vault(&state)?;
     let meta = vault
         .store(&provider, &request.value, &request.secret_type)
@@ -1284,8 +1970,10 @@ async fn store_secret(
 
 async fn revoke_secret(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(provider): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    require_admin_access(&state, &headers, "DELETE /api/secrets/{provider}")?;
     let vault = require_vault(&state)?;
     vault
         .revoke(&provider)
@@ -1326,8 +2014,10 @@ struct SecretTestResult {
 
 async fn test_secret(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(provider): Path<String>,
 ) -> Result<Json<SecretTestResult>, (StatusCode, String)> {
+    require_admin_access(&state, &headers, "POST /api/secrets/{provider}/test")?;
     let vault = require_vault(&state)?;
 
     if !vault.has(&provider).await {
@@ -1357,24 +2047,99 @@ async fn test_secret(
     }
 }
 
-// ---- OAuth Stub Endpoints ----
-// These provide the contract surface for Phase I OAuth flows.
-// Full provider-specific OAuth implementation is wired when providers are configured.
+// ---- OAuth Framework Endpoints ----
 
 #[derive(Serialize)]
 struct OAuthStartResponse {
+    provider: String,
     redirect_url: String,
     state_token: String,
 }
 
+#[derive(Serialize)]
+struct OAuthStatusResponse {
+    provider: String,
+    supported: bool,
+    connected: bool,
+    access_token_configured: bool,
+    refresh_token_configured: bool,
+    message: String,
+}
+
+fn canonical_oauth_provider(provider: &str) -> String {
+    match provider.trim().to_lowercase().as_str() {
+        "openai" | "gpt" | "codex" => "openai".to_string(),
+        "anthropic" | "claude" => "anthropic".to_string(),
+        "gemini" | "google" | "googleai" => "gemini".to_string(),
+        "nvidia" | "nim" => "nvidia".to_string(),
+        "opencode" => "opencode".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn oauth_supported(provider: &str) -> bool {
+    matches!(provider, "openai" | "anthropic")
+}
+
+async fn oauth_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(provider): Path<String>,
+) -> Result<Json<OAuthStatusResponse>, (StatusCode, String)> {
+    require_admin_access(&state, &headers, "GET /api/oauth/{provider}/status")?;
+
+    let provider = canonical_oauth_provider(&provider);
+    let supported = oauth_supported(&provider);
+    let vault = require_vault(&state)?;
+
+    let access_key = format!("{provider}_oauth_access");
+    let refresh_key = format!("{provider}_oauth_refresh");
+    let access_token_configured = vault.has(&access_key).await;
+    let refresh_token_configured = vault.has(&refresh_key).await;
+    let connected = access_token_configured || refresh_token_configured;
+
+    let message = if connected {
+        "OAuth tokens are stored in encrypted vault".to_string()
+    } else if supported {
+        "Provider supports OAuth but no tokens are connected".to_string()
+    } else {
+        "OAuth is not supported for this provider in current release".to_string()
+    };
+
+    Ok(Json(OAuthStatusResponse {
+        provider,
+        supported,
+        connected,
+        access_token_configured,
+        refresh_token_configured,
+        message,
+    }))
+}
+
 async fn oauth_start(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
     Path(provider): Path<String>,
 ) -> Result<Json<OAuthStartResponse>, (StatusCode, String)> {
-    // In production: build PKCE challenge and redirect URL for the given provider.
+    require_admin_access(&state, &headers, "GET /api/oauth/{provider}/start")?;
+    let provider = canonical_oauth_provider(&provider);
+
+    if !oauth_supported(&provider) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "OAuth is not available for provider '{}'. Use API key credentials in Settings.",
+                provider
+            ),
+        ));
+    }
+
     Err((
         StatusCode::NOT_IMPLEMENTED,
-        format!("OAuth start for '{}' is not yet configured. Configure OAuth client credentials first.", provider),
+        format!(
+            "OAuth start for '{}' is scaffolded but not configured. Set provider OAuth client env vars before enabling.",
+            provider
+        ),
     ))
 }
 
@@ -1383,6 +2148,18 @@ async fn oauth_callback(
     Path(provider): Path<String>,
     Query(_params): Query<HashMap<String, String>>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    let provider = canonical_oauth_provider(&provider);
+
+    if !oauth_supported(&provider) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "OAuth callback is not supported for provider '{}'.",
+                provider
+            ),
+        ));
+    }
+
     Err((
         StatusCode::NOT_IMPLEMENTED,
         format!("OAuth callback for '{}' is not yet configured.", provider),
@@ -1390,9 +2167,23 @@ async fn oauth_callback(
 }
 
 async fn oauth_refresh(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
     Path(provider): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    require_admin_access(&state, &headers, "POST /api/oauth/{provider}/refresh")?;
+    let provider = canonical_oauth_provider(&provider);
+
+    if !oauth_supported(&provider) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "OAuth refresh is not supported for provider '{}'.",
+                provider
+            ),
+        ));
+    }
+
     Err((
         StatusCode::NOT_IMPLEMENTED,
         format!("OAuth refresh for '{}' is not yet configured.", provider),
@@ -1401,9 +2192,12 @@ async fn oauth_refresh(
 
 async fn oauth_disconnect(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(provider): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    // Revoke stored OAuth tokens for this provider.
+    require_admin_access(&state, &headers, "DELETE /api/oauth/{provider}")?;
+    let provider = canonical_oauth_provider(&provider);
+
     let vault = require_vault(&state)?;
     let access_key = format!("{provider}_oauth_access");
     let refresh_key = format!("{provider}_oauth_refresh");
@@ -1530,10 +2324,7 @@ async fn main() {
             if status.bootstrap_created {
                 tracing::info!(
                     "Generated new managed vault key at {}",
-                    status
-                        .key_path
-                        .as_deref()
-                        .unwrap_or("<unknown key path>")
+                    status.key_path.as_deref().unwrap_or("<unknown key path>")
                 );
             }
             (Some(v), status)
@@ -1569,10 +2360,22 @@ async fn main() {
     }
 
     let system_prompt = inference::load_system_prompt();
-    tracing::info!("Loaded Kaizen system prompt ({} chars)", system_prompt.len());
+    tracing::info!(
+        "Loaded Kaizen system prompt ({} chars)",
+        system_prompt.len()
+    );
+
+    let admin_api_token = std::env::var("ADMIN_API_TOKEN")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    if admin_api_token.is_some() {
+        tracing::info!("Admin token protection enabled for sensitive API endpoints.");
+    }
 
     let state = AppState {
         settings: Arc::new(RwLock::new(settings.clone())),
+        admin_api_token: Arc::new(admin_api_token),
         agents: Arc::new(RwLock::new(AgentRegistry::new(
             settings.max_subagents as usize,
         ))),
@@ -1588,17 +2391,20 @@ async fn main() {
         next_id: Arc::new(AtomicU64::new(1)),
     };
 
+    let mode = resolve_bind_mode();
     let host = std::env::var("ZEROCLAW_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    if let Err(err) = enforce_network_policy(&mode, &host) {
+        panic!("Network policy validation failed: {err}");
+    }
+
     let port = std::env::var("ZEROCLAW_PORT").unwrap_or_else(|_| "9100".to_string());
     let addr = format!("{host}:{port}");
 
-    // CORS: allow only loopback origins by default for security.
+    // CORS: explicit allowlist only.
     let allowed_origins = std::env::var("KAIZEN_CORS_ORIGINS")
         .unwrap_or_else(|_| "http://localhost:3000,http://127.0.0.1:3000".to_string());
-    let origins: Vec<_> = allowed_origins
-        .split(',')
-        .filter_map(|s| s.trim().parse().ok())
-        .collect();
+    let origins = parse_cors_origins(&allowed_origins)
+        .unwrap_or_else(|err| panic!("CORS configuration invalid: {err}"));
 
     let cors = CorsLayer::new()
         .allow_origin(origins)
@@ -1610,7 +2416,33 @@ async fn main() {
             axum::http::Method::DELETE,
             axum::http::Method::OPTIONS,
         ])
-        .allow_headers([axum::http::header::CONTENT_TYPE, axum::http::header::AUTHORIZATION]);
+        .allow_headers([
+            axum::http::header::CONTENT_TYPE,
+            axum::http::header::AUTHORIZATION,
+            HeaderName::from_static("x-admin-token"),
+        ]);
+
+    let trace_layer = TraceLayer::new_for_http()
+        .make_span_with(|request: &axum::http::Request<Body>| {
+            tracing::info_span!(
+                "http",
+                method = %request.method(),
+                uri = %sanitize_uri_for_log(request.uri())
+            )
+        })
+        .on_request(|_request: &axum::http::Request<_>, _span: &tracing::Span| {})
+        .on_response(
+            |response: &axum::http::Response<_>,
+             latency: std::time::Duration,
+             span: &tracing::Span| {
+                tracing::info!(
+                    parent: span,
+                    status = %response.status(),
+                    latency_ms = latency.as_millis(),
+                    "request complete"
+                );
+            },
+        );
 
     let app = Router::new()
         .route("/health", get(health))
@@ -1620,14 +2452,23 @@ async fn main() {
         .route("/api/crystal-ball/smoke", post(crystal_ball_smoke))
         .route("/api/settings", get(get_settings).patch(patch_settings))
         .route("/api/chat", post(chat))
+        .route("/api/chat/history", get(get_chat_history))
         .route("/api/chat/stream", post(chat_stream))
         .route("/api/agents", get(list_agents).post(spawn_agent))
         .route("/api/agents/{agent_id}/status", patch(update_agent_status))
-        .route("/api/agents/{agent_id}", patch(rename_agent))
+        .route(
+            "/api/agents/{agent_id}",
+            patch(rename_agent).delete(remove_agent),
+        )
+        .route("/api/agents/{agent_id}/clear", post(clear_agent_chat))
+        .route("/api/agents/{agent_id}/stop", post(stop_agent))
         .route("/api/gates", get(get_gates))
         .route("/api/gates/conditions", patch(patch_gate_conditions))
         .route("/api/gates/advance", post(advance_gates))
         .route("/api/events", get(list_events))
+        // GitHub integration endpoints
+        .route("/api/github/status", get(github_status))
+        .route("/api/github/repos", get(github_repos))
         // Secret vault endpoints
         .route("/api/vault/status", get(get_vault_status))
         .route("/api/secrets", get(list_secrets))
@@ -1638,14 +2479,83 @@ async fn main() {
         .route("/api/secrets/{provider}/test", post(test_secret))
         // OAuth endpoints
         .route("/api/oauth/{provider}/start", get(oauth_start))
+        .route("/api/oauth/{provider}/status", get(oauth_status))
         .route("/api/oauth/{provider}/callback", get(oauth_callback))
         .route("/api/oauth/{provider}/refresh", post(oauth_refresh))
         .route("/api/oauth/{provider}", delete(oauth_disconnect))
         .with_state(state)
+        .layer(middleware::from_fn(redact_error_response_middleware))
+        .layer(trace_layer)
         .layer(cors);
 
-    tracing::info!("ZeroClaw gateway starting on {}", addr);
+    tracing::info!("ZeroClaw gateway starting on {} (mode={})", addr, mode);
 
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    #[test]
+    fn parse_cors_origins_rejects_invalid_scheme() {
+        let result = parse_cors_origins("ws://localhost:3000");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_cors_origins_accepts_valid_list() {
+        let result = parse_cors_origins("http://localhost:3000,https://example.com");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn loopback_policy_blocks_non_loopback_in_native_mode() {
+        let result = enforce_network_policy("native", "0.0.0.0");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn extract_admin_token_supports_bearer_and_custom_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer token-1".parse().unwrap(),
+        );
+        assert_eq!(
+            extract_presented_admin_token(&headers).as_deref(),
+            Some("token-1")
+        );
+
+        let mut headers2 = HeaderMap::new();
+        headers2.insert("x-admin-token", "token-2".parse().unwrap());
+        assert_eq!(
+            extract_presented_admin_token(&headers2).as_deref(),
+            Some("token-2")
+        );
+    }
+
+    #[test]
+    fn validate_admin_access_rejects_missing_or_bad_tokens() {
+        let headers = HeaderMap::new();
+        assert!(validate_admin_access(Some("expected"), &headers, "test").is_err());
+
+        let mut headers2 = HeaderMap::new();
+        headers2.insert("x-admin-token", "wrong".parse().unwrap());
+        assert!(validate_admin_access(Some("expected"), &headers2, "test").is_err());
+
+        headers2.insert("x-admin-token", "expected".parse().unwrap());
+        assert!(validate_admin_access(Some("expected"), &headers2, "test").is_ok());
+    }
+
+    #[test]
+    fn log_uri_sanitizer_redacts_secret_like_content() {
+        let uri: Uri = "/api/foo?api_key=sk-test-secret-1234567890"
+            .parse()
+            .unwrap();
+        let sanitized = sanitize_uri_for_log(&uri);
+        assert!(!sanitized.contains("sk-test-secret-1234567890"));
+    }
 }
