@@ -9,7 +9,7 @@
   "crystal_ball_enabled": true,
   "hard_gates_enabled": true,
   "inference_max_tokens": 4096,
-  "inference_model": "claude-sonnet-4-20250514",
+  "inference_model": "gemini-2.5-flash",
   "inference_provider": "gemini",
   "inference_temperature": 0.699999988079071,
   "main_chat_pinned": true,
@@ -25,5 +25,12 @@
   "secrets_storage_mode": "encrypted_vault",
   "selected_github_repo": "RobinGase/Kai-zen-Tunnel",
   "show_only_masked_secrets_in_ui": true,
+  "webkeys": {
+    "default_model": "Web-Gem",
+    "default_provider": "gemini-web",
+    "enabled": false,
+    "max_restarts": 3,
+    "profile_dir": "../data\\browser-profiles"
+  },
   "write_plaintext_secrets_to_env": false
 }

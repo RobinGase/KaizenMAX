@@ -99,13 +99,13 @@ mod tests {
         }
 
         fn list_models(&self) -> Vec<String> {
-            vec!["gemini-2.0-flash".to_string()]
+            vec!["Web-Gem".to_string()]
         }
     }
 
     #[tokio::test]
     async fn rejects_empty_messages() {
-        let rt = WebkeysRuntime::new(Arc::new(FakeRuntime), "gemini-web", "gemini-2.0-flash");
+        let rt = WebkeysRuntime::new(Arc::new(FakeRuntime), "gemini-web", "Web-Gem");
         let result = rt
             .execute_chat(ChatCompletionRequest {
                 model: None,
@@ -118,7 +118,7 @@ mod tests {
 
     #[tokio::test]
     async fn routes_to_default_model_when_unspecified() {
-        let rt = WebkeysRuntime::new(Arc::new(FakeRuntime), "gemini-web", "gemini-2.0-flash");
+        let rt = WebkeysRuntime::new(Arc::new(FakeRuntime), "gemini-web", "Web-Gem");
         let result = rt
             .execute_chat(ChatCompletionRequest {
                 model: None,
@@ -130,6 +130,6 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(result.model, "gemini-2.0-flash");
+        assert_eq!(result.model, "Web-Gem");
     }
 }

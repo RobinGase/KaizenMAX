@@ -87,7 +87,7 @@ fn default_webkeys_provider() -> String {
     "gemini-web".to_string()
 }
 fn default_webkeys_model() -> String {
-    "gemini-2.0-flash".to_string()
+    "Web-Gem".to_string()
 }
 fn default_webkeys_profile_dir() -> String {
     // Windows: %APPDATA%\KaizenMAX\browser-profiles

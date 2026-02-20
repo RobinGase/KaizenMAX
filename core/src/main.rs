@@ -901,6 +901,18 @@ async fn resolve_inference(
         settings.inference_model.clone()
     };
 
+    // Guard: web model names (e.g. "Web-Gem") must never go through the vault/API path.
+    // They belong to the /v1/chat/completions route backed by virtual keys (sk-vt-*).
+    if model.starts_with("Web-") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "Model '{}' is a web model. Use /v1/chat/completions with a virtual key (sk-vt-*), not /api/chat.",
+                model
+            ),
+        ));
+    }
+
     let api_key = if let Some(vault_key) = provider.vault_key() {
         let vault = state.vault.as_ref().as_ref().ok_or((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -2081,14 +2093,22 @@ async fn webkeys_chat_completions(
         )
     })?;
 
-    // 1. Authenticate via sk-vt-* bearer token
-    let key_record = authenticate_bearer(&headers, webkeys).await.map_err(|e| {
-        let env = e.as_openai_error();
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::to_value(&env).unwrap_or_default()),
-        )
-    })?;
+    // 1. Authenticate via sk-vt-* bearer token (optional in native mode)
+    let is_native = resolve_bind_mode() == "native";
+    let key_record = match authenticate_bearer(&headers, webkeys).await {
+        Ok(record) => Some(record),
+        Err(e) if is_native => {
+            tracing::debug!("Native mode: skipping virtual key auth for /v1/chat/completions");
+            None
+        }
+        Err(e) => {
+            let env = e.as_openai_error();
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::to_value(&env).unwrap_or_default()),
+            ));
+        }
+    };
 
     // 2. Build runtime request from the OpenAI-compatible payload
     let runtime_request = zeroclaw_gateway::webkeys::types::ChatCompletionRequest {
@@ -2123,8 +2143,10 @@ async fn webkeys_chat_completions(
         )
     })?;
 
-    // 4. Record usage (best-effort, non-fatal)
-    let _ = webkeys.record_usage(&key_record.id, 0, 0).await;
+    // 4. Record usage (best-effort, non-fatal, only when key was provided)
+    if let Some(ref record) = key_record {
+        let _ = webkeys.record_usage(&record.id, 0, 0).await;
+    }
 
     // 5. Return OpenAI-compatible response
     Ok(Json(ChatCompletionResponse {
@@ -2160,19 +2182,23 @@ async fn webkeys_list_models(
         )
     })?;
 
-    authenticate_bearer(&headers, webkeys).await.map_err(|e| {
-        let env = e.as_openai_error();
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::to_value(&env).unwrap_or_default()),
-        )
-    })?;
+    // In native mode, skip auth — allow unauthenticated model listing
+    let is_native = resolve_bind_mode() == "native";
+    if !is_native {
+        authenticate_bearer(&headers, webkeys).await.map_err(|e| {
+            let env = e.as_openai_error();
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::to_value(&env).unwrap_or_default()),
+            )
+        })?;
+    }
 
     let model_ids = state
         .webkeys_runtime
         .as_ref()
         .map(|rt| rt.models())
-        .unwrap_or_else(|| vec!["gemini-2.0-flash".to_string(), "gemini-2.0-pro".to_string()]);
+        .unwrap_or_else(|| vec!["Web-Gem".to_string()]);
 
     let ts = chrono::Utc::now().timestamp();
     let models = model_ids

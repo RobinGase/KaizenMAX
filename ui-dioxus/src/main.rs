@@ -299,6 +299,12 @@ struct ChatHistoryMessage {
     content: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Default)]
+struct UiWebkeysSettings {
+    #[serde(default)]
+    enabled: bool,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct KaizenSettings {
     runtime_engine: String,
@@ -319,6 +325,8 @@ struct KaizenSettings {
     inference_model: String,
     inference_max_tokens: u32,
     inference_temperature: f32,
+    #[serde(default)]
+    webkeys: UiWebkeysSettings,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -341,6 +349,7 @@ struct SettingsPatchRequest {
     inference_model: Option<String>,
     inference_max_tokens: Option<u32>,
     inference_temperature: Option<f32>,
+    webkeys_enabled: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -2070,6 +2079,26 @@ fn App() -> Element {
                                                                     draft.inference_temperature = v.clamp(0.0, 1.0);
                                                                     settings_draft_sig.set(Some(draft));
                                                                 }
+                                                            }
+                                                        }
+                                                    },
+                                                }
+                                            }
+
+                                            h4 { "WebKeys (Browser OAuth)" }
+                                            p { class: "sb-hint", "Enable browser-based OAuth for Gemini CLI. Disable to use API keys only." }
+                                            div { class: "setting-row",
+                                                label { "Enable WebKeys" }
+                                                input {
+                                                    r#type: "checkbox",
+                                                    checked: "{cfg.webkeys.enabled}",
+                                                    onchange: {
+                                                        let mut settings_draft_sig = settings_draft;
+                                                        move |e: Event<FormData>| {
+                                                            let current_draft = settings_draft_sig.read().clone();
+                                                            if let Some(mut draft) = current_draft {
+                                                                draft.webkeys.enabled = e.checked();
+                                                                settings_draft_sig.set(Some(draft));
                                                             }
                                                         }
                                                     },
@@ -4430,6 +4459,7 @@ fn settings_to_patch(cfg: &KaizenSettings) -> SettingsPatchRequest {
         inference_model: Some(cfg.inference_model.clone()),
         inference_max_tokens: Some(cfg.inference_max_tokens),
         inference_temperature: Some(cfg.inference_temperature),
+        webkeys_enabled: Some(cfg.webkeys.enabled),
     }
 }
 
@@ -4572,6 +4602,7 @@ async fn patch_selected_repo_api(repo: &str, t: Option<&str>) -> Result<(), Stri
         inference_model: None,
         inference_max_tokens: None,
         inference_temperature: None,
+        webkeys_enabled: None,
     };
 
     let response = ah(Client::new().patch(u("/api/settings")).json(&patch), t)

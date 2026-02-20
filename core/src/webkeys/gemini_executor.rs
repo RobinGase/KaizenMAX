@@ -300,7 +300,7 @@ impl BrowserRuntime for GeminiExecutor {
     }
 
     fn list_models(&self) -> Vec<String> {
-        vec!["gemini-2.0-flash".to_string(), "gemini-2.0-pro".to_string()]
+        vec!["Web-Gem".to_string()]
     }
 }
 
@@ -336,7 +336,7 @@ mod tests {
     fn binding() -> ProviderBindingResolution {
         ProviderBindingResolution {
             provider_id: "gemini-web".to_string(),
-            model: "gemini-2.0-flash".to_string(),
+            model: "Web-Gem".to_string(),
         }
     }
 
@@ -353,14 +353,13 @@ mod tests {
         browser.mark_authenticated(true).await;
         let result = exec.execute(req_with("hello"), binding()).await.unwrap();
         assert!(result.content.contains("hello"));
-        assert_eq!(result.model, "gemini-2.0-flash");
+        assert_eq!(result.model, "Web-Gem");
     }
 
     #[tokio::test]
     async fn lists_correct_models() {
         let (exec, _) = make_executor(false);
         let models = exec.list_models();
-        assert!(models.contains(&"gemini-2.0-flash".to_string()));
-        assert!(models.contains(&"gemini-2.0-pro".to_string()));
+        assert_eq!(models, vec!["Web-Gem".to_string()]);
     }
 }
