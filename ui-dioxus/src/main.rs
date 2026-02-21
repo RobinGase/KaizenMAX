@@ -23,8 +23,8 @@ const MIN_PANEL_WIDTH: f64 = 380.0;
 const MIN_PANEL_HEIGHT: f64 = 200.0;
 const MIN_DETACHED_WIDTH: f64 = 420.0;
 const MIN_DETACHED_HEIGHT: f64 = 320.0;
-const MIN_PANEL_X: f64 = 0.0;
-const MIN_PANEL_Y: f64 = 44.0;
+const MIN_PANEL_X: f64 = -1000.0;
+const MIN_PANEL_Y: f64 = 0.0;
 const FLOAT_DRAG_ZONE_HEIGHT: f64 = 64.0;
 const KAIZEN_CHAT_MODES: [&str; 5] = ["yolo", "build", "plan", "reason", "orchestrator"];
 const SUBAGENT_CHAT_MODES: [&str; 2] = ["build", "plan"];
@@ -114,8 +114,11 @@ fn model_targets_from_values(values: &[String]) -> Vec<ChatModelTarget> {
 fn runtime_label(provider: Option<&str>, model: Option<&str>) -> String {
     if let Some(p) = provider {
         let normalized = p.trim().to_ascii_lowercase();
-        if matches!(normalized.as_str(), "kai-zen" | "kaizen" | "zeroclaw" | "native") {
-            return "Kaizen (runtime default)".to_string();
+        if matches!(
+            normalized.as_str(),
+            "kai-zen" | "kaizen" | "zeroclaw" | "native"
+        ) {
+            return "Kai-Zen (runtime default)".to_string();
         }
     }
 
@@ -133,10 +136,12 @@ fn viewport_size() -> (f64, f64) {
 }
 
 fn clamp_floating_layout(layout: &mut PanelLayout, viewport_w: f64, viewport_h: f64) {
-    let max_x = (viewport_w - layout.width).max(MIN_PANEL_X);
-    let max_y = (viewport_h - layout.height).max(MIN_PANEL_Y);
-    layout.x = layout.x.clamp(MIN_PANEL_X, max_x);
-    layout.y = layout.y.clamp(MIN_PANEL_Y, max_y);
+    let min_x = -layout.width * 0.8;
+    let max_x = viewport_w - layout.width * 0.2;
+    let min_y = -layout.height * 0.8;
+    let max_y = viewport_h - layout.height * 0.2;
+    layout.x = layout.x.clamp(min_x, max_x);
+    layout.y = layout.y.clamp(min_y, max_y);
 }
 
 fn native_detach_enabled() -> bool {
@@ -306,6 +311,7 @@ struct KaizenSettings {
     require_human_smoke_test_before_deploy: bool,
     provider_inference_only: bool,
     credentials_ui_enabled: bool,
+    oauth_ui_enabled: bool,
     agent_name_editable_after_spawn: bool,
     show_only_masked_secrets_in_ui: bool,
     mattermost_url: String,
@@ -327,6 +333,7 @@ struct SettingsPatchRequest {
     require_human_smoke_test_before_deploy: Option<bool>,
     provider_inference_only: Option<bool>,
     credentials_ui_enabled: Option<bool>,
+    oauth_ui_enabled: Option<bool>,
     agent_name_editable_after_spawn: Option<bool>,
     show_only_masked_secrets_in_ui: Option<bool>,
     mattermost_url: Option<String>,
@@ -408,6 +415,45 @@ struct GitHubReposResponse {
     error: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct OAuthStatusResponse {
+    provider: String,
+    supported: bool,
+    connected: bool,
+    access_token_configured: bool,
+    refresh_token_configured: bool,
+    message: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct GoogleOAuthAccountPublic {
+    account_id: String,
+    email: Option<String>,
+    scope: Option<String>,
+    expires_at: Option<String>,
+    updated_at: String,
+    has_refresh_token: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct GoogleOAuthStatusResponse {
+    #[allow(dead_code)]
+    provider: String,
+    connected: bool,
+    account_count: usize,
+    accounts: Vec<GoogleOAuthAccountPublic>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct GoogleOAuthStartResponse {
+    #[allow(dead_code)]
+    provider: String,
+    redirect_url: String,
+    state_token: String,
+    #[allow(dead_code)]
+    redirect_uri: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 struct StoreSecretRequest<'a> {
     value: &'a str,
@@ -455,6 +501,8 @@ const SECRET_PROVIDERS: [(&str, &str); 5] = [
     ("opencode", "OpenCode"),
 ];
 
+const OAUTH_PROVIDERS: [(&str, &str); 2] = [("openai", "OpenAI/Codex"), ("anthropic", "Anthropic")];
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum PanelMode {
@@ -495,10 +543,56 @@ struct DragState {
 #[derive(Clone, Debug)]
 struct ResizeState {
     panel_key: String,
+    handle: ResizeHandle,
     mouse_start_x: f64,
     mouse_start_y: f64,
+    panel_start_x: f64,
+    panel_start_y: f64,
     panel_start_w: f64,
     panel_start_h: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ResizeHandle {
+    North,
+    South,
+    East,
+    West,
+    NorthEast,
+    NorthWest,
+    SouthEast,
+    SouthWest,
+}
+
+impl ResizeHandle {
+    fn class_name(self) -> &'static str {
+        match self {
+            Self::North => "n",
+            Self::South => "s",
+            Self::East => "e",
+            Self::West => "w",
+            Self::NorthEast => "ne",
+            Self::NorthWest => "nw",
+            Self::SouthEast => "se",
+            Self::SouthWest => "sw",
+        }
+    }
+
+    fn affects_left(self) -> bool {
+        matches!(self, Self::West | Self::NorthWest | Self::SouthWest)
+    }
+
+    fn affects_right(self) -> bool {
+        matches!(self, Self::East | Self::NorthEast | Self::SouthEast)
+    }
+
+    fn affects_top(self) -> bool {
+        matches!(self, Self::North | Self::NorthEast | Self::NorthWest)
+    }
+
+    fn affects_bottom(self) -> bool {
+        matches!(self, Self::South | Self::SouthEast | Self::SouthWest)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -643,6 +737,9 @@ fn App() -> Element {
     let mut secret_feedback = use_signal(HashMap::<String, String>::new);
     let mut gh_status = use_signal(|| None::<GitHubStatusResponse>);
     let mut gh_repos = use_signal(Vec::<GitHubRepoSummary>::new);
+    let mut oauth_status = use_signal(HashMap::<String, OAuthStatusResponse>::new);
+    let mut google_oauth_status = use_signal(|| None::<GoogleOAuthStatusResponse>);
+    let mut google_oauth_redirect = use_signal(|| None::<String>);
 
     let mut left_open = use_signal(|| true);
     let mut settings_open = use_signal(|| false);
@@ -711,6 +808,8 @@ fn App() -> Element {
         let mut secrets_sig = secret_meta;
         let mut gh_status_sig = gh_status;
         let mut gh_repos_sig = gh_repos;
+        let mut oauth_sig = oauth_status;
+        let mut google_oauth_sig = google_oauth_status;
         use_future(move || {
             let token = token.clone();
             async move {
@@ -723,6 +822,8 @@ fn App() -> Element {
                         secrets_sig,
                         gh_status_sig,
                         gh_repos_sig,
+                        oauth_sig,
+                        google_oauth_sig,
                     )
                     .await;
 
@@ -799,6 +900,9 @@ fn App() -> Element {
     let secret_feedback_snap = secret_feedback.read().clone();
     let gh_status_snap = gh_status.read().clone();
     let gh_repos_snap = gh_repos.read().clone();
+    let oauth_snap = oauth_status.read().clone();
+    let google_oauth_snap = google_oauth_status.read().clone();
+    let google_oauth_redirect_snap = google_oauth_redirect.read().clone();
     let selected_repo = settings_snap
         .as_ref()
         .map(|s| s.selected_github_repo.clone())
@@ -898,8 +1002,8 @@ fn App() -> Element {
                         let dy = point.y - dragging.mouse_start_y;
                         let mut layouts_map = layouts_sig.read().clone();
                         if let Some(layout) = layouts_map.get_mut(&dragging.panel_key) {
-                            layout.x = (dragging.panel_start_x + dx).max(MIN_PANEL_X);
-                            layout.y = (dragging.panel_start_y + dy).max(MIN_PANEL_Y);
+                            layout.x = dragging.panel_start_x + dx;
+                            layout.y = dragging.panel_start_y + dy;
                             clamp_floating_layout(layout, viewport_w, viewport_h);
                         }
                         layouts_sig.set(layouts_map);
@@ -908,12 +1012,38 @@ fn App() -> Element {
                         let dy = point.y - resizing.mouse_start_y;
                         let mut layouts_map = layouts_sig.read().clone();
                         if let Some(layout) = layouts_map.get_mut(&resizing.panel_key) {
-                            let max_width = (viewport_w - layout.x).max(MIN_PANEL_WIDTH);
-                            let max_height = (viewport_h - layout.y).max(MIN_PANEL_HEIGHT);
-                            layout.width =
-                                (resizing.panel_start_w + dx).clamp(MIN_PANEL_WIDTH, max_width);
-                            layout.height =
-                                (resizing.panel_start_h + dy).clamp(MIN_PANEL_HEIGHT, max_height);
+                            if resizing.handle.affects_right() {
+                                let max_width = (viewport_w - layout.x).max(MIN_PANEL_WIDTH);
+                                layout.width =
+                                    (resizing.panel_start_w + dx).clamp(MIN_PANEL_WIDTH, max_width);
+                            }
+
+                            if resizing.handle.affects_left() {
+                                let max_x =
+                                    (resizing.panel_start_x + resizing.panel_start_w - MIN_PANEL_WIDTH)
+                                        .max(MIN_PANEL_X);
+                                let next_x = (resizing.panel_start_x + dx).clamp(MIN_PANEL_X, max_x);
+                                let moved = next_x - resizing.panel_start_x;
+                                layout.x = next_x;
+                                layout.width = (resizing.panel_start_w - moved).max(MIN_PANEL_WIDTH);
+                            }
+
+                            if resizing.handle.affects_bottom() {
+                                let max_height = (viewport_h - layout.y).max(MIN_PANEL_HEIGHT);
+                                layout.height =
+                                    (resizing.panel_start_h + dy).clamp(MIN_PANEL_HEIGHT, max_height);
+                            }
+
+                            if resizing.handle.affects_top() {
+                                let max_y =
+                                    (resizing.panel_start_y + resizing.panel_start_h - MIN_PANEL_HEIGHT)
+                                        .max(MIN_PANEL_Y);
+                                let next_y = (resizing.panel_start_y + dy).clamp(MIN_PANEL_Y, max_y);
+                                let moved = next_y - resizing.panel_start_y;
+                                layout.y = next_y;
+                                layout.height = (resizing.panel_start_h - moved).max(MIN_PANEL_HEIGHT);
+                            }
+
                             clamp_floating_layout(layout, viewport_w, viewport_h);
                         }
                         layouts_sig.set(layouts_map);
@@ -1168,6 +1298,8 @@ fn App() -> Element {
                                     let mut secrets_sig = secret_meta;
                                     let mut gh_status_sig = gh_status;
                                     let mut gh_repos_sig = gh_repos;
+                                    let mut oauth_sig = oauth_status;
+                                    let mut google_oauth_sig = google_oauth_status;
                                     let mut settings_open_sig = settings_open;
                                     move |_| {
                                         settings_open_sig.set(true);
@@ -1181,6 +1313,8 @@ fn App() -> Element {
                                                 secrets_sig,
                                                 gh_status_sig,
                                                 gh_repos_sig,
+                                                oauth_sig,
+                                                google_oauth_sig,
                                             ).await;
                                         });
                                     }
@@ -1401,28 +1535,43 @@ fn App() -> Element {
                             &mut drag_state,
                             &mut panel_action_confirm,
                         )}
-                        div {
-                            class: "floating-resize",
-                            onmousedown: {
-                                let k = panel.key.clone();
-                                let l = layout.clone();
-                                let mut resize_sig = resize_state;
-                                let mut z_sig = next_z;
-                                let mut layouts_sig = panel_layouts;
-                                move |evt: Event<MouseData>| {
-                                    let point = evt.data().client_coordinates();
-                                    let mut map = layouts_sig.read().clone();
-                                    if let Some(existing) = map.get_mut(&k) {
-                                        existing.z = bump_z(&mut z_sig);
+                        for handle in [
+                            ResizeHandle::North,
+                            ResizeHandle::South,
+                            ResizeHandle::East,
+                            ResizeHandle::West,
+                            ResizeHandle::NorthEast,
+                            ResizeHandle::NorthWest,
+                            ResizeHandle::SouthEast,
+                            ResizeHandle::SouthWest,
+                        ] {
+                            div {
+                                class: "floating-resize-handle floating-resize-{handle.class_name()}",
+                                onmousedown: {
+                                    let k = panel.key.clone();
+                                    let l = layout.clone();
+                                    let mut resize_sig = resize_state;
+                                    let mut z_sig = next_z;
+                                    let mut layouts_sig = panel_layouts;
+                                    move |evt: Event<MouseData>| {
+                                        evt.stop_propagation();
+                                        let point = evt.data().client_coordinates();
+                                        let mut map = layouts_sig.read().clone();
+                                        if let Some(existing) = map.get_mut(&k) {
+                                            existing.z = bump_z(&mut z_sig);
+                                        }
+                                        layouts_sig.set(map);
+                                        resize_sig.set(Some(ResizeState {
+                                            panel_key: k.clone(),
+                                            handle,
+                                            mouse_start_x: point.x,
+                                            mouse_start_y: point.y,
+                                            panel_start_x: l.x,
+                                            panel_start_y: l.y,
+                                            panel_start_w: l.width,
+                                            panel_start_h: l.height,
+                                        }));
                                     }
-                                    layouts_sig.set(map);
-                                    resize_sig.set(Some(ResizeState {
-                                        panel_key: k.clone(),
-                                        mouse_start_x: point.x,
-                                        mouse_start_y: point.y,
-                                        panel_start_w: l.width,
-                                        panel_start_h: l.height,
-                                    }));
                                 }
                             }
                         }
@@ -1452,6 +1601,8 @@ fn App() -> Element {
                                         let mut secrets_sig = secret_meta;
                                         let mut gh_status_sig = gh_status;
                                         let mut gh_repos_sig = gh_repos;
+                                        let mut oauth_sig = oauth_status;
+                                        let mut google_oauth_sig = google_oauth_status;
                                         let mut info_sig = info;
                                         let mut error_sig = error;
                                         move |_| {
@@ -1477,6 +1628,8 @@ fn App() -> Element {
                                                             secrets_sig,
                                                             gh_status_sig,
                                                             gh_repos_sig,
+                                                            oauth_sig,
+                                                            google_oauth_sig,
                                                         ).await;
                                                     }
                                                     Err(err) => error_sig.set(Some(err)),
@@ -1525,11 +1678,140 @@ fn App() -> Element {
                                                             }
                                                         }
                                                     },
-                                                    option { value: "kaizen", "Kaizen" }
+                                                    option { value: "zeroclaw", "ZeroClaw" }
                                                     option { value: "openclaw_compat", "OpenClaw Compatibility" }
                                                 }
                                             }
 
+                                            div { class: "setting-row oauth-row",
+                                                strong { "Google OAuth (WebKeys)" }
+                                                if let Some(status) = google_oauth_snap.clone() {
+                                                    p { class: "sb-hint", {format!("Connected accounts: {}", status.account_count)} }
+                                                    p { class: "sb-hint", {format!("Overall connected: {}", if status.connected { "yes" } else { "no" })} }
+                                                } else {
+                                                    p { class: "sb-hint", "Google OAuth status loading..." }
+                                                }
+
+                                                if let Some(url) = google_oauth_redirect_snap.clone() {
+                                                    p { class: "sb-hint", "Open this URL to complete Google OAuth login:" }
+                                                    a {
+                                                        class: "sb-link",
+                                                        href: "{url}",
+                                                        target: "_blank",
+                                                        rel: "noopener noreferrer",
+                                                        "{url}"
+                                                    }
+                                                }
+
+                                                div { class: "inline-actions",
+                                                    button {
+                                                        class: "btn btn-sm btn-sec",
+                                                        onclick: {
+                                                            let token = admin_token.clone();
+                                                            let mut info_sig = info;
+                                                            let mut error_sig = error;
+                                                            let mut google_redirect_sig = google_oauth_redirect;
+                                                            move |_| {
+                                                                let token = token.clone();
+                                                                spawn(async move {
+                                                                    match google_oauth_start_api(token.as_deref()).await {
+                                                                        Ok(start) => {
+                                                                            google_redirect_sig.set(Some(start.redirect_url.clone()));
+                                                                            info_sig.set(Some(format!(
+                                                                                "Google OAuth start ready (state {}). Open the URL to continue.",
+                                                                                start.state_token
+                                                                            )));
+                                                                            error_sig.set(None);
+                                                                        }
+                                                                        Err(err) => error_sig.set(Some(err)),
+                                                                    }
+                                                                });
+                                                            }
+                                                        },
+                                                        "Connect Google"
+                                                    }
+                                                    button {
+                                                        class: "btn btn-sm btn-sec",
+                                                        onclick: {
+                                                            let token = admin_token.clone();
+                                                            let mut info_sig = info;
+                                                            let mut error_sig = error;
+                                                            let mut google_oauth_sig = google_oauth_status;
+                                                            move |_| {
+                                                                let token = token.clone();
+                                                                spawn(async move {
+                                                                    match fetch_google_oauth_status_api(token.as_deref()).await {
+                                                                        Ok(status) => {
+                                                                            let count = status.account_count;
+                                                                            google_oauth_sig.set(Some(status));
+                                                                            info_sig.set(Some(format!("Refreshed Google OAuth status ({} accounts)", count)));
+                                                                            error_sig.set(None);
+                                                                        }
+                                                                        Err(err) => error_sig.set(Some(err)),
+                                                                    }
+                                                                });
+                                                            }
+                                                        },
+                                                        "Refresh Accounts"
+                                                    }
+                                                }
+
+                                                if let Some(status) = google_oauth_snap.clone() {
+                                                    for account in status.accounts {
+                                                        div { class: "oauth-account-card",
+                                                            strong {
+                                                                "{account.email.clone().unwrap_or_else(|| account.account_id.clone())}"
+                                                            }
+                                                            p {
+                                                                class: "sb-hint",
+                                                                "Account ID: {account.account_id}"
+                                                            }
+                                                            p {
+                                                                class: "sb-hint",
+                                                                {format!(
+                                                                    "Scope: {} | Refresh token: {}",
+                                                                    account.scope.clone().unwrap_or_else(|| "(unknown)".to_string()),
+                                                                    if account.has_refresh_token { "yes" } else { "no" }
+                                                                )}
+                                                            }
+                                                            if let Some(exp) = account.expires_at.clone() {
+                                                                p { class: "sb-hint", "Token expires: {exp}" }
+                                                            }
+                                                            p { class: "sb-hint", "Updated: {account.updated_at}" }
+                                                            div { class: "inline-actions",
+                                                                button {
+                                                                    class: "btn btn-sm btn-danger",
+                                                                    onclick: {
+                                                                        let account_id = account.account_id.clone();
+                                                                        let token = admin_token.clone();
+                                                                        let mut info_sig = info;
+                                                                        let mut error_sig = error;
+                                                                        let mut google_oauth_sig = google_oauth_status;
+                                                                        move |_| {
+                                                                            let account_id = account_id.clone();
+                                                                            let token = token.clone();
+                                                                            spawn(async move {
+                                                                                match google_oauth_disconnect_account_api(&account_id, token.as_deref()).await {
+                                                                                    Ok(()) => {
+                                                                                        info_sig.set(Some(format!("Disconnected Google account {}", account_id)));
+                                                                                        error_sig.set(None);
+                                                                                        match fetch_google_oauth_status_api(token.as_deref()).await {
+                                                                                            Ok(status) => google_oauth_sig.set(Some(status)),
+                                                                                            Err(err) => error_sig.set(Some(err)),
+                                                                                        }
+                                                                                    }
+                                                                                    Err(err) => error_sig.set(Some(err)),
+                                                                                }
+                                                                            });
+                                                                        }
+                                                                    },
+                                                                    "Disconnect"
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         },
                                         SettingsTab::Workspaces => rsx! {
                                             h3 { "Workspace and GitHub" }
@@ -1637,8 +1919,8 @@ fn App() -> Element {
                                             }
                                         },
                                         SettingsTab::Integrations => rsx! {
-                                            h3 { "Integrations" }
-                                            p { class: "sb-hint", "Configure external service integrations." }
+                                            h3 { "Integrations and OAuth" }
+                                            p { class: "sb-hint", "OAuth controls: OpenAI/Codex + Anthropic (legacy), and Google OAuth multi-account for WebKeys/Gemini browser auth." }
                                             div { class: "setting-row",
                                                 label { "Mattermost URL" }
                                                 input {
@@ -1673,6 +1955,91 @@ fn App() -> Element {
                                                             }
                                                         }
                                                     },
+                                                }
+                                            }
+
+                                            for (provider, label) in OAUTH_PROVIDERS.iter() {
+                                                div { class: "setting-row oauth-row",
+                                                    strong { "{label}" }
+                                                    if let Some(status) = oauth_snap.get(*provider) {
+                                                        p { class: "sb-hint", "{status.message}" }
+                                                        p { class: "sb-hint", {format!("Connected: {}", if status.connected { "yes" } else { "no" })} }
+                                                    } else {
+                                                        p { class: "sb-hint", "OAuth status loading..." }
+                                                    }
+                                                    div { class: "inline-actions",
+                                                        button {
+                                                            class: "btn btn-sm btn-sec",
+                                                            onclick: {
+                                                                let provider = provider.to_string();
+                                                                let token = admin_token.clone();
+                                                                let mut info_sig = info;
+                                                                let mut error_sig = error;
+                                                                move |_| {
+                                                                    let provider = provider.clone();
+                                                                    let token = token.clone();
+                                                                    spawn(async move {
+                                                                        match oauth_start_api(&provider, token.as_deref()).await {
+                                                                            Ok(msg) => {
+                                                                                info_sig.set(Some(msg));
+                                                                                error_sig.set(None);
+                                                                            }
+                                                                            Err(err) => error_sig.set(Some(err)),
+                                                                        }
+                                                                    });
+                                                                }
+                                                            },
+                                                            "Connect"
+                                                        }
+                                                        button {
+                                                            class: "btn btn-sm btn-sec",
+                                                            onclick: {
+                                                                let provider = provider.to_string();
+                                                                let token = admin_token.clone();
+                                                                let mut info_sig = info;
+                                                                let mut error_sig = error;
+                                                                move |_| {
+                                                                    let provider = provider.clone();
+                                                                    let token = token.clone();
+                                                                    spawn(async move {
+                                                                        match oauth_refresh_api(&provider, token.as_deref()).await {
+                                                                            Ok(msg) => {
+                                                                                info_sig.set(Some(msg));
+                                                                                error_sig.set(None);
+                                                                            }
+                                                                            Err(err) => error_sig.set(Some(err)),
+                                                                        }
+                                                                    });
+                                                                }
+                                                            },
+                                                            "Refresh"
+                                                        }
+                                                        button {
+                                                            class: "btn btn-sm btn-danger",
+                                                            onclick: {
+                                                                let provider = provider.to_string();
+                                                                let token = admin_token.clone();
+                                                                let mut info_sig = info;
+                                                                let mut error_sig = error;
+                                                                let mut oauth_sig = oauth_status;
+                                                                move |_| {
+                                                                    let provider = provider.clone();
+                                                                    let token = token.clone();
+                                                                    spawn(async move {
+                                                                        match oauth_disconnect_api(&provider, token.as_deref()).await {
+                                                                            Ok(()) => {
+                                                                                info_sig.set(Some(format!("{} OAuth disconnected", provider)));
+                                                                                error_sig.set(None);
+                                                                                oauth_sig.write().remove(&provider);
+                                                                            }
+                                                                            Err(err) => error_sig.set(Some(err)),
+                                                                        }
+                                                                    });
+                                                                }
+                                                            },
+                                                            "Disconnect"
+                                                        }
+                                                    }
                                                 }
                                             }
                                         },
@@ -1797,7 +2164,6 @@ fn App() -> Element {
                                                     },
                                                 }
                                             }
-
                                         },
                                         SettingsTab::Security => rsx! {
                                             h3 { "Security and Secrets" }
@@ -1863,6 +2229,8 @@ fn App() -> Element {
                                                                 let mut secrets_sig = secret_meta;
                                                                 let mut gh_status_sig = gh_status;
                                                                 let mut gh_repos_sig = gh_repos;
+                                                                let mut oauth_sig = oauth_status;
+                                                                let mut google_oauth_sig = google_oauth_status;
                                                                 move |_| {
                                                                     let provider = provider.clone();
                                                                     let value = inputs_sig.read().get(&provider).cloned().unwrap_or_default();
@@ -1886,6 +2254,8 @@ fn App() -> Element {
                                                                                     secrets_sig,
                                                                                     gh_status_sig,
                                                                                     gh_repos_sig,
+                                                                                    oauth_sig,
+                                                                                    google_oauth_sig,
                                                                                 ).await;
                                                                             }
                                                                             Err(err) => error_sig.set(Some(err)),
@@ -1937,6 +2307,8 @@ fn App() -> Element {
                                                                 let mut secrets_sig = secret_meta;
                                                                 let mut gh_status_sig = gh_status;
                                                                 let mut gh_repos_sig = gh_repos;
+                                                                let mut oauth_sig = oauth_status;
+                                                                let mut google_oauth_sig = google_oauth_status;
                                                                 move |_| {
                                                                     let provider = provider.clone();
                                                                     let token = token.clone();
@@ -1955,6 +2327,8 @@ fn App() -> Element {
                                                                                     secrets_sig,
                                                                                     gh_status_sig,
                                                                                     gh_repos_sig,
+                                                                                    oauth_sig,
+                                                                                    google_oauth_sig,
                                                                                 ).await;
                                                                             }
                                                                             Err(err) => error_sig.set(Some(err)),
@@ -2062,6 +2436,24 @@ fn App() -> Element {
                                                             let current_draft = settings_draft_sig.read().clone();
                                                             if let Some(mut draft) = current_draft {
                                                                 draft.credentials_ui_enabled = parse_bool(&e.value());
+                                                                settings_draft_sig.set(Some(draft));
+                                                            }
+                                                        }
+                                                    },
+                                                    option { value: "true", "Enabled" }
+                                                    option { value: "false", "Disabled" }
+                                                }
+
+                                                label { "OAuth UI Enabled" }
+                                                select {
+                                                    class: "s-input",
+                                                    value: "{bool_to_str(cfg.oauth_ui_enabled)}",
+                                                    onchange: {
+                                                        let mut settings_draft_sig = settings_draft;
+                                                        move |e: Event<FormData>| {
+                                                            let current_draft = settings_draft_sig.read().clone();
+                                                            if let Some(mut draft) = current_draft {
+                                                                draft.oauth_ui_enabled = parse_bool(&e.value());
                                                                 settings_draft_sig.set(Some(draft));
                                                             }
                                                         }
@@ -3156,7 +3548,7 @@ fn card(
                                 persist_layouts(&map);
                             }
                         },
-                        "Dock"
+                        "D"
                     }
                     button {
                         class: if mode == PanelMode::Floating { "btn btn-xs btn-accent" } else { "btn btn-xs btn-sec" },
@@ -3178,7 +3570,7 @@ fn card(
                                 persist_layouts(&map);
                             }
                         },
-                        "Float"
+                        "F"
                     }
                     button {
                         class: if mode == PanelMode::Detached { "btn btn-xs btn-accent" } else { "btn btn-xs btn-sec" },
@@ -3298,7 +3690,7 @@ fn card(
                                 }
                             }
                         },
-                        "Detach"
+                        "↗"
                     }
 
                     if has_agent {
@@ -3371,7 +3763,6 @@ fn card(
             }
 
             p { class: "card-sub", "{subtitle}" }
-            p { class: "mode-chip", "Mode: {mode.label()}" }
 
             if is_kaizen {
                 div { class: "kaizen-hero",
@@ -3902,7 +4293,7 @@ const CSS: &str = r#"
 .btn-send{background:linear-gradient(180deg,#57a4ff,#3d84db);color:#fff;border-left:1px solid #35506d;border-radius:0;padding:8px 14px}
 .btn-send:disabled{background:#2c3f55;color:#5d7a96;cursor:default;border-left-color:#2f435b}
 .btn-sm{font-size:11px;padding:5px 9px}
-.btn-xs{font-size:10px;padding:3px 7px;border-radius:5px}
+.btn-xs{font-size:9px;padding:2px 5px;border-radius:4px}
 .btn-warn{background:#7a6520;color:#ffe8a0}
 .btn-danger{background:#7a2e38;color:#ffd4d4}
 .btn-danger:hover{background:#983845}
@@ -3960,17 +4351,17 @@ const CSS: &str = r#"
 .card-add:hover{border-color:#5a8abf;background:rgba(90,138,191,.05)}
 .add-inner{display:flex;flex-direction:column;align-items:center;gap:8px;color:#5a7d9e;font-size:14px}
 .add-icon{font-size:34px;color:#4a7aa6}
-.card-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding-top:1px}
+.card-head{display:flex;align-items:center;justify-content:space-between;gap:5px;padding-top:0}
 .card-head-drag{cursor:grab;user-select:none}
 .card-head-drag:active{cursor:grabbing}
 .is-dragging .card-head-drag{cursor:grabbing}
 .card-kaizen-hero{background:radial-gradient(120% 110% at 10% -10%,rgba(98,168,247,.16),transparent 38%),radial-gradient(100% 90% at 92% -18%,rgba(123,94,250,.14),transparent 44%),#1b2a3d}
 .card-kaizen-floating{box-shadow:0 18px 46px rgba(16,34,62,.5),0 0 0 1px rgba(98,168,247,.22)}
-.card-title{font-size:18px;font-weight:700;color:#f2f8ff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.card-actions{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}
-.btn-model-toggle{min-width:24px;padding:3px 8px;font-weight:700}
-.card-sub{font-size:11px;color:#7a99b5;margin-top:-2px}
-.mode-chip{font-size:10px;color:#9dc3e5;background:#203247;border:1px solid #35506d;border-radius:999px;padding:2px 8px;display:inline-flex;align-self:flex-start}
+.card-title{font-size:14px;font-weight:600;color:#f2f8ff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card-actions{display:flex;gap:2px;flex-wrap:nowrap;justify-content:flex-end}
+.btn-model-toggle{min-width:20px;padding:2px 5px;font-weight:700}
+.card-sub{font-size:10px;color:#7a99b5;margin-top:-3px}
+.mode-chip{display:none}
 .kaizen-hero{position:relative;display:flex;justify-content:space-between;gap:12px;padding:10px;border:1px solid #32567d;border-radius:10px;background:linear-gradient(130deg,rgba(32,55,80,.92),rgba(24,41,61,.95));overflow:hidden}
 .kaizen-hero::after{content:"";position:absolute;width:110px;height:110px;right:-34px;top:-50px;border-radius:50%;background:radial-gradient(circle,rgba(106,181,239,.35),transparent 68%);pointer-events:none}
 .kaizen-hero-copy{display:flex;flex-direction:column;gap:2px;z-index:1}
@@ -3987,20 +4378,20 @@ const CSS: &str = r#"
 .msg-you{background:#253d58;color:#d8e8f8;align-self:flex-end;border-bottom-right-radius:2px}
 .msg-ai{background:#1e3048;color:#c8ddf0;align-self:flex-start;border-bottom-left-radius:2px}
 .msg-role{font-weight:600;margin-right:5px;font-size:10px;color:#8aafcc}
-.composer-toolbar{display:flex;flex-direction:column;align-items:stretch;gap:7px}
-.comp-model{min-width:180px;max-width:220px;background:#152436;border:1px solid #35506d;border-radius:8px;padding:6px 9px;color:#d5e7fb;font-size:11px;outline:none}
+.composer-toolbar{display:flex;flex-direction:column;align-items:stretch;gap:3px}
+.comp-model{min-width:140px;max-width:180px;background:#152436;border:1px solid #35506d;border-radius:6px;padding:4px 7px;color:#d5e7fb;font-size:10px;outline:none}
 .comp-model:focus{border-color:#62a8f7}
-.model-picker-summary{font-size:11px;color:#9ab8d4}
-.model-picker-popover{border:1px solid #35506d;border-radius:10px;background:#132336;padding:8px;display:flex;flex-direction:column;gap:6px;max-height:220px;overflow-y:auto}
-.model-picker-title{font-size:11px;font-weight:600;color:#e4f0ff}
-.model-picker-hint{font-size:10px;color:#7fa4c6}
-.model-picker-option{display:flex;align-items:center;gap:7px;color:#c7ddf4;font-size:11px}
+.model-picker-summary{font-size:10px;color:#6b8aa8}
+.model-picker-popover{border:1px solid #2a4058;border-radius:6px;background:#0f1a28;padding:5px;display:flex;flex-direction:column;gap:3px;max-height:180px;overflow-y:auto}
+.model-picker-title{font-size:10px;font-weight:600;color:#c8daf0}
+.model-picker-hint{font-size:9px;color:#5d7a96}
+.model-picker-option{display:flex;align-items:center;gap:4px;color:#a8c0d8;font-size:10px}
 .model-picker-option input{accent-color:#62a8f7}
-.comp-mode-row{display:flex;align-items:center;gap:6px;flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;padding-bottom:2px}
-.comp-mode-chip{background:#182a3d;border:1px solid #35506d;color:#9ec2e2;border-radius:999px;padding:4px 8px;font-size:10px;line-height:1;cursor:pointer;text-transform:capitalize}
-.comp-mode-chip:hover{border-color:#4a8dd4;color:#cde6ff}
-.comp-mode-chip-active{background:#23466b;border-color:#62a8f7;color:#eff7ff}
-.comp-runtime{font-size:10px;color:#7fa4c6;white-space:nowrap;margin-left:auto}
+.comp-mode-row{display:flex;align-items:center;gap:4px;flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;padding-bottom:1px}
+.comp-mode-chip{background:#151f2c;border:1px solid #2a3d52;color:#7a9ab8;border-radius:4px;padding:2px 5px;font-size:9px;line-height:1;cursor:pointer;text-transform:capitalize}
+.comp-mode-chip:hover{border-color:#3d5a78;color:#a0c0e0}
+.comp-mode-chip-active{background:#1a2a3c;border-color:#3d5a78;color:#a8d0f0}
+.comp-runtime{font-size:9px;color:#5d7590;white-space:nowrap;margin-left:auto}
 .composer{display:flex;gap:0;background:#101b2a;border:1px solid #35506d;border-radius:10px;overflow:hidden;transition:border-color .14s,box-shadow .14s}
 .composer:focus-within{border-color:#62a8f7;box-shadow:0 0 0 3px rgba(98,168,247,.17)}
 .comp-in{flex:1;background:transparent;border:none;padding:10px 12px;color:#e0ecf8;font-size:12px;outline:none;resize:none;min-height:40px;max-height:180px;font-family:inherit;line-height:1.35}
@@ -4027,8 +4418,17 @@ const CSS: &str = r#"
 
 .floating-layer{position:fixed;inset:0;z-index:60;pointer-events:none}
 .floating-frame{position:absolute;pointer-events:auto;display:flex;flex-direction:column;background:transparent}
-.floating-resize{position:absolute;right:2px;bottom:2px;width:24px;height:24px;border-radius:6px;cursor:nwse-resize;opacity:.9;background:linear-gradient(135deg,transparent 0%,transparent 45%,#6aa8eb 45%,#6aa8eb 55%,transparent 55%,transparent 100%)}
-.floating-resize:hover{opacity:1;filter:brightness(1.1)}
+.floating-resize-handle{position:absolute;z-index:1}
+.floating-resize-n{top:0;left:8px;right:8px;height:6px;cursor:n-resize}
+.floating-resize-s{bottom:0;left:8px;right:8px;height:6px;cursor:s-resize}
+.floating-resize-e{right:0;top:8px;bottom:8px;width:6px;cursor:e-resize}
+.floating-resize-w{left:0;top:8px;bottom:8px;width:6px;cursor:w-resize}
+.floating-resize-ne{top:0;right:0;width:12px;height:12px;cursor:nesw-resize}
+.floating-resize-nw{top:0;left:0;width:12px;height:12px;cursor:nwse-resize}
+.floating-resize-se{bottom:0;right:0;width:14px;height:14px;cursor:nwse-resize;opacity:.8;background:linear-gradient(135deg,transparent 0%,transparent 40%,#6aa8eb 40%,#6aa8eb 50%,transparent 50%,transparent 100%)}
+.floating-resize-sw{bottom:0;left:0;width:12px;height:12px;cursor:nesw-resize}
+.floating-resize-handle:hover{background:rgba(106,168,235,.15)}
+.floating-resize-se:hover{opacity:1;filter:brightness(1.1)}
 .drag-scrim{position:fixed;inset:0;z-index:59;pointer-events:auto}
 .is-dragging,.is-dragging *{user-select:none}
 
@@ -4085,12 +4485,12 @@ const CSS: &str = r#"
 
   .floating-layer{position:static;inset:auto;display:flex;flex-direction:column;gap:12px;pointer-events:auto;z-index:2;margin-top:12px}
   .floating-frame{position:relative !important;left:auto !important;top:auto !important;width:100% !important;height:auto !important;min-height:360px}
-  .floating-resize{display:none}
+  .floating-resize-handle{display:none}
 }
 
 @media (pointer: coarse){
-  .btn-xs{font-size:12px;padding:7px 10px;border-radius:8px}
-  .card-actions{gap:6px}
+  .btn-xs{font-size:11px;padding:5px 8px;border-radius:6px}
+  .card-actions{gap:4px}
   .toggle-btn{width:34px;height:34px}
 }
 "#;
@@ -4117,6 +4517,7 @@ fn settings_to_patch(cfg: &KaizenSettings) -> SettingsPatchRequest {
         require_human_smoke_test_before_deploy: Some(cfg.require_human_smoke_test_before_deploy),
         provider_inference_only: Some(cfg.provider_inference_only),
         credentials_ui_enabled: Some(cfg.credentials_ui_enabled),
+        oauth_ui_enabled: Some(cfg.oauth_ui_enabled),
         agent_name_editable_after_spawn: Some(cfg.agent_name_editable_after_spawn),
         show_only_masked_secrets_in_ui: Some(cfg.show_only_masked_secrets_in_ui),
         mattermost_url: Some(cfg.mattermost_url.clone()),
@@ -4137,6 +4538,8 @@ async fn refresh_settings_bundle(
     mut secrets_sig: Signal<HashMap<String, SecretMetadata>>,
     mut gh_status_sig: Signal<Option<GitHubStatusResponse>>,
     mut gh_repos_sig: Signal<Vec<GitHubRepoSummary>>,
+    mut oauth_sig: Signal<HashMap<String, OAuthStatusResponse>>,
+    mut google_oauth_sig: Signal<Option<GoogleOAuthStatusResponse>>,
 ) -> Result<(), String> {
     let settings = fetch_settings_api(t).await?;
     settings_current_sig.set(Some(settings.clone()));
@@ -4171,6 +4574,19 @@ async fn refresh_settings_bundle(
             }
         }
         Err(_) => gh_repos_sig.set(Vec::new()),
+    }
+
+    let mut oauth_map = HashMap::new();
+    for (provider, _) in OAUTH_PROVIDERS.iter() {
+        if let Ok(status) = fetch_oauth_status_api(provider, t).await {
+            oauth_map.insert(status.provider.clone(), status);
+        }
+    }
+    oauth_sig.set(oauth_map);
+
+    match fetch_google_oauth_status_api(t).await {
+        Ok(status) => google_oauth_sig.set(Some(status)),
+        Err(_) => google_oauth_sig.set(None),
     }
 
     Ok(())
@@ -4243,6 +4659,7 @@ async fn patch_selected_repo_api(repo: &str, t: Option<&str>) -> Result<(), Stri
         require_human_smoke_test_before_deploy: None,
         provider_inference_only: None,
         credentials_ui_enabled: None,
+        oauth_ui_enabled: None,
         agent_name_editable_after_spawn: None,
         show_only_masked_secrets_in_ui: None,
         mattermost_url: None,
@@ -4329,6 +4746,126 @@ async fn fetch_github_status_api(t: Option<&str>) -> Result<GitHubStatusResponse
 
 async fn fetch_github_repos_api(t: Option<&str>) -> Result<GitHubReposResponse, String> {
     rj(Client::new().get(u("/api/github/repos?limit=100")), t).await
+}
+
+async fn fetch_oauth_status_api(
+    provider: &str,
+    t: Option<&str>,
+) -> Result<OAuthStatusResponse, String> {
+    rj(
+        Client::new().get(u(&format!("/api/oauth/{provider}/status"))),
+        t,
+    )
+    .await
+}
+
+async fn oauth_start_api(provider: &str, t: Option<&str>) -> Result<String, String> {
+    let response = ah(
+        Client::new().get(u(&format!("/api/oauth/{provider}/start"))),
+        t,
+    )
+    .send()
+    .await
+    .map_err(|e| e.to_string())?;
+
+    if response.status().is_success() {
+        Ok(format!("OAuth start initiated for {provider}"))
+    } else {
+        Err(format!(
+            "{} {}",
+            response.status(),
+            response.text().await.unwrap_or_default()
+        ))
+    }
+}
+
+async fn oauth_refresh_api(provider: &str, t: Option<&str>) -> Result<String, String> {
+    let response = ah(
+        Client::new().post(u(&format!("/api/oauth/{provider}/refresh"))),
+        t,
+    )
+    .send()
+    .await
+    .map_err(|e| e.to_string())?;
+
+    if response.status().is_success() {
+        Ok(format!("OAuth refresh succeeded for {provider}"))
+    } else {
+        Err(format!(
+            "{} {}",
+            response.status(),
+            response.text().await.unwrap_or_default()
+        ))
+    }
+}
+
+async fn oauth_disconnect_api(provider: &str, t: Option<&str>) -> Result<(), String> {
+    let response = ah(
+        Client::new().delete(u(&format!("/api/oauth/{provider}"))),
+        t,
+    )
+    .send()
+    .await
+    .map_err(|e| e.to_string())?;
+
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} {}",
+            response.status(),
+            response.text().await.unwrap_or_default()
+        ))
+    }
+}
+
+async fn fetch_google_oauth_status_api(
+    t: Option<&str>,
+) -> Result<GoogleOAuthStatusResponse, String> {
+    rj(Client::new().get(u("/api/webkeys/oauth/google/status")), t).await
+}
+
+async fn google_oauth_start_api(t: Option<&str>) -> Result<GoogleOAuthStartResponse, String> {
+    let response = ah(Client::new().post(u("/api/webkeys/oauth/google/start")), t)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if response.status().is_success() {
+        response
+            .json::<GoogleOAuthStartResponse>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err(format!(
+            "{} {}",
+            response.status(),
+            response.text().await.unwrap_or_default()
+        ))
+    }
+}
+
+async fn google_oauth_disconnect_account_api(
+    account_id: &str,
+    t: Option<&str>,
+) -> Result<(), String> {
+    let response = ah(
+        Client::new().delete(u(&format!("/api/webkeys/oauth/google/{account_id}"))),
+        t,
+    )
+    .send()
+    .await
+    .map_err(|e| e.to_string())?;
+
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} {}",
+            response.status(),
+            response.text().await.unwrap_or_default()
+        ))
+    }
 }
 
 async fn fetch_chat_history(agent_id: Option<&str>, t: Option<&str>) -> Result<Vec<UiMsg>, String> {
