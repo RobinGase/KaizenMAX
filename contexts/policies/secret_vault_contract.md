@@ -56,3 +56,8 @@ No raw secret may be written to `.env`, logs, events, archives, or API responses
 - Save flow network capture confirms plaintext only in request body to local gateway.
 - Unauthorized requests fail when `ADMIN_API_TOKEN` is configured.
 - Regression tests pass for chat, agents, gates, settings, and crystal-ball workflows.
+
+## Standalone Repo Alignment
+
+- Vault code may be developed in KaizenMAX, but release/runtime vault is standalone.
+- Any vault-affecting change must follow `contexts/policies/vault_repo_sync_rule.md`.

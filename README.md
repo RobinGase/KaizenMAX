@@ -39,6 +39,19 @@ All setup is in `Settings -> Providers`:
 
 See `contexts/policies/secret_vault_contract.md` for the security implementation contract.
 
+## Docker Vault Daemon (Optional)
+
+If you want vault isolation for multiple local applications, run the standalone containerized vault service:
+
+- `docker compose -f docker-compose.vaultd.yml up -d --build`
+- Preferred with local token file: `docker compose --env-file .env.vaultd.local -f docker-compose.vaultd.yml up -d --build`
+- Service URL: `http://127.0.0.1:9210`
+- Auth: per-app token via `x-vault-app` + `Authorization: Bearer <token>`
+
+Full usage guide: `docs/vaultd.md`.
+
+Vault standalone alignment policy: `contexts/policies/vault_repo_sync_rule.md`.
+
 ## Minimal Requirements
 
 - Windows 10/11

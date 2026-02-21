@@ -1,0 +1,39 @@
+services:
+  kaizen-vaultd:
+    build:
+      context: .
+      dockerfile: docker/vaultd/Dockerfile
+    container_name: kaizen-vaultd
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "127.0.0.1:9210:9210"
+    environment:
+      KAIZEN_VAULTD_HOST: "0.0.0.0"
+      KAIZEN_VAULTD_PORT: "9210"
+      KAIZEN_VAULT_PATH: "/data/vault.json"
+      KAIZEN_VAULT_KEY_PATH: "/data/vault.key"
+      # Optional file-based token sources (preferred for production)
+      KAIZEN_VAULTD_APP_TOKENS_FILE: "${KAIZEN_VAULTD_APP_TOKENS_FILE:-}"
+      KAIZEN_VAULTD_ADMIN_TOKEN_FILE: "${KAIZEN_VAULTD_ADMIN_TOKEN_FILE:-}"
+      # Configure per-app tokens: app_id=token,app2=token2
+      KAIZEN_VAULTD_APP_TOKENS: "${KAIZEN_VAULTD_APP_TOKENS:-kaizenmax=CHANGE_ME_LONG_RANDOM_TOKEN}"
+      # Optional admin token for break-glass operations
+      KAIZEN_VAULTD_ADMIN_TOKEN: "${KAIZEN_VAULTD_ADMIN_TOKEN:-CHANGE_ME_ADMIN_TOKEN}"
+      # Disabled by default: if true, admin token can access any app scope.
+      KAIZEN_VAULTD_ADMIN_CROSS_APP_BYPASS: "${KAIZEN_VAULTD_ADMIN_CROSS_APP_BYPASS:-false}"
+      # Optional static master key (base64 32-byte key). If omitted, key file is bootstrapped in volume.
+      # ADMIN_VAULT_KEY: ""
+    volumes:
+      - kaizen-vaultd-data:/data
+      # Optional: mount file-based secrets for *_FILE vars
+      - ./secrets:/run/secrets:ro
+
+volumes:
+  kaizen-vaultd-data:
