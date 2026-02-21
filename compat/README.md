@@ -5,7 +5,7 @@ This directory is reserved for optional compatibility adapters.
 ## Current Status
 
 - Compatibility mode is disabled by default.
-- Native runtime behavior is implemented in Rust through ZeroClaw.
+- Native runtime behavior is implemented in Rust through Kaizen.
 - This directory is currently a reserved extension point.
 
 ## When to Use

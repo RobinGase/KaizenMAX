@@ -3,12 +3,12 @@
 ## Phase 1 - Context Baseline
 - [x] Confirm brand and product labels are `Kaizen` and `MAX` in UI and config.
 - [x] Set Kaizen as default main agent in runtime settings.
-- [x] Set runtime engine default to `zeroclaw` and keep compatibility adapter off.
+- [x] Set runtime engine default to `kaizen` and keep compatibility adapter off.
 - [x] Set max sub agent default to `5` and disable auto spawn.
 - [x] Confirm no WSL baseline for desktop workflow.
 
 ## Phase 2 - Prompt and Template Binding
-- [ ] Bind `templates/kaizen_system_prompt.md` to ZeroClaw main prompt setting.
+- [ ] Bind `templates/kaizen_system_prompt.md` to Kaizen main prompt setting.
 - [ ] Bind `templates/subagent_system_prompt.md` to spawned agent template setting.
 - [ ] Verify all spawned agents inherit alignment and gate rules through live prompt binding.
 
@@ -35,7 +35,7 @@
 - [x] Validate local archive integrity reports and optional HMAC coverage reporting.
 
 ## Phase 7 - Remote Core Validation
-- [ ] Confirm native or remote ZeroClaw core is reachable from native Windows UI.
+- [ ] Confirm native or remote Kaizen core is reachable from native Windows UI.
 - [ ] Confirm low local RAM footprint during normal usage.
 - [ ] Confirm provider-hosted inference calls succeed end to end.
 

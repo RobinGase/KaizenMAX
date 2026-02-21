@@ -5,7 +5,7 @@ This directory contains alignment and protocol assets used by the Kaizen MAX run
 ## Purpose
 
 - Keep Nex alignment constraints visible and auditable.
-- Track parity between ZeroClaw native runtime capabilities and protocol level controls.
+- Track parity between Kaizen native runtime capabilities and protocol level controls.
 - Document decisions for native enforcement, bridge behavior, and optional adapters.
 
 ## Current Artifacts

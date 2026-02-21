@@ -1,6 +1,6 @@
-# Phase B Initial ZeroClaw and Nex Alignment Collision Matrix
+# Phase B Initial Kaizen and Nex Alignment Collision Matrix
 
-This document captures the current parity snapshot between native ZeroClaw runtime behavior and Nex alignment policy expectations.
+This document captures the current parity snapshot between native Kaizen runtime behavior and Nex alignment policy expectations.
 
 ## Scope
 

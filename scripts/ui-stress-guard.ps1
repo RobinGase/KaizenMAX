@@ -148,5 +148,6 @@ finally {
         Stop-Process -Id $coreProc.Id -Force
     }
     Get-Process ui-dioxus -ErrorAction SilentlyContinue | Stop-Process -Force
+    Get-Process kaizen-gateway -ErrorAction SilentlyContinue | Stop-Process -Force
     Get-Process zeroclaw-gateway -ErrorAction SilentlyContinue | Stop-Process -Force
 }

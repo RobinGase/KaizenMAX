@@ -2,7 +2,7 @@
 
 Kaizen MAX is a Windows-first operator cockpit for AI-assisted engineering.
 
-- Runtime: Rust (`ZeroClaw`)
+- Runtime: Rust (`Kaizen`)
 - Primary agent: `Kaizen`
 - Sub-agent policy: user-controlled only
 - Setup model: UI-first (no manual vault key generation required)
@@ -49,6 +49,6 @@ The legacy React frontend is retired on the `RustTestBranch` rewrite path.
 ## Verify Build
 
 - Core tests: run `cargo test` in `core/`
-- UI build: run `cargo build` in `ui-rs/`
+- UI build: run `cargo build` in `ui-dioxus/`
 
 For full architecture and rollout details, see `implementation_plan.md`.

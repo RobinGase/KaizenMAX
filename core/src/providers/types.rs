@@ -1,14 +1,13 @@
 //! Provider and virtual-key types for KaizenMAX.
 //!
-//! Ported from kai-zen-tunnel `virtual_key/types.rs` and extended to match
-//! KaizenMAX's provider surface (adds `AnthropicApi`, `GeminiCli`,
-//! `NvidiaApi`, `OpenCode`).
+//! Defines the provider surface used by KaizenMAX, including API and CLI
+//! provider variants.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-// Re-use the canonical prefix from the webkeys surface.
-pub use crate::webkeys::types::VIRTUAL_KEY_PREFIX;
+/// Prefix for generated virtual keys.
+pub const VIRTUAL_KEY_PREFIX: &str = "sk-vt-";
 
 /// Opaque provider identifier.
 pub type ProviderId = String;

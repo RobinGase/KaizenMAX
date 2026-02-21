@@ -1,4 +1,4 @@
-//! ZeroClaw Gateway library
+//! Kaizen Gateway library
 //!
 //! Module structure for Kaizen MAX core runtime.
 
@@ -10,4 +10,3 @@ pub mod inference;
 pub mod providers;
 pub mod settings;
 pub mod vault;
-pub mod webkeys;

@@ -34,8 +34,6 @@ pub struct KaizenSettings {
     #[serde(default = "default_true")]
     pub credentials_ui_enabled: bool,
     #[serde(default = "default_true")]
-    pub oauth_ui_enabled: bool,
-    #[serde(default = "default_true")]
     pub agent_name_editable_after_spawn: bool,
     #[serde(default = "default_encrypted_vault")]
     pub secrets_storage_mode: String,
@@ -57,60 +55,6 @@ pub struct KaizenSettings {
     pub inference_max_tokens: u32,
     #[serde(default = "default_inference_temperature")]
     pub inference_temperature: f32,
-    /// WebKeys subsystem configuration
-    #[serde(default)]
-    pub webkeys: WebkeysSettings,
-}
-
-/// WebKeys configuration (virtual key + browser automation settings)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WebkeysSettings {
-    /// Enable the /v1/* OpenAI-compatible surface and virtual key management
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    /// Default provider ID to route requests when the key has no explicit preference
-    #[serde(default = "default_webkeys_provider")]
-    pub default_provider: String,
-    /// Default model to use when none is specified in the request
-    #[serde(default = "default_webkeys_model")]
-    pub default_model: String,
-    /// Base directory for browser profiles (chromiumoxide sessions)
-    /// Defaults to %APPDATA%\KaizenMAX\browser-profiles on Windows
-    #[serde(default = "default_webkeys_profile_dir")]
-    pub profile_dir: String,
-    /// Maximum browser session restarts before the session is considered dead
-    #[serde(default = "default_webkeys_max_restarts")]
-    pub max_restarts: u32,
-}
-
-fn default_webkeys_provider() -> String {
-    "gemini-web".to_string()
-}
-fn default_webkeys_model() -> String {
-    "Web-Gem".to_string()
-}
-fn default_webkeys_profile_dir() -> String {
-    // Windows: %APPDATA%\KaizenMAX\browser-profiles
-    // Fallback for non-Windows CI
-    std::env::var("APPDATA")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map(|base| format!("{base}\\KaizenMAX\\browser-profiles"))
-        .unwrap_or_else(|_| ".kaizen/browser-profiles".to_string())
-}
-fn default_webkeys_max_restarts() -> u32 {
-    3
-}
-
-impl Default for WebkeysSettings {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            default_provider: default_webkeys_provider(),
-            default_model: default_webkeys_model(),
-            profile_dir: default_webkeys_profile_dir(),
-            max_restarts: default_webkeys_max_restarts(),
-        }
-    }
 }
 
 fn default_encrypted_vault() -> String {
@@ -132,7 +76,7 @@ fn default_inference_temperature() -> f32 {
 impl Default for KaizenSettings {
     fn default() -> Self {
         Self {
-            runtime_engine: "zeroclaw".to_string(),
+            runtime_engine: "kaizen".to_string(),
             openclaw_compat_enabled: false,
             auto_spawn_subagents: false,
             max_subagents: 5,
@@ -145,7 +89,6 @@ impl Default for KaizenSettings {
             require_human_smoke_test_before_deploy: true,
             provider_inference_only: true,
             credentials_ui_enabled: true,
-            oauth_ui_enabled: true,
             agent_name_editable_after_spawn: true,
             secrets_storage_mode: "encrypted_vault".to_string(),
             write_plaintext_secrets_to_env: false,
@@ -157,7 +100,6 @@ impl Default for KaizenSettings {
             inference_model: "claude-sonnet-4-20250514".to_string(),
             inference_max_tokens: 4096,
             inference_temperature: 0.7,
-            webkeys: WebkeysSettings::default(),
         }
     }
 }
@@ -177,7 +119,6 @@ pub struct SettingsPatch {
     pub require_human_smoke_test_before_deploy: Option<bool>,
     pub provider_inference_only: Option<bool>,
     pub credentials_ui_enabled: Option<bool>,
-    pub oauth_ui_enabled: Option<bool>,
     pub agent_name_editable_after_spawn: Option<bool>,
     pub secrets_storage_mode: Option<String>,
     pub write_plaintext_secrets_to_env: Option<bool>,
@@ -189,10 +130,6 @@ pub struct SettingsPatch {
     pub inference_model: Option<String>,
     pub inference_max_tokens: Option<u32>,
     pub inference_temperature: Option<f32>,
-    pub webkeys_enabled: Option<bool>,
-    pub webkeys_default_provider: Option<String>,
-    pub webkeys_default_model: Option<String>,
-    pub webkeys_profile_dir: Option<String>,
 }
 
 fn default_max_subagents() -> u32 {
@@ -203,6 +140,14 @@ fn default_true() -> bool {
 }
 fn default_closed() -> String {
     "closed".to_string()
+}
+
+fn normalize_runtime_engine(value: &str) -> String {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "zeroclaw" | "kai-zen" => "kaizen".to_string(),
+        _ => normalized,
+    }
 }
 
 impl KaizenSettings {
@@ -239,13 +184,14 @@ impl KaizenSettings {
         }
 
         settings.apply_env_overrides();
+        settings.runtime_engine = normalize_runtime_engine(&settings.runtime_engine);
         settings
     }
 
     /// Apply environment variable overrides (ADMIN_ prefix convention).
     pub fn apply_env_overrides(&mut self) {
         if let Ok(val) = std::env::var("RUNTIME_ENGINE") {
-            self.runtime_engine = val;
+            self.runtime_engine = normalize_runtime_engine(&val);
         }
         if let Ok(val) = std::env::var("ADMIN_HARD_GATES_ENABLED") {
             self.hard_gates_enabled = val.parse().unwrap_or(self.hard_gates_enabled);
@@ -291,7 +237,7 @@ impl KaizenSettings {
 
     pub fn apply_patch(&mut self, patch: SettingsPatch) {
         if let Some(value) = patch.runtime_engine {
-            self.runtime_engine = value;
+            self.runtime_engine = normalize_runtime_engine(&value);
         }
         if let Some(value) = patch.openclaw_compat_enabled {
             self.openclaw_compat_enabled = value;
@@ -329,9 +275,6 @@ impl KaizenSettings {
         if let Some(value) = patch.credentials_ui_enabled {
             self.credentials_ui_enabled = value;
         }
-        if let Some(value) = patch.oauth_ui_enabled {
-            self.oauth_ui_enabled = value;
-        }
         if let Some(value) = patch.agent_name_editable_after_spawn {
             self.agent_name_editable_after_spawn = value;
         }
@@ -364,18 +307,6 @@ impl KaizenSettings {
         }
         if let Some(value) = patch.inference_temperature {
             self.inference_temperature = value;
-        }
-        if let Some(value) = patch.webkeys_enabled {
-            self.webkeys.enabled = value;
-        }
-        if let Some(value) = patch.webkeys_default_provider {
-            self.webkeys.default_provider = value;
-        }
-        if let Some(value) = patch.webkeys_default_model {
-            self.webkeys.default_model = value;
-        }
-        if let Some(value) = patch.webkeys_profile_dir {
-            self.webkeys.profile_dir = value;
         }
     }
 
@@ -456,4 +387,53 @@ fn settings_write_path() -> PathBuf {
     }
 
     workspace_path
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_engine_normalizes_legacy_aliases() {
+        assert_eq!(normalize_runtime_engine("zeroclaw"), "kaizen");
+        assert_eq!(normalize_runtime_engine("KAI-ZEN"), "kaizen");
+        assert_eq!(normalize_runtime_engine("kaizen"), "kaizen");
+        assert_eq!(
+            normalize_runtime_engine("openclaw_compat"),
+            "openclaw_compat"
+        );
+    }
+
+    #[test]
+    fn apply_patch_canonicalizes_runtime_engine() {
+        let mut settings = KaizenSettings::default();
+        settings.apply_patch(SettingsPatch {
+            runtime_engine: Some("zeroclaw".to_string()),
+            openclaw_compat_enabled: None,
+            auto_spawn_subagents: None,
+            max_subagents: None,
+            main_chat_pinned: None,
+            new_agent_chat_default_state: None,
+            allow_direct_user_to_subagent_chat: None,
+            crystal_ball_enabled: None,
+            crystal_ball_default_open: None,
+            hard_gates_enabled: None,
+            require_human_smoke_test_before_deploy: None,
+            provider_inference_only: None,
+            credentials_ui_enabled: None,
+            agent_name_editable_after_spawn: None,
+            secrets_storage_mode: None,
+            write_plaintext_secrets_to_env: None,
+            show_only_masked_secrets_in_ui: None,
+            mattermost_url: None,
+            mattermost_channel_id: None,
+            selected_github_repo: None,
+            inference_provider: None,
+            inference_model: None,
+            inference_max_tokens: None,
+            inference_temperature: None,
+        });
+
+        assert_eq!(settings.runtime_engine, "kaizen");
+    }
 }

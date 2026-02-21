@@ -44,3 +44,13 @@ Desktop.ini
 # ----- Logs -----
 *.log
 logs/
+
+# ----- Local smoke/probe artifacts -----
+core/*_body.json
+core/*_health.json
+core/health_body.txt
+core/probe_*.json
+core/smoke_*.json
+core/v1_no_bearer_body.json
+core/profiles/
+nul

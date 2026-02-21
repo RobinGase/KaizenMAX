@@ -39,9 +39,10 @@ No raw secret may be written to `.env`, logs, events, archives, or API responses
 
 ## Network + Access Policy
 
-- Local mode (`ZEROCLAW_MODE=native`) must bind loopback host only.
+- Local mode (`KAIZEN_MODE=native`) must bind loopback host only.
 - Remote mode requires explicit acknowledgement:
-  - `ZEROCLAW_REMOTE_SECURITY_ACK=I_UNDERSTAND_REMOTE_REQUIRES_TLS_MTLS_AUTH`
+  - `KAIZEN_REMOTE_SECURITY_ACK=I_UNDERSTAND_REMOTE_REQUIRES_TLS_MTLS_AUTH`
+  - Legacy aliases are accepted: `ZEROCLAW_MODE`, `ZEROCLAW_REMOTE_SECURITY_ACK`
 - CORS must use explicit allowlist (`KAIZEN_CORS_ORIGINS`), no wildcard.
 - If `ADMIN_API_TOKEN` is set, sensitive endpoints require:
   - `Authorization: Bearer <token>` or

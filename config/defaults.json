@@ -17,20 +17,12 @@
   "mattermost_url": "",
   "max_subagents": 1,
   "new_agent_chat_default_state": "closed",
-  "oauth_ui_enabled": true,
   "openclaw_compat_enabled": false,
   "provider_inference_only": true,
   "require_human_smoke_test_before_deploy": true,
-  "runtime_engine": "zeroclaw",
+  "runtime_engine": "kaizen",
   "secrets_storage_mode": "encrypted_vault",
   "selected_github_repo": "RobinGase/Kai-zen-Tunnel",
   "show_only_masked_secrets_in_ui": true,
-  "webkeys": {
-    "default_model": "Web-Gem",
-    "default_provider": "gemini-web",
-    "enabled": false,
-    "max_restarts": 3,
-    "profile_dir": "../data\\browser-profiles"
-  },
   "write_plaintext_secrets_to_env": false
 }

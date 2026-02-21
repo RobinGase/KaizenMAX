@@ -114,11 +114,8 @@ fn model_targets_from_values(values: &[String]) -> Vec<ChatModelTarget> {
 fn runtime_label(provider: Option<&str>, model: Option<&str>) -> String {
     if let Some(p) = provider {
         let normalized = p.trim().to_ascii_lowercase();
-        if matches!(
-            normalized.as_str(),
-            "kai-zen" | "kaizen" | "zeroclaw" | "native"
-        ) {
-            return "Kai-Zen (runtime default)".to_string();
+        if matches!(normalized.as_str(), "kai-zen" | "kaizen" | "zeroclaw" | "native") {
+            return "Kaizen (runtime default)".to_string();
         }
     }
 
@@ -299,12 +296,6 @@ struct ChatHistoryMessage {
     content: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Default)]
-struct UiWebkeysSettings {
-    #[serde(default)]
-    enabled: bool,
-}
-
 #[derive(Clone, Debug, Deserialize)]
 struct KaizenSettings {
     runtime_engine: String,
@@ -315,7 +306,6 @@ struct KaizenSettings {
     require_human_smoke_test_before_deploy: bool,
     provider_inference_only: bool,
     credentials_ui_enabled: bool,
-    oauth_ui_enabled: bool,
     agent_name_editable_after_spawn: bool,
     show_only_masked_secrets_in_ui: bool,
     mattermost_url: String,
@@ -325,8 +315,6 @@ struct KaizenSettings {
     inference_model: String,
     inference_max_tokens: u32,
     inference_temperature: f32,
-    #[serde(default)]
-    webkeys: UiWebkeysSettings,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -339,7 +327,6 @@ struct SettingsPatchRequest {
     require_human_smoke_test_before_deploy: Option<bool>,
     provider_inference_only: Option<bool>,
     credentials_ui_enabled: Option<bool>,
-    oauth_ui_enabled: Option<bool>,
     agent_name_editable_after_spawn: Option<bool>,
     show_only_masked_secrets_in_ui: Option<bool>,
     mattermost_url: Option<String>,
@@ -349,7 +336,6 @@ struct SettingsPatchRequest {
     inference_model: Option<String>,
     inference_max_tokens: Option<u32>,
     inference_temperature: Option<f32>,
-    webkeys_enabled: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -422,45 +408,6 @@ struct GitHubReposResponse {
     error: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct OAuthStatusResponse {
-    provider: String,
-    supported: bool,
-    connected: bool,
-    access_token_configured: bool,
-    refresh_token_configured: bool,
-    message: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct GoogleOAuthAccountPublic {
-    account_id: String,
-    email: Option<String>,
-    scope: Option<String>,
-    expires_at: Option<String>,
-    updated_at: String,
-    has_refresh_token: bool,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct GoogleOAuthStatusResponse {
-    #[allow(dead_code)]
-    provider: String,
-    connected: bool,
-    account_count: usize,
-    accounts: Vec<GoogleOAuthAccountPublic>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct GoogleOAuthStartResponse {
-    #[allow(dead_code)]
-    provider: String,
-    redirect_url: String,
-    state_token: String,
-    #[allow(dead_code)]
-    redirect_uri: String,
-}
-
 #[derive(Clone, Debug, Serialize)]
 struct StoreSecretRequest<'a> {
     value: &'a str,
@@ -507,8 +454,6 @@ const SECRET_PROVIDERS: [(&str, &str); 5] = [
     ("nvidia", "NVIDIA"),
     ("opencode", "OpenCode"),
 ];
-
-const OAUTH_PROVIDERS: [(&str, &str); 2] = [("openai", "OpenAI/Codex"), ("anthropic", "Anthropic")];
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -698,9 +643,6 @@ fn App() -> Element {
     let mut secret_feedback = use_signal(HashMap::<String, String>::new);
     let mut gh_status = use_signal(|| None::<GitHubStatusResponse>);
     let mut gh_repos = use_signal(Vec::<GitHubRepoSummary>::new);
-    let mut oauth_status = use_signal(HashMap::<String, OAuthStatusResponse>::new);
-    let mut google_oauth_status = use_signal(|| None::<GoogleOAuthStatusResponse>);
-    let mut google_oauth_redirect = use_signal(|| None::<String>);
 
     let mut left_open = use_signal(|| true);
     let mut settings_open = use_signal(|| false);
@@ -769,8 +711,6 @@ fn App() -> Element {
         let mut secrets_sig = secret_meta;
         let mut gh_status_sig = gh_status;
         let mut gh_repos_sig = gh_repos;
-        let mut oauth_sig = oauth_status;
-        let mut google_oauth_sig = google_oauth_status;
         use_future(move || {
             let token = token.clone();
             async move {
@@ -783,8 +723,6 @@ fn App() -> Element {
                         secrets_sig,
                         gh_status_sig,
                         gh_repos_sig,
-                        oauth_sig,
-                        google_oauth_sig,
                     )
                     .await;
 
@@ -861,9 +799,6 @@ fn App() -> Element {
     let secret_feedback_snap = secret_feedback.read().clone();
     let gh_status_snap = gh_status.read().clone();
     let gh_repos_snap = gh_repos.read().clone();
-    let oauth_snap = oauth_status.read().clone();
-    let google_oauth_snap = google_oauth_status.read().clone();
-    let google_oauth_redirect_snap = google_oauth_redirect.read().clone();
     let selected_repo = settings_snap
         .as_ref()
         .map(|s| s.selected_github_repo.clone())
@@ -1233,8 +1168,6 @@ fn App() -> Element {
                                     let mut secrets_sig = secret_meta;
                                     let mut gh_status_sig = gh_status;
                                     let mut gh_repos_sig = gh_repos;
-                                    let mut oauth_sig = oauth_status;
-                                    let mut google_oauth_sig = google_oauth_status;
                                     let mut settings_open_sig = settings_open;
                                     move |_| {
                                         settings_open_sig.set(true);
@@ -1248,8 +1181,6 @@ fn App() -> Element {
                                                 secrets_sig,
                                                 gh_status_sig,
                                                 gh_repos_sig,
-                                                oauth_sig,
-                                                google_oauth_sig,
                                             ).await;
                                         });
                                     }
@@ -1521,8 +1452,6 @@ fn App() -> Element {
                                         let mut secrets_sig = secret_meta;
                                         let mut gh_status_sig = gh_status;
                                         let mut gh_repos_sig = gh_repos;
-                                        let mut oauth_sig = oauth_status;
-                                        let mut google_oauth_sig = google_oauth_status;
                                         let mut info_sig = info;
                                         let mut error_sig = error;
                                         move |_| {
@@ -1548,8 +1477,6 @@ fn App() -> Element {
                                                             secrets_sig,
                                                             gh_status_sig,
                                                             gh_repos_sig,
-                                                            oauth_sig,
-                                                            google_oauth_sig,
                                                         ).await;
                                                     }
                                                     Err(err) => error_sig.set(Some(err)),
@@ -1598,140 +1525,11 @@ fn App() -> Element {
                                                             }
                                                         }
                                                     },
-                                                    option { value: "zeroclaw", "ZeroClaw" }
+                                                    option { value: "kaizen", "Kaizen" }
                                                     option { value: "openclaw_compat", "OpenClaw Compatibility" }
                                                 }
                                             }
 
-                                            div { class: "setting-row oauth-row",
-                                                strong { "Google OAuth (WebKeys)" }
-                                                if let Some(status) = google_oauth_snap.clone() {
-                                                    p { class: "sb-hint", {format!("Connected accounts: {}", status.account_count)} }
-                                                    p { class: "sb-hint", {format!("Overall connected: {}", if status.connected { "yes" } else { "no" })} }
-                                                } else {
-                                                    p { class: "sb-hint", "Google OAuth status loading..." }
-                                                }
-
-                                                if let Some(url) = google_oauth_redirect_snap.clone() {
-                                                    p { class: "sb-hint", "Open this URL to complete Google OAuth login:" }
-                                                    a {
-                                                        class: "sb-link",
-                                                        href: "{url}",
-                                                        target: "_blank",
-                                                        rel: "noopener noreferrer",
-                                                        "{url}"
-                                                    }
-                                                }
-
-                                                div { class: "inline-actions",
-                                                    button {
-                                                        class: "btn btn-sm btn-sec",
-                                                        onclick: {
-                                                            let token = admin_token.clone();
-                                                            let mut info_sig = info;
-                                                            let mut error_sig = error;
-                                                            let mut google_redirect_sig = google_oauth_redirect;
-                                                            move |_| {
-                                                                let token = token.clone();
-                                                                spawn(async move {
-                                                                    match google_oauth_start_api(token.as_deref()).await {
-                                                                        Ok(start) => {
-                                                                            google_redirect_sig.set(Some(start.redirect_url.clone()));
-                                                                            info_sig.set(Some(format!(
-                                                                                "Google OAuth start ready (state {}). Open the URL to continue.",
-                                                                                start.state_token
-                                                                            )));
-                                                                            error_sig.set(None);
-                                                                        }
-                                                                        Err(err) => error_sig.set(Some(err)),
-                                                                    }
-                                                                });
-                                                            }
-                                                        },
-                                                        "Connect Google"
-                                                    }
-                                                    button {
-                                                        class: "btn btn-sm btn-sec",
-                                                        onclick: {
-                                                            let token = admin_token.clone();
-                                                            let mut info_sig = info;
-                                                            let mut error_sig = error;
-                                                            let mut google_oauth_sig = google_oauth_status;
-                                                            move |_| {
-                                                                let token = token.clone();
-                                                                spawn(async move {
-                                                                    match fetch_google_oauth_status_api(token.as_deref()).await {
-                                                                        Ok(status) => {
-                                                                            let count = status.account_count;
-                                                                            google_oauth_sig.set(Some(status));
-                                                                            info_sig.set(Some(format!("Refreshed Google OAuth status ({} accounts)", count)));
-                                                                            error_sig.set(None);
-                                                                        }
-                                                                        Err(err) => error_sig.set(Some(err)),
-                                                                    }
-                                                                });
-                                                            }
-                                                        },
-                                                        "Refresh Accounts"
-                                                    }
-                                                }
-
-                                                if let Some(status) = google_oauth_snap.clone() {
-                                                    for account in status.accounts {
-                                                        div { class: "oauth-account-card",
-                                                            strong {
-                                                                "{account.email.clone().unwrap_or_else(|| account.account_id.clone())}"
-                                                            }
-                                                            p {
-                                                                class: "sb-hint",
-                                                                "Account ID: {account.account_id}"
-                                                            }
-                                                            p {
-                                                                class: "sb-hint",
-                                                                {format!(
-                                                                    "Scope: {} | Refresh token: {}",
-                                                                    account.scope.clone().unwrap_or_else(|| "(unknown)".to_string()),
-                                                                    if account.has_refresh_token { "yes" } else { "no" }
-                                                                )}
-                                                            }
-                                                            if let Some(exp) = account.expires_at.clone() {
-                                                                p { class: "sb-hint", "Token expires: {exp}" }
-                                                            }
-                                                            p { class: "sb-hint", "Updated: {account.updated_at}" }
-                                                            div { class: "inline-actions",
-                                                                button {
-                                                                    class: "btn btn-sm btn-danger",
-                                                                    onclick: {
-                                                                        let account_id = account.account_id.clone();
-                                                                        let token = admin_token.clone();
-                                                                        let mut info_sig = info;
-                                                                        let mut error_sig = error;
-                                                                        let mut google_oauth_sig = google_oauth_status;
-                                                                        move |_| {
-                                                                            let account_id = account_id.clone();
-                                                                            let token = token.clone();
-                                                                            spawn(async move {
-                                                                                match google_oauth_disconnect_account_api(&account_id, token.as_deref()).await {
-                                                                                    Ok(()) => {
-                                                                                        info_sig.set(Some(format!("Disconnected Google account {}", account_id)));
-                                                                                        error_sig.set(None);
-                                                                                        match fetch_google_oauth_status_api(token.as_deref()).await {
-                                                                                            Ok(status) => google_oauth_sig.set(Some(status)),
-                                                                                            Err(err) => error_sig.set(Some(err)),
-                                                                                        }
-                                                                                    }
-                                                                                    Err(err) => error_sig.set(Some(err)),
-                                                                                }
-                                                                            });
-                                                                        }
-                                                                    },
-                                                                    "Disconnect"
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
                                         },
                                         SettingsTab::Workspaces => rsx! {
                                             h3 { "Workspace and GitHub" }
@@ -1839,8 +1637,8 @@ fn App() -> Element {
                                             }
                                         },
                                         SettingsTab::Integrations => rsx! {
-                                            h3 { "Integrations and OAuth" }
-                                            p { class: "sb-hint", "OAuth controls: OpenAI/Codex + Anthropic (legacy), and Google OAuth multi-account for WebKeys/Gemini browser auth." }
+                                            h3 { "Integrations" }
+                                            p { class: "sb-hint", "Configure external service integrations." }
                                             div { class: "setting-row",
                                                 label { "Mattermost URL" }
                                                 input {
@@ -1875,91 +1673,6 @@ fn App() -> Element {
                                                             }
                                                         }
                                                     },
-                                                }
-                                            }
-
-                                            for (provider, label) in OAUTH_PROVIDERS.iter() {
-                                                div { class: "setting-row oauth-row",
-                                                    strong { "{label}" }
-                                                    if let Some(status) = oauth_snap.get(*provider) {
-                                                        p { class: "sb-hint", "{status.message}" }
-                                                        p { class: "sb-hint", {format!("Connected: {}", if status.connected { "yes" } else { "no" })} }
-                                                    } else {
-                                                        p { class: "sb-hint", "OAuth status loading..." }
-                                                    }
-                                                    div { class: "inline-actions",
-                                                        button {
-                                                            class: "btn btn-sm btn-sec",
-                                                            onclick: {
-                                                                let provider = provider.to_string();
-                                                                let token = admin_token.clone();
-                                                                let mut info_sig = info;
-                                                                let mut error_sig = error;
-                                                                move |_| {
-                                                                    let provider = provider.clone();
-                                                                    let token = token.clone();
-                                                                    spawn(async move {
-                                                                        match oauth_start_api(&provider, token.as_deref()).await {
-                                                                            Ok(msg) => {
-                                                                                info_sig.set(Some(msg));
-                                                                                error_sig.set(None);
-                                                                            }
-                                                                            Err(err) => error_sig.set(Some(err)),
-                                                                        }
-                                                                    });
-                                                                }
-                                                            },
-                                                            "Connect"
-                                                        }
-                                                        button {
-                                                            class: "btn btn-sm btn-sec",
-                                                            onclick: {
-                                                                let provider = provider.to_string();
-                                                                let token = admin_token.clone();
-                                                                let mut info_sig = info;
-                                                                let mut error_sig = error;
-                                                                move |_| {
-                                                                    let provider = provider.clone();
-                                                                    let token = token.clone();
-                                                                    spawn(async move {
-                                                                        match oauth_refresh_api(&provider, token.as_deref()).await {
-                                                                            Ok(msg) => {
-                                                                                info_sig.set(Some(msg));
-                                                                                error_sig.set(None);
-                                                                            }
-                                                                            Err(err) => error_sig.set(Some(err)),
-                                                                        }
-                                                                    });
-                                                                }
-                                                            },
-                                                            "Refresh"
-                                                        }
-                                                        button {
-                                                            class: "btn btn-sm btn-danger",
-                                                            onclick: {
-                                                                let provider = provider.to_string();
-                                                                let token = admin_token.clone();
-                                                                let mut info_sig = info;
-                                                                let mut error_sig = error;
-                                                                let mut oauth_sig = oauth_status;
-                                                                move |_| {
-                                                                    let provider = provider.clone();
-                                                                    let token = token.clone();
-                                                                    spawn(async move {
-                                                                        match oauth_disconnect_api(&provider, token.as_deref()).await {
-                                                                            Ok(()) => {
-                                                                                info_sig.set(Some(format!("{} OAuth disconnected", provider)));
-                                                                                error_sig.set(None);
-                                                                                oauth_sig.write().remove(&provider);
-                                                                            }
-                                                                            Err(err) => error_sig.set(Some(err)),
-                                                                        }
-                                                                    });
-                                                                }
-                                                            },
-                                                            "Disconnect"
-                                                        }
-                                                    }
                                                 }
                                             }
                                         },
@@ -2085,25 +1798,6 @@ fn App() -> Element {
                                                 }
                                             }
 
-                                            h4 { "WebKeys (Browser OAuth)" }
-                                            p { class: "sb-hint", "Enable browser-based OAuth for Gemini CLI. Disable to use API keys only." }
-                                            div { class: "setting-row",
-                                                label { "Enable WebKeys" }
-                                                input {
-                                                    r#type: "checkbox",
-                                                    checked: "{cfg.webkeys.enabled}",
-                                                    onchange: {
-                                                        let mut settings_draft_sig = settings_draft;
-                                                        move |e: Event<FormData>| {
-                                                            let current_draft = settings_draft_sig.read().clone();
-                                                            if let Some(mut draft) = current_draft {
-                                                                draft.webkeys.enabled = e.checked();
-                                                                settings_draft_sig.set(Some(draft));
-                                                            }
-                                                        }
-                                                    },
-                                                }
-                                            }
                                         },
                                         SettingsTab::Security => rsx! {
                                             h3 { "Security and Secrets" }
@@ -2169,8 +1863,6 @@ fn App() -> Element {
                                                                 let mut secrets_sig = secret_meta;
                                                                 let mut gh_status_sig = gh_status;
                                                                 let mut gh_repos_sig = gh_repos;
-                                                                let mut oauth_sig = oauth_status;
-                                                                let mut google_oauth_sig = google_oauth_status;
                                                                 move |_| {
                                                                     let provider = provider.clone();
                                                                     let value = inputs_sig.read().get(&provider).cloned().unwrap_or_default();
@@ -2194,8 +1886,6 @@ fn App() -> Element {
                                                                                     secrets_sig,
                                                                                     gh_status_sig,
                                                                                     gh_repos_sig,
-                                                                                    oauth_sig,
-                                                                                    google_oauth_sig,
                                                                                 ).await;
                                                                             }
                                                                             Err(err) => error_sig.set(Some(err)),
@@ -2247,8 +1937,6 @@ fn App() -> Element {
                                                                 let mut secrets_sig = secret_meta;
                                                                 let mut gh_status_sig = gh_status;
                                                                 let mut gh_repos_sig = gh_repos;
-                                                                let mut oauth_sig = oauth_status;
-                                                                let mut google_oauth_sig = google_oauth_status;
                                                                 move |_| {
                                                                     let provider = provider.clone();
                                                                     let token = token.clone();
@@ -2267,8 +1955,6 @@ fn App() -> Element {
                                                                                     secrets_sig,
                                                                                     gh_status_sig,
                                                                                     gh_repos_sig,
-                                                                                    oauth_sig,
-                                                                                    google_oauth_sig,
                                                                                 ).await;
                                                                             }
                                                                             Err(err) => error_sig.set(Some(err)),
@@ -2376,24 +2062,6 @@ fn App() -> Element {
                                                             let current_draft = settings_draft_sig.read().clone();
                                                             if let Some(mut draft) = current_draft {
                                                                 draft.credentials_ui_enabled = parse_bool(&e.value());
-                                                                settings_draft_sig.set(Some(draft));
-                                                            }
-                                                        }
-                                                    },
-                                                    option { value: "true", "Enabled" }
-                                                    option { value: "false", "Disabled" }
-                                                }
-
-                                                label { "OAuth UI Enabled" }
-                                                select {
-                                                    class: "s-input",
-                                                    value: "{bool_to_str(cfg.oauth_ui_enabled)}",
-                                                    onchange: {
-                                                        let mut settings_draft_sig = settings_draft;
-                                                        move |e: Event<FormData>| {
-                                                            let current_draft = settings_draft_sig.read().clone();
-                                                            if let Some(mut draft) = current_draft {
-                                                                draft.oauth_ui_enabled = parse_bool(&e.value());
                                                                 settings_draft_sig.set(Some(draft));
                                                             }
                                                         }
@@ -4449,7 +4117,6 @@ fn settings_to_patch(cfg: &KaizenSettings) -> SettingsPatchRequest {
         require_human_smoke_test_before_deploy: Some(cfg.require_human_smoke_test_before_deploy),
         provider_inference_only: Some(cfg.provider_inference_only),
         credentials_ui_enabled: Some(cfg.credentials_ui_enabled),
-        oauth_ui_enabled: Some(cfg.oauth_ui_enabled),
         agent_name_editable_after_spawn: Some(cfg.agent_name_editable_after_spawn),
         show_only_masked_secrets_in_ui: Some(cfg.show_only_masked_secrets_in_ui),
         mattermost_url: Some(cfg.mattermost_url.clone()),
@@ -4459,7 +4126,6 @@ fn settings_to_patch(cfg: &KaizenSettings) -> SettingsPatchRequest {
         inference_model: Some(cfg.inference_model.clone()),
         inference_max_tokens: Some(cfg.inference_max_tokens),
         inference_temperature: Some(cfg.inference_temperature),
-        webkeys_enabled: Some(cfg.webkeys.enabled),
     }
 }
 
@@ -4471,8 +4137,6 @@ async fn refresh_settings_bundle(
     mut secrets_sig: Signal<HashMap<String, SecretMetadata>>,
     mut gh_status_sig: Signal<Option<GitHubStatusResponse>>,
     mut gh_repos_sig: Signal<Vec<GitHubRepoSummary>>,
-    mut oauth_sig: Signal<HashMap<String, OAuthStatusResponse>>,
-    mut google_oauth_sig: Signal<Option<GoogleOAuthStatusResponse>>,
 ) -> Result<(), String> {
     let settings = fetch_settings_api(t).await?;
     settings_current_sig.set(Some(settings.clone()));
@@ -4507,19 +4171,6 @@ async fn refresh_settings_bundle(
             }
         }
         Err(_) => gh_repos_sig.set(Vec::new()),
-    }
-
-    let mut oauth_map = HashMap::new();
-    for (provider, _) in OAUTH_PROVIDERS.iter() {
-        if let Ok(status) = fetch_oauth_status_api(provider, t).await {
-            oauth_map.insert(status.provider.clone(), status);
-        }
-    }
-    oauth_sig.set(oauth_map);
-
-    match fetch_google_oauth_status_api(t).await {
-        Ok(status) => google_oauth_sig.set(Some(status)),
-        Err(_) => google_oauth_sig.set(None),
     }
 
     Ok(())
@@ -4592,7 +4243,6 @@ async fn patch_selected_repo_api(repo: &str, t: Option<&str>) -> Result<(), Stri
         require_human_smoke_test_before_deploy: None,
         provider_inference_only: None,
         credentials_ui_enabled: None,
-        oauth_ui_enabled: None,
         agent_name_editable_after_spawn: None,
         show_only_masked_secrets_in_ui: None,
         mattermost_url: None,
@@ -4602,7 +4252,6 @@ async fn patch_selected_repo_api(repo: &str, t: Option<&str>) -> Result<(), Stri
         inference_model: None,
         inference_max_tokens: None,
         inference_temperature: None,
-        webkeys_enabled: None,
     };
 
     let response = ah(Client::new().patch(u("/api/settings")).json(&patch), t)
@@ -4680,126 +4329,6 @@ async fn fetch_github_status_api(t: Option<&str>) -> Result<GitHubStatusResponse
 
 async fn fetch_github_repos_api(t: Option<&str>) -> Result<GitHubReposResponse, String> {
     rj(Client::new().get(u("/api/github/repos?limit=100")), t).await
-}
-
-async fn fetch_oauth_status_api(
-    provider: &str,
-    t: Option<&str>,
-) -> Result<OAuthStatusResponse, String> {
-    rj(
-        Client::new().get(u(&format!("/api/oauth/{provider}/status"))),
-        t,
-    )
-    .await
-}
-
-async fn oauth_start_api(provider: &str, t: Option<&str>) -> Result<String, String> {
-    let response = ah(
-        Client::new().get(u(&format!("/api/oauth/{provider}/start"))),
-        t,
-    )
-    .send()
-    .await
-    .map_err(|e| e.to_string())?;
-
-    if response.status().is_success() {
-        Ok(format!("OAuth start initiated for {provider}"))
-    } else {
-        Err(format!(
-            "{} {}",
-            response.status(),
-            response.text().await.unwrap_or_default()
-        ))
-    }
-}
-
-async fn oauth_refresh_api(provider: &str, t: Option<&str>) -> Result<String, String> {
-    let response = ah(
-        Client::new().post(u(&format!("/api/oauth/{provider}/refresh"))),
-        t,
-    )
-    .send()
-    .await
-    .map_err(|e| e.to_string())?;
-
-    if response.status().is_success() {
-        Ok(format!("OAuth refresh succeeded for {provider}"))
-    } else {
-        Err(format!(
-            "{} {}",
-            response.status(),
-            response.text().await.unwrap_or_default()
-        ))
-    }
-}
-
-async fn oauth_disconnect_api(provider: &str, t: Option<&str>) -> Result<(), String> {
-    let response = ah(
-        Client::new().delete(u(&format!("/api/oauth/{provider}"))),
-        t,
-    )
-    .send()
-    .await
-    .map_err(|e| e.to_string())?;
-
-    if response.status().is_success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "{} {}",
-            response.status(),
-            response.text().await.unwrap_or_default()
-        ))
-    }
-}
-
-async fn fetch_google_oauth_status_api(
-    t: Option<&str>,
-) -> Result<GoogleOAuthStatusResponse, String> {
-    rj(Client::new().get(u("/api/webkeys/oauth/google/status")), t).await
-}
-
-async fn google_oauth_start_api(t: Option<&str>) -> Result<GoogleOAuthStartResponse, String> {
-    let response = ah(Client::new().post(u("/api/webkeys/oauth/google/start")), t)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if response.status().is_success() {
-        response
-            .json::<GoogleOAuthStartResponse>()
-            .await
-            .map_err(|e| e.to_string())
-    } else {
-        Err(format!(
-            "{} {}",
-            response.status(),
-            response.text().await.unwrap_or_default()
-        ))
-    }
-}
-
-async fn google_oauth_disconnect_account_api(
-    account_id: &str,
-    t: Option<&str>,
-) -> Result<(), String> {
-    let response = ah(
-        Client::new().delete(u(&format!("/api/webkeys/oauth/google/{account_id}"))),
-        t,
-    )
-    .send()
-    .await
-    .map_err(|e| e.to_string())?;
-
-    if response.status().is_success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "{} {}",
-            response.status(),
-            response.text().await.unwrap_or_default()
-        ))
-    }
 }
 
 async fn fetch_chat_history(agent_id: Option<&str>, t: Option<&str>) -> Result<Vec<UiMsg>, String> {

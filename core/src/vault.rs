@@ -58,6 +58,20 @@ fn default_key_id() -> String {
     "vault-key-v1".to_string()
 }
 
+const CANONICAL_VAULT_PROVIDER: &str = "kaizen";
+
+fn canonical_provider(provider: &str) -> String {
+    let trimmed = provider.trim();
+    if trimmed.eq_ignore_ascii_case(CANONICAL_VAULT_PROVIDER)
+        || trimmed.eq_ignore_ascii_case("zeroclaw")
+        || trimmed.eq_ignore_ascii_case("kai-zen")
+    {
+        CANONICAL_VAULT_PROVIDER.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// Thread-safe vault handle.
 #[derive(Clone)]
 pub struct SecretVault {
@@ -108,30 +122,81 @@ fn parse_key_b64(value: &str, source: &str) -> Result<[u8; 32], String> {
     Ok(key)
 }
 
-fn load_entries(path: &PathBuf) -> Result<HashMap<String, EncryptedEntry>, String> {
+fn load_entries(path: &PathBuf) -> Result<(HashMap<String, EncryptedEntry>, bool), String> {
     if path.exists() {
         let content =
             fs::read_to_string(path).map_err(|e| format!("Failed to read vault file: {e}"))?;
-        let mut entries: HashMap<String, EncryptedEntry> = serde_json::from_str(&content)
+        let entries: HashMap<String, EncryptedEntry> = serde_json::from_str(&content)
             .map_err(|e| format!("Failed to parse vault file: {e}"))?;
 
-        // Backward compatibility: hydrate newer metadata fields when loading
-        // legacy vault files that predate key_id/provider/created_at.
-        for (provider_key, entry) in entries.iter_mut() {
+        let mut normalized = HashMap::new();
+        let mut normalized_with_sources: HashMap<String, (EncryptedEntry, bool)> = HashMap::new();
+        let mut changed = false;
+
+        // Backward compatibility:
+        // - hydrate newer metadata fields when loading legacy vault files
+        // - normalize legacy kaizen aliases to canonical provider key
+        // - resolve alias collisions by newest RFC3339 last_updated
+        for (provider_key, mut entry) in entries {
+            let source_is_canonical = provider_key.eq_ignore_ascii_case(CANONICAL_VAULT_PROVIDER);
+
             if entry.provider.trim().is_empty() {
                 entry.provider = provider_key.clone();
+                changed = true;
             }
             if entry.key_id.trim().is_empty() {
                 entry.key_id = default_key_id();
+                changed = true;
             }
             if entry.created_at.trim().is_empty() {
                 entry.created_at = entry.last_updated.clone();
+                changed = true;
+            }
+
+            let canonical_key = canonical_provider(&provider_key);
+            if canonical_key != provider_key {
+                changed = true;
+            }
+
+            let canonical_entry_provider = canonical_provider(&entry.provider);
+            if canonical_entry_provider != entry.provider {
+                entry.provider = canonical_entry_provider;
+                changed = true;
+            }
+
+            if canonical_key == CANONICAL_VAULT_PROVIDER
+                && entry.provider != CANONICAL_VAULT_PROVIDER
+            {
+                entry.provider = CANONICAL_VAULT_PROVIDER.to_string();
+                changed = true;
+            }
+
+            match normalized_with_sources.get(&canonical_key) {
+                Some((existing, existing_source_is_canonical)) => {
+                    let incoming_newer = entry.last_updated > existing.last_updated;
+                    let same_time_but_prefer_incoming_canonical = entry.last_updated
+                        == existing.last_updated
+                        && source_is_canonical
+                        && !*existing_source_is_canonical;
+
+                    if incoming_newer || same_time_but_prefer_incoming_canonical {
+                        normalized_with_sources.insert(canonical_key, (entry, source_is_canonical));
+                    }
+                    changed = true;
+                }
+                None => {
+                    normalized_with_sources.insert(canonical_key, (entry, source_is_canonical));
+                }
             }
         }
 
-        Ok(entries)
+        for (provider, (entry, _)) in normalized_with_sources {
+            normalized.insert(provider, entry);
+        }
+
+        Ok((normalized, changed))
     } else {
-        Ok(HashMap::new())
+        Ok((HashMap::new(), false))
     }
 }
 
@@ -147,7 +212,10 @@ impl SecretVault {
             Aes256Gcm::new_from_slice(&key).map_err(|e| format!("Failed to create cipher: {e}"))?;
 
         let path = default_vault_path();
-        let entries = load_entries(&path)?;
+        let (entries, was_normalized) = load_entries(&path)?;
+        if was_normalized {
+            persist_entries(&path, &entries)?;
+        }
 
         Ok(Self {
             inner: Arc::new(RwLock::new(VaultInner {
@@ -219,7 +287,10 @@ impl SecretVault {
         let cipher =
             Aes256Gcm::new_from_slice(key).map_err(|e| format!("Failed to create cipher: {e}"))?;
 
-        let entries = load_entries(&path)?;
+        let (entries, was_normalized) = load_entries(&path)?;
+        if was_normalized {
+            persist_entries(&path, &entries)?;
+        }
 
         Ok(Self {
             inner: Arc::new(RwLock::new(VaultInner {
@@ -238,6 +309,7 @@ impl SecretVault {
         secret_type: &str,
     ) -> Result<SecretMetadata, String> {
         let mut inner = self.inner.write().await;
+        let provider_key = canonical_provider(provider);
 
         let mut nonce_bytes = [0u8; 12];
         OsRng.fill_bytes(&mut nonce_bytes);
@@ -257,13 +329,13 @@ impl SecretVault {
         let now = chrono::Utc::now().to_rfc3339();
 
         let entry = EncryptedEntry {
-            provider: provider.to_string(),
+            provider: provider_key.clone(),
             key_id: default_key_id(),
             ciphertext: B64.encode(&ciphertext),
             nonce: B64.encode(nonce_bytes),
             created_at: inner
                 .entries
-                .get(provider)
+                .get(&provider_key)
                 .map(|prev| prev.created_at.clone())
                 .filter(|v| !v.is_empty())
                 .unwrap_or_else(|| now.clone()),
@@ -272,16 +344,16 @@ impl SecretVault {
             secret_type: secret_type.to_string(),
         };
 
-        inner.entries.insert(provider.to_string(), entry);
+        inner.entries.insert(provider_key.clone(), entry);
         persist(&inner)?;
 
         Ok(SecretMetadata {
-            provider: provider.to_string(),
+            provider: provider_key.clone(),
             configured: true,
             key_id: default_key_id(),
             created_at: inner
                 .entries
-                .get(provider)
+                .get(&provider_key)
                 .map(|v| v.created_at.clone())
                 .filter(|v| !v.is_empty())
                 .unwrap_or_else(|| now.clone()),
@@ -294,9 +366,10 @@ impl SecretVault {
     /// Decrypt and return a secret in memory. Used internally only, never exposed via API.
     pub async fn decrypt(&self, provider: &str) -> Result<String, String> {
         let inner = self.inner.read().await;
+        let provider_key = canonical_provider(provider);
         let entry = inner
             .entries
-            .get(provider)
+            .get(&provider_key)
             .ok_or_else(|| format!("No secret stored for provider: {provider}"))?;
 
         let ciphertext = B64
@@ -324,7 +397,8 @@ impl SecretVault {
     /// Remove a stored secret and persist.
     pub async fn revoke(&self, provider: &str) -> Result<(), String> {
         let mut inner = self.inner.write().await;
-        inner.entries.remove(provider);
+        let provider_key = canonical_provider(provider);
+        inner.entries.remove(&provider_key);
         persist(&inner)?;
         Ok(())
     }
@@ -336,7 +410,7 @@ impl SecretVault {
             .entries
             .iter()
             .map(|(provider, entry)| SecretMetadata {
-                provider: provider.clone(),
+                provider: canonical_provider(provider),
                 configured: true,
                 key_id: if entry.key_id.is_empty() {
                     default_key_id()
@@ -358,24 +432,32 @@ impl SecretVault {
     /// Check if a provider has a stored secret.
     pub async fn has(&self, provider: &str) -> bool {
         let inner = self.inner.read().await;
-        inner.entries.contains_key(provider)
+        let provider_key = canonical_provider(provider);
+        inner.entries.contains_key(&provider_key)
     }
 }
 
 fn persist(inner: &VaultInner) -> Result<(), String> {
-    if let Some(parent) = inner.path.parent() {
+    persist_entries(&inner.path, &inner.entries)
+}
+
+fn persist_entries(
+    path: &PathBuf,
+    entries: &HashMap<String, EncryptedEntry>,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
         if !parent.exists() {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create vault directory: {e}"))?;
         }
     }
 
-    let json = serde_json::to_string_pretty(&inner.entries)
-        .map_err(|e| format!("Serialize error: {e}"))?;
+    let json =
+        serde_json::to_string_pretty(entries).map_err(|e| format!("Serialize error: {e}"))?;
 
-    let tmp_path = inner.path.with_extension("json.tmp");
+    let tmp_path = path.with_extension("json.tmp");
     fs::write(&tmp_path, &json).map_err(|e| format!("Failed to write vault tmp: {e}"))?;
-    fs::rename(&tmp_path, &inner.path).map_err(|e| format!("Failed to rename vault file: {e}"))?;
+    fs::rename(&tmp_path, path).map_err(|e| format!("Failed to rename vault file: {e}"))?;
 
     Ok(())
 }
@@ -492,6 +574,144 @@ mod tests {
         assert!(result.is_err());
 
         fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn test_kaizen_alias_parity_store_decrypt_has_revoke() {
+        let path = test_vault_path("kaizen-alias-parity");
+        let key = test_key();
+        let vault = SecretVault::new(&key, path.clone()).unwrap();
+
+        let meta = vault
+            .store("zeroclaw", "kz-alias-secret-ABCD", "api_key")
+            .await
+            .unwrap();
+        assert_eq!(meta.provider, "kaizen");
+
+        assert!(vault.has("kaizen").await);
+        assert!(vault.has("zeroclaw").await);
+        assert!(vault.has("kai-zen").await);
+
+        assert_eq!(
+            vault.decrypt("kaizen").await.unwrap(),
+            "kz-alias-secret-ABCD"
+        );
+        assert_eq!(
+            vault.decrypt("zeroclaw").await.unwrap(),
+            "kz-alias-secret-ABCD"
+        );
+        assert_eq!(
+            vault.decrypt("kai-zen").await.unwrap(),
+            "kz-alias-secret-ABCD"
+        );
+
+        let list = vault.list().await;
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].provider, "kaizen");
+
+        vault.revoke("kai-zen").await.unwrap();
+        assert!(!vault.has("kaizen").await);
+        assert!(vault.decrypt("zeroclaw").await.is_err());
+
+        fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn test_migrates_legacy_alias_key_to_canonical_on_load() {
+        let path = test_vault_path("legacy-migration");
+        let key = test_key();
+
+        {
+            let vault = SecretVault::new(&key, path.clone()).unwrap();
+            vault
+                .store("kaizen", "kz-migrate-secret-1234", "api_key")
+                .await
+                .unwrap();
+        }
+
+        let mut raw_entries: HashMap<String, EncryptedEntry> =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let mut canonical_entry = raw_entries.remove("kaizen").unwrap();
+        canonical_entry.provider = "zeroclaw".to_string();
+        raw_entries.insert("zeroclaw".to_string(), canonical_entry);
+        fs::write(&path, serde_json::to_string_pretty(&raw_entries).unwrap()).unwrap();
+
+        let vault = SecretVault::new(&key, path.clone()).unwrap();
+        assert!(vault.has("kaizen").await);
+        assert_eq!(
+            vault.decrypt("kai-zen").await.unwrap(),
+            "kz-migrate-secret-1234"
+        );
+
+        let list = vault.list().await;
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].provider, "kaizen");
+
+        let persisted: HashMap<String, EncryptedEntry> =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(persisted.contains_key("kaizen"));
+        assert!(!persisted.contains_key("zeroclaw"));
+
+        fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn test_migration_collision_keeps_newest_last_updated() {
+        let path = test_vault_path("legacy-collision");
+        let source_old_path = test_vault_path("legacy-collision-old-src");
+        let source_new_path = test_vault_path("legacy-collision-new-src");
+        let key = test_key();
+
+        {
+            let vault = SecretVault::new(&key, source_old_path.clone()).unwrap();
+            vault
+                .store("kaizen", "kz-old-secret-1111", "api_key")
+                .await
+                .unwrap();
+        }
+        {
+            let vault = SecretVault::new(&key, source_new_path.clone()).unwrap();
+            vault
+                .store("kaizen", "kz-new-secret-2222", "api_key")
+                .await
+                .unwrap();
+        }
+
+        let mut old_entries: HashMap<String, EncryptedEntry> =
+            serde_json::from_str(&fs::read_to_string(&source_old_path).unwrap()).unwrap();
+        let mut new_entries: HashMap<String, EncryptedEntry> =
+            serde_json::from_str(&fs::read_to_string(&source_new_path).unwrap()).unwrap();
+
+        let mut canonical_old = old_entries.remove("kaizen").unwrap();
+        canonical_old.last_updated = "2026-01-01T00:00:00Z".to_string();
+        canonical_old.created_at = "2026-01-01T00:00:00Z".to_string();
+
+        let mut legacy_new = new_entries.remove("kaizen").unwrap();
+        legacy_new.provider = "zeroclaw".to_string();
+        legacy_new.last_updated = "2026-01-02T00:00:00Z".to_string();
+        legacy_new.created_at = "2026-01-02T00:00:00Z".to_string();
+
+        let mut collision_entries = HashMap::new();
+        collision_entries.insert("kaizen".to_string(), canonical_old);
+        collision_entries.insert("zeroclaw".to_string(), legacy_new);
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&collision_entries).unwrap(),
+        )
+        .unwrap();
+
+        let vault = SecretVault::new(&key, path.clone()).unwrap();
+        assert_eq!(vault.decrypt("kaizen").await.unwrap(), "kz-new-secret-2222");
+
+        let persisted: HashMap<String, EncryptedEntry> =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert!(persisted.contains_key("kaizen"));
+        assert!(!persisted.contains_key("zeroclaw"));
+
+        fs::remove_file(&path).ok();
+        fs::remove_file(&source_old_path).ok();
+        fs::remove_file(&source_new_path).ok();
     }
 
     #[tokio::test]

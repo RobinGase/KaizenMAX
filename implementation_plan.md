@@ -13,7 +13,7 @@
 - The UI is now in active redesign to match the user vision and prioritize agent workflow speed.
 
 ## 3) Product Goal
-Build a Windows-first developer cockpit that integrates ZeroClaw core with a high-velocity multi-agent workspace so the team can:
+Build a Windows-first developer cockpit that integrates Kaizen core with a high-velocity multi-agent workspace so the team can:
 - Talk mainly to **Kaizen**.
 - Spawn and operate sub-agents quickly.
 - Manage many agent chats without losing context.
@@ -51,7 +51,7 @@ Build a Windows-first developer cockpit that integrates ZeroClaw core with a hig
 ## 6) Repository Layout
 ```text
 KaizenMAX/
-  core/                  # ZeroClaw runtime/gateway (Rust)
+  core/                  # Kaizen runtime/gateway (Rust)
   ui-dioxus/             # Active desktop frontend (Dioxus)
   ui/                    # Legacy frontend assets
   protocol/              # Nex_Alignment fork and MCP assets

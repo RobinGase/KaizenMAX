@@ -6,9 +6,9 @@
   "properties": {
     "runtime_engine": {
       "type": "string",
-      "enum": ["zeroclaw", "openclaw_compat"],
-      "default": "zeroclaw",
-      "description": "Active runtime engine. ZeroClaw is the Rust-native default."
+      "enum": ["kaizen", "zeroclaw", "openclaw_compat"],
+      "default": "kaizen",
+      "description": "Active runtime engine. Kaizen is the Rust-native default. 'zeroclaw' is kept as a legacy alias."
     },
     "openclaw_compat_enabled": {
       "type": "boolean",
@@ -87,11 +87,6 @@
       "type": "boolean",
       "default": true,
       "description": "Show credential management section in settings UI."
-    },
-    "oauth_ui_enabled": {
-      "type": "boolean",
-      "default": true,
-      "description": "Show OAuth connect/disconnect controls in settings UI."
     },
     "agent_name_editable_after_spawn": {
       "type": "boolean",

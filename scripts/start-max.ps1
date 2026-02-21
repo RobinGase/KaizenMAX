@@ -3,7 +3,7 @@
     Start Kaizen MAX pipeline.
 
 .DESCRIPTION
-    Starts ZeroClaw core and Rust UI processes under a Windows Job Object.
+    Starts Kaizen core and Rust UI processes under a Windows Job Object.
     If one process exits, the remaining processes are stopped.
     If the terminal closes, the Job Object ensures child processes are terminated.
     Use -InitEnv to create .env from .env.example when .env is missing.
@@ -264,7 +264,7 @@ function Stop-StaleKaizenProcesses {
         $name = if ($null -eq $PSItem.Name) { "" } else { $PSItem.Name.ToLowerInvariant() }
         $cmd = if ($null -eq $PSItem.CommandLine) { "" } else { $PSItem.CommandLine.ToLowerInvariant() }
 
-        if ($name -eq "ui-dioxus.exe" -or $name -eq "zeroclaw-gateway.exe") {
+        if ($name -eq "ui-dioxus.exe" -or $name -eq "kaizen-gateway.exe" -or $name -eq "zeroclaw-gateway.exe") {
             return $true
         }
 
@@ -313,7 +313,11 @@ function Write-UiCrashReport {
         Where-Object {
             ($PSItem.Id -eq 1000 -or $PSItem.Id -eq 1001) -and
             $null -ne $PSItem.Message -and
-            ($PSItem.Message -like "*ui-dioxus.exe*" -or $PSItem.Message -like "*zeroclaw-gateway.exe*")
+            (
+                $PSItem.Message -like "*ui-dioxus.exe*" -or
+                $PSItem.Message -like "*kaizen-gateway.exe*" -or
+                $PSItem.Message -like "*zeroclaw-gateway.exe*"
+            )
         } |
         Select-Object -First 3
 
@@ -349,16 +353,19 @@ $exitCode = 0
 
 try {
     if (-not $UIOnly) {
-        $coreExe = Join-Path $coreDir "target\release\zeroclaw-gateway.exe"
+        $coreExe = Join-Path $coreDir "target\release\kaizen-gateway.exe"
+        if (-not (Test-Path $coreExe)) {
+            $coreExe = Join-Path $coreDir "target\release\zeroclaw-gateway.exe"
+        }
         if (Test-Path $coreExe) {
-            $coreProcess = Start-ExecutableProcess -Name "ZeroClaw Core" -ExecutablePath $coreExe -WorkingDirectory $coreDir -JobHandle $jobHandle -NoNewWindow
+            $coreProcess = Start-ExecutableProcess -Name "Kaizen Core" -ExecutablePath $coreExe -WorkingDirectory $coreDir -JobHandle $jobHandle -NoNewWindow
         } else {
             Write-Host "[Kaizen MAX] Release core binary not found. Using cargo run." -ForegroundColor Yellow
-            $coreProcess = Start-CommandProcess -Name "ZeroClaw Core" -WorkingDirectory $coreDir -Command "cargo run" -JobHandle $jobHandle
+            $coreProcess = Start-CommandProcess -Name "Kaizen Core" -WorkingDirectory $coreDir -Command "cargo run" -JobHandle $jobHandle
         }
 
         $started.Add([PSCustomObject]@{
-            Name = "ZeroClaw Core"
+            Name = "Kaizen Core"
             Process = $coreProcess
         })
     }

@@ -239,6 +239,7 @@ finally {
     }
 
     Start-Sleep -Milliseconds 300
+    Get-Process kaizen-gateway -ErrorAction SilentlyContinue | Stop-Process -Force
     Get-Process zeroclaw-gateway -ErrorAction SilentlyContinue | Stop-Process -Force
     Get-Process ui-dioxus -ErrorAction SilentlyContinue | Stop-Process -Force
 }

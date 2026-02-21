@@ -3,7 +3,7 @@ policy_id: kaizen_max_agent_control
 
 defaults:
   main_agent_name: Kaizen
-  runtime_engine: zeroclaw
+  runtime_engine: kaizen
   openclaw_compat_enabled: false
   auto_spawn_subagents: false
   max_subagents: 5
