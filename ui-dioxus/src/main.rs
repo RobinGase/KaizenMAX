@@ -311,6 +311,7 @@ struct KaizenSettings {
     require_human_smoke_test_before_deploy: bool,
     provider_inference_only: bool,
     credentials_ui_enabled: bool,
+    #[serde(default)]
     oauth_ui_enabled: bool,
     agent_name_editable_after_spawn: bool,
     show_only_masked_secrets_in_ui: bool,
@@ -1683,7 +1684,8 @@ fn App() -> Element {
                                                 }
                                             }
 
-                                            div { class: "setting-row oauth-row",
+                                            if cfg.oauth_ui_enabled {
+                                                div { class: "setting-row oauth-row",
                                                 strong { "Google OAuth (WebKeys)" }
                                                 if let Some(status) = google_oauth_snap.clone() {
                                                     p { class: "sb-hint", {format!("Connected accounts: {}", status.account_count)} }
@@ -1810,6 +1812,7 @@ fn App() -> Element {
                                                             }
                                                         }
                                                     }
+                                                }
                                                 }
                                             }
                                         },
@@ -1958,8 +1961,9 @@ fn App() -> Element {
                                                 }
                                             }
 
-                                            for (provider, label) in OAUTH_PROVIDERS.iter() {
-                                                div { class: "setting-row oauth-row",
+                                            if cfg.oauth_ui_enabled {
+                                                for (provider, label) in OAUTH_PROVIDERS.iter() {
+                                                    div { class: "setting-row oauth-row",
                                                     strong { "{label}" }
                                                     if let Some(status) = oauth_snap.get(*provider) {
                                                         p { class: "sb-hint", "{status.message}" }
@@ -2039,6 +2043,7 @@ fn App() -> Element {
                                                             },
                                                             "Disconnect"
                                                         }
+                                                    }
                                                     }
                                                 }
                                             }
@@ -2436,24 +2441,6 @@ fn App() -> Element {
                                                             let current_draft = settings_draft_sig.read().clone();
                                                             if let Some(mut draft) = current_draft {
                                                                 draft.credentials_ui_enabled = parse_bool(&e.value());
-                                                                settings_draft_sig.set(Some(draft));
-                                                            }
-                                                        }
-                                                    },
-                                                    option { value: "true", "Enabled" }
-                                                    option { value: "false", "Disabled" }
-                                                }
-
-                                                label { "OAuth UI Enabled" }
-                                                select {
-                                                    class: "s-input",
-                                                    value: "{bool_to_str(cfg.oauth_ui_enabled)}",
-                                                    onchange: {
-                                                        let mut settings_draft_sig = settings_draft;
-                                                        move |e: Event<FormData>| {
-                                                            let current_draft = settings_draft_sig.read().clone();
-                                                            if let Some(mut draft) = current_draft {
-                                                                draft.oauth_ui_enabled = parse_bool(&e.value());
                                                                 settings_draft_sig.set(Some(draft));
                                                             }
                                                         }
@@ -4517,7 +4504,7 @@ fn settings_to_patch(cfg: &KaizenSettings) -> SettingsPatchRequest {
         require_human_smoke_test_before_deploy: Some(cfg.require_human_smoke_test_before_deploy),
         provider_inference_only: Some(cfg.provider_inference_only),
         credentials_ui_enabled: Some(cfg.credentials_ui_enabled),
-        oauth_ui_enabled: Some(cfg.oauth_ui_enabled),
+        oauth_ui_enabled: None,
         agent_name_editable_after_spawn: Some(cfg.agent_name_editable_after_spawn),
         show_only_masked_secrets_in_ui: Some(cfg.show_only_masked_secrets_in_ui),
         mattermost_url: Some(cfg.mattermost_url.clone()),
@@ -4545,7 +4532,7 @@ async fn refresh_settings_bundle(
     settings_current_sig.set(Some(settings.clone()));
     let should_initialize_draft = settings_draft_sig.read().is_none();
     if should_initialize_draft {
-        settings_draft_sig.set(Some(settings));
+        settings_draft_sig.set(Some(settings.clone()));
     }
 
     match fetch_vault_status_api(t).await {
@@ -4576,17 +4563,22 @@ async fn refresh_settings_bundle(
         Err(_) => gh_repos_sig.set(Vec::new()),
     }
 
-    let mut oauth_map = HashMap::new();
-    for (provider, _) in OAUTH_PROVIDERS.iter() {
-        if let Ok(status) = fetch_oauth_status_api(provider, t).await {
-            oauth_map.insert(status.provider.clone(), status);
+    if settings.oauth_ui_enabled {
+        let mut oauth_map = HashMap::new();
+        for (provider, _) in OAUTH_PROVIDERS.iter() {
+            if let Ok(status) = fetch_oauth_status_api(provider, t).await {
+                oauth_map.insert(status.provider.clone(), status);
+            }
         }
-    }
-    oauth_sig.set(oauth_map);
+        oauth_sig.set(oauth_map);
 
-    match fetch_google_oauth_status_api(t).await {
-        Ok(status) => google_oauth_sig.set(Some(status)),
-        Err(_) => google_oauth_sig.set(None),
+        match fetch_google_oauth_status_api(t).await {
+            Ok(status) => google_oauth_sig.set(Some(status)),
+            Err(_) => google_oauth_sig.set(None),
+        }
+    } else {
+        oauth_sig.set(HashMap::new());
+        google_oauth_sig.set(None);
     }
 
     Ok(())
