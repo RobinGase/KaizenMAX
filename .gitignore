@@ -14,6 +14,7 @@ core/target/
 ui-rs/target/
 ui-dioxus/target/
 ui-tauri-solid/src-tauri/target/
+ui-rust-native/target/
 **/*.rs.bk
 
 # ----- Node / UI -----
@@ -62,3 +63,8 @@ core/smoke_*.json
 core/v1_no_bearer_body.json
 core/profiles/
 nul
+
+# ----- Scratch / tool config -----
+AGENT_OPERATIONS.md
+opencode.json
+write_app.py

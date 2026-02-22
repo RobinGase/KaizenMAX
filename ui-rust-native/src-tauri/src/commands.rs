@@ -75,7 +75,7 @@ pub async fn core_request(
     Ok(CoreResponseOutput { status, body })
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn open_agent_window(app: AppHandle, agent_id: String) -> Result<(), String> {
     let label = format!("agent-{}", agent_id);
     
@@ -87,7 +87,7 @@ pub async fn open_agent_window(app: AppHandle, agent_id: String) -> Result<(), S
     WindowBuilder::new(
         &app,
         label,
-        WebviewUrl::App(format!("/#/chat/{}", agent_id).into()),
+        WebviewUrl::App(format!("/chat/{}", agent_id).into()),
     )
     .title(format!("Agent {}", agent_id))
     .inner_size(800.0, 600.0)
@@ -97,7 +97,7 @@ pub async fn open_agent_window(app: AppHandle, agent_id: String) -> Result<(), S
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn focus_agent_window(app: AppHandle, agent_id: String) -> Result<(), String> {
     let label = format!("agent-{}", agent_id);
     if let Some(window) = app.get_webview_window(&label) {
@@ -106,7 +106,7 @@ pub async fn focus_agent_window(app: AppHandle, agent_id: String) -> Result<(), 
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn close_agent_window(app: AppHandle, agent_id: String) -> Result<(), String> {
     let label = format!("agent-{}", agent_id);
     if let Some(window) = app.get_webview_window(&label) {

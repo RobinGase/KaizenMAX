@@ -269,7 +269,8 @@ function Stop-StaleKaizenProcesses {
             $name -eq "kaizen-gateway.exe" -or
             $name -eq "zeroclaw-gateway.exe" -or
             $name -eq "kaizen max mission control.exe" -or
-            $name -eq "kaizen_max_mission_control.exe"
+            $name -eq "kaizen_max_mission_control.exe" -or
+            $name -eq "kaizen_mission_control.exe"
         ) {
             return $true
         }
@@ -279,7 +280,11 @@ function Stop-StaleKaizenProcesses {
         }
 
         if ($name -eq "cargo.exe") {
-            return ($cmd -like "*$repoRootLower*\\core*") -or ($cmd -like "*$repoRootLower*\\ui-dioxus*")
+            return ($cmd -like "*$repoRootLower*\\core*") -or ($cmd -like "*$repoRootLower*\\ui-rust-native*")
+        }
+
+        if ($name -eq "trunk.exe") {
+            return ($cmd -like "*$repoRootLower*\\ui-rust-native*")
         }
 
         return $false
@@ -382,6 +387,7 @@ try {
 
     if (-not $CoreOnly) {
         $uiExeCandidates = @(
+            (Join-Path $uiDir "target\release\kaizen_mission_control.exe"),
             (Join-Path $uiDir "src-tauri\target\release\kaizen_mission_control.exe")
         )
 

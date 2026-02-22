@@ -8,7 +8,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 leptos = { version = "0.6", features = ["csr"] }
-leptos_router = { version = "0.6" }
+leptos_router = { version = "0.6", features = ["csr"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
 gloo-net = { version = "0.5" }
@@ -16,3 +16,6 @@ wasm-bindgen = { version = "0.2" }
 wasm-bindgen-futures = { version = "0.4" }
 web-sys = { version = "0.3", features = ["Window", "Storage", "Document"] }
 uuid = { version = "1", features = ["v4", "js"] }
+serde-wasm-bindgen = "0.6"
+js-sys = "0.3"
+console_error_panic_hook = "0.1"

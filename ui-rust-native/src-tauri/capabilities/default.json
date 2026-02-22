@@ -1,6 +1,10 @@
 {
   "identifier": "default",
-  "description": "Default permissions",
-  "windows": ["main"],
-  "permissions": ["core:default"]
+  "description": "Default permissions for all application windows",
+  "windows": ["main", "agent-*"],
+  "permissions": [
+    "core:default",
+    "core:window:default",
+    "core:webview:default"
+  ]
 }
