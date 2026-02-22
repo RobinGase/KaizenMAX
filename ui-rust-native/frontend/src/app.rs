@@ -59,6 +59,10 @@ fn bool_patch(field: &str, value: bool) -> Value {
     Value::Object(map)
 }
 
+fn normalize_provider(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
+
 async fn detach_agent(agent_id: String) {
     let args = json!({ "agent_id": agent_id });
     if let Ok(js_args) = serde_wasm_bindgen::to_value(&args) {
@@ -268,6 +272,7 @@ fn MissionTabView(app_state: AppState) -> impl IntoView {
     let (messages, set_messages) = create_signal(Vec::<InferenceChatMessage>::new());
     let (input, set_input) = create_signal(String::new());
     let (is_sending, set_is_sending) = create_signal(false);
+    let (chat_notice, set_chat_notice) = create_signal(String::new());
 
     let chat_log_ref = create_node_ref::<html::Div>();
     let telemetry_log_ref = create_node_ref::<html::Div>();
@@ -336,13 +341,17 @@ fn MissionTabView(app_state: AppState) -> impl IntoView {
             let app_state = app_state.clone();
             let refresh_main_history = Rc::clone(&refresh_main_history);
             wasm_bindgen_futures::spawn_local(async move {
-                let _ = core_request::<ChatResponse>(CoreRequestInput {
+                match core_request::<ChatResponse>(CoreRequestInput {
                     method: "POST".to_string(),
                     path: "/api/chat".to_string(),
                     body: Some(json!({ "message": text })),
                     admin_token: None,
                 })
-                .await;
+                .await
+                {
+                    Ok(_) => set_chat_notice.set(String::new()),
+                    Err(err) => set_chat_notice.set(format!("Chat request failed: {}", err)),
+                }
 
                 (refresh_main_history)();
                 let _ = app_state.refresh_events().await;
@@ -425,6 +434,14 @@ fn MissionTabView(app_state: AppState) -> impl IntoView {
                             {move || if is_sending.get() { "Sending..." } else { "Send" }}
                         </button>
                     </div>
+
+                    {move || {
+                        if chat_notice.get().is_empty() {
+                            ().into_view()
+                        } else {
+                            view! { <div class="notice error">{chat_notice.get()}</div> }.into_view()
+                        }
+                    }}
                 </div>
 
                 <section class="telemetry-panel">
@@ -1069,14 +1086,25 @@ fn WorkspaceTabView(app_state: AppState) -> impl IntoView {
                                 children=move |agent| {
                                     let status = status_class(&agent.status).to_string();
 
+                                    let can_activate = matches!(
+                                        agent.status,
+                                        AgentStatus::Idle
+                                            | AgentStatus::Blocked
+                                            | AgentStatus::ReviewPending
+                                    );
+                                    let can_review = matches!(agent.status, AgentStatus::Active);
+                                    let can_done = matches!(agent.status, AgentStatus::ReviewPending);
+
                                     let id_activate = agent.id.clone();
                                     let id_review = agent.id.clone();
+                                    let id_done = agent.id.clone();
                                     let id_stop = agent.id.clone();
                                     let id_clear = agent.id.clone();
                                     let id_remove = agent.id.clone();
 
                                     let run_request_activate = Rc::clone(&run_request);
                                     let run_request_review = Rc::clone(&run_request);
+                                    let run_request_done = Rc::clone(&run_request);
                                     let run_request_stop = Rc::clone(&run_request);
                                     let run_request_clear = Rc::clone(&run_request);
                                     let run_request_remove = Rc::clone(&run_request);
@@ -1094,6 +1122,7 @@ fn WorkspaceTabView(app_state: AppState) -> impl IntoView {
                                             <div class="control-actions">
                                                 <button
                                                     class="tiny-btn"
+                                                    prop:disabled=move || workspace_busy.get() || !can_activate
                                                     on:click=move |_| {
                                                         (run_request_activate)(
                                                             "PATCH".to_string(),
@@ -1107,6 +1136,7 @@ fn WorkspaceTabView(app_state: AppState) -> impl IntoView {
 
                                                 <button
                                                     class="tiny-btn"
+                                                    prop:disabled=move || workspace_busy.get() || !can_review
                                                     on:click=move |_| {
                                                         (run_request_review)(
                                                             "PATCH".to_string(),
@@ -1116,6 +1146,23 @@ fn WorkspaceTabView(app_state: AppState) -> impl IntoView {
                                                     }
                                                 >
                                                     "Review"
+                                                </button>
+
+                                                <button
+                                                    class="tiny-btn"
+                                                    prop:disabled=move || workspace_busy.get() || !can_done
+                                                    on:click=move |_| {
+                                                        (run_request_done)(
+                                                            "PATCH".to_string(),
+                                                            format!("/api/agents/{}/status", id_done),
+                                                            Some(json!({
+                                                                "status": "done",
+                                                                "kaizen_review_approved": true,
+                                                            })),
+                                                        );
+                                                    }
+                                                >
+                                                    "Done"
                                                 </button>
 
                                                 <button
@@ -1178,7 +1225,13 @@ fn IntegrationsTabView(app_state: AppState) -> impl IntoView {
     let (secrets, set_secrets) = create_signal(Vec::<SecretMetadata>::new());
     let (oauth_statuses, set_oauth_statuses) = create_signal(Vec::<OAuthStatusResponse>::new());
     let (integration_error, set_integration_error) = create_signal(String::new());
+    let (integration_notice, set_integration_notice) = create_signal(String::new());
     let (integration_busy, set_integration_busy) = create_signal(false);
+
+    let (secret_provider, set_secret_provider) = create_signal("openai".to_string());
+    let (secret_type, set_secret_type) = create_signal("api_key".to_string());
+    let (secret_value, set_secret_value) = create_signal(String::new());
+    let (oauth_provider, set_oauth_provider) = create_signal("openai".to_string());
 
     let refresh_integrations: Rc<dyn Fn()> = Rc::new({
         let app_state = app_state.clone();
@@ -1262,6 +1315,272 @@ fn IntegrationsTabView(app_state: AppState) -> impl IntoView {
         }
     });
 
+    let save_secret: Rc<dyn Fn()> = Rc::new({
+        let app_state = app_state.clone();
+        let refresh_integrations = Rc::clone(&refresh_integrations);
+        move || {
+            if integration_busy.get() {
+                return;
+            }
+
+            let provider = normalize_provider(&secret_provider.get());
+            let secret_kind = secret_type.get().trim().to_string();
+            let value = secret_value.get().trim().to_string();
+
+            if provider.is_empty() || value.is_empty() {
+                set_integration_error
+                    .set("Provider and secret value are required before saving.".to_string());
+                return;
+            }
+
+            set_integration_busy.set(true);
+            let app_state = app_state.clone();
+            let refresh_integrations = Rc::clone(&refresh_integrations);
+            wasm_bindgen_futures::spawn_local(async move {
+                match core_request::<SecretMetadata>(CoreRequestInput {
+                    method: "PUT".to_string(),
+                    path: format!("/api/secrets/{}", provider),
+                    body: Some(json!({
+                        "value": value,
+                        "secret_type": secret_kind,
+                    })),
+                    admin_token: app_state.admin_token_opt(),
+                })
+                .await
+                {
+                    Ok(meta) => {
+                        set_secret_value.set(String::new());
+                        set_integration_error.set(String::new());
+                        set_integration_notice
+                            .set(format!("Stored {} credential for {}.", meta.secret_type, meta.provider));
+                    }
+                    Err(err) => {
+                        set_integration_notice.set(String::new());
+                        set_integration_error.set(format!("Store secret failed: {}", err));
+                    }
+                }
+                set_integration_busy.set(false);
+                (refresh_integrations)();
+            });
+        }
+    });
+
+    let test_secret: Rc<dyn Fn()> = Rc::new({
+        let app_state = app_state.clone();
+        let refresh_integrations = Rc::clone(&refresh_integrations);
+        move || {
+            if integration_busy.get() {
+                return;
+            }
+
+            let provider = normalize_provider(&secret_provider.get());
+            if provider.is_empty() {
+                set_integration_error.set("Provider is required before testing.".to_string());
+                return;
+            }
+
+            set_integration_busy.set(true);
+            let app_state = app_state.clone();
+            let refresh_integrations = Rc::clone(&refresh_integrations);
+            wasm_bindgen_futures::spawn_local(async move {
+                match core_request::<SecretTestResponse>(CoreRequestInput {
+                    method: "POST".to_string(),
+                    path: format!("/api/secrets/{}/test", provider),
+                    body: None,
+                    admin_token: app_state.admin_token_opt(),
+                })
+                .await
+                {
+                    Ok(result) => {
+                        if result.test_passed {
+                            set_integration_error.set(String::new());
+                            set_integration_notice
+                                .set(format!("Credential test passed for {}.", result.provider));
+                        } else {
+                            set_integration_notice.set(String::new());
+                            set_integration_error.set(format!(
+                                "Credential test failed for {}: {}",
+                                result.provider,
+                                result.error.unwrap_or_else(|| "unknown error".to_string())
+                            ));
+                        }
+                    }
+                    Err(err) => {
+                        set_integration_notice.set(String::new());
+                        set_integration_error.set(format!("Test secret failed: {}", err));
+                    }
+                }
+                set_integration_busy.set(false);
+                (refresh_integrations)();
+            });
+        }
+    });
+
+    let revoke_secret: Rc<dyn Fn()> = Rc::new({
+        let app_state = app_state.clone();
+        let refresh_integrations = Rc::clone(&refresh_integrations);
+        move || {
+            if integration_busy.get() {
+                return;
+            }
+
+            let provider = normalize_provider(&secret_provider.get());
+            if provider.is_empty() {
+                set_integration_error.set("Provider is required before revoking.".to_string());
+                return;
+            }
+
+            set_integration_busy.set(true);
+            let app_state = app_state.clone();
+            let refresh_integrations = Rc::clone(&refresh_integrations);
+            wasm_bindgen_futures::spawn_local(async move {
+                match core_request::<Value>(CoreRequestInput {
+                    method: "DELETE".to_string(),
+                    path: format!("/api/secrets/{}", provider),
+                    body: None,
+                    admin_token: app_state.admin_token_opt(),
+                })
+                .await
+                {
+                    Ok(_) => {
+                        set_integration_error.set(String::new());
+                        set_integration_notice.set("Credential revoked.".to_string());
+                    }
+                    Err(err) => {
+                        set_integration_notice.set(String::new());
+                        set_integration_error.set(format!("Revoke secret failed: {}", err));
+                    }
+                }
+                set_integration_busy.set(false);
+                (refresh_integrations)();
+            });
+        }
+    });
+
+    let start_oauth: Rc<dyn Fn()> = Rc::new({
+        let app_state = app_state.clone();
+        move || {
+            if integration_busy.get() {
+                return;
+            }
+
+            let provider = normalize_provider(&oauth_provider.get());
+            if provider.is_empty() {
+                set_integration_error.set("OAuth provider is required.".to_string());
+                return;
+            }
+
+            set_integration_busy.set(true);
+            let app_state = app_state.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                match core_request::<OAuthStartResponse>(CoreRequestInput {
+                    method: "GET".to_string(),
+                    path: format!("/api/oauth/{}/start", provider),
+                    body: None,
+                    admin_token: app_state.admin_token_opt(),
+                })
+                .await
+                {
+                    Ok(response) => {
+                        if let Some(window) = web_sys::window() {
+                            let _ = window.open_with_url(&response.redirect_url);
+                        }
+                        set_integration_error.set(String::new());
+                        set_integration_notice
+                            .set(format!("Opened OAuth flow for {}.", response.provider));
+                    }
+                    Err(err) => {
+                        set_integration_notice.set(String::new());
+                        set_integration_error.set(format!("OAuth start failed: {}", err));
+                    }
+                }
+                set_integration_busy.set(false);
+            });
+        }
+    });
+
+    let refresh_oauth_token: Rc<dyn Fn()> = Rc::new({
+        let app_state = app_state.clone();
+        let refresh_integrations = Rc::clone(&refresh_integrations);
+        move || {
+            if integration_busy.get() {
+                return;
+            }
+
+            let provider = normalize_provider(&oauth_provider.get());
+            if provider.is_empty() {
+                set_integration_error.set("OAuth provider is required.".to_string());
+                return;
+            }
+
+            set_integration_busy.set(true);
+            let app_state = app_state.clone();
+            let refresh_integrations = Rc::clone(&refresh_integrations);
+            wasm_bindgen_futures::spawn_local(async move {
+                match core_request::<Value>(CoreRequestInput {
+                    method: "POST".to_string(),
+                    path: format!("/api/oauth/{}/refresh", provider),
+                    body: None,
+                    admin_token: app_state.admin_token_opt(),
+                })
+                .await
+                {
+                    Ok(_) => {
+                        set_integration_error.set(String::new());
+                        set_integration_notice.set("OAuth token refreshed.".to_string());
+                    }
+                    Err(err) => {
+                        set_integration_notice.set(String::new());
+                        set_integration_error.set(format!("OAuth refresh failed: {}", err));
+                    }
+                }
+                set_integration_busy.set(false);
+                (refresh_integrations)();
+            });
+        }
+    });
+
+    let disconnect_oauth: Rc<dyn Fn()> = Rc::new({
+        let app_state = app_state.clone();
+        let refresh_integrations = Rc::clone(&refresh_integrations);
+        move || {
+            if integration_busy.get() {
+                return;
+            }
+
+            let provider = normalize_provider(&oauth_provider.get());
+            if provider.is_empty() {
+                set_integration_error.set("OAuth provider is required.".to_string());
+                return;
+            }
+
+            set_integration_busy.set(true);
+            let app_state = app_state.clone();
+            let refresh_integrations = Rc::clone(&refresh_integrations);
+            wasm_bindgen_futures::spawn_local(async move {
+                match core_request::<Value>(CoreRequestInput {
+                    method: "DELETE".to_string(),
+                    path: format!("/api/oauth/{}", provider),
+                    body: None,
+                    admin_token: app_state.admin_token_opt(),
+                })
+                .await
+                {
+                    Ok(_) => {
+                        set_integration_error.set(String::new());
+                        set_integration_notice.set("OAuth tokens disconnected.".to_string());
+                    }
+                    Err(err) => {
+                        set_integration_notice.set(String::new());
+                        set_integration_error.set(format!("OAuth disconnect failed: {}", err));
+                    }
+                }
+                set_integration_busy.set(false);
+                (refresh_integrations)();
+            });
+        }
+    });
+
     {
         let refresh_integrations = Rc::clone(&refresh_integrations);
         create_effect(move |_| {
@@ -1292,6 +1611,14 @@ fn IntegrationsTabView(app_state: AppState) -> impl IntoView {
                     {move || if integration_busy.get() { "Refreshing..." } else { "Refresh Integrations" }}
                 </button>
             </div>
+
+            {move || {
+                if integration_notice.get().is_empty() {
+                    ().into_view()
+                } else {
+                    view! { <div class="notice neutral">{integration_notice.get()}</div> }.into_view()
+                }
+            }}
 
             {move || {
                 if integration_error.get().is_empty() {
@@ -1363,6 +1690,88 @@ fn IntegrationsTabView(app_state: AppState) -> impl IntoView {
                                 .into_view()
                         }
                     }}
+                </article>
+            </div>
+
+            <div class="card-grid two-col">
+                <article class="card">
+                    <h3>"Credential Actions"</h3>
+                    <div class="form-grid">
+                        <label>
+                            <span>"Provider"</span>
+                            <input
+                                class="text-input"
+                                type="text"
+                                prop:value=move || secret_provider.get()
+                                on:input=move |ev| set_secret_provider.set(event_target_value(&ev))
+                            />
+                        </label>
+                        <label>
+                            <span>"Secret Type"</span>
+                            <select
+                                class="select-input"
+                                prop:value=move || secret_type.get()
+                                on:change=move |ev| set_secret_type.set(event_target_value(&ev))
+                            >
+                                <option value="api_key">"api_key"</option>
+                                <option value="oauth_access">"oauth_access"</option>
+                                <option value="oauth_refresh">"oauth_refresh"</option>
+                                <option value="oauth_client_secret">"oauth_client_secret"</option>
+                            </select>
+                        </label>
+                        <label>
+                            <span>"Secret Value"</span>
+                            <input
+                                class="text-input"
+                                type="password"
+                                prop:value=move || secret_value.get()
+                                on:input=move |ev| set_secret_value.set(event_target_value(&ev))
+                            />
+                        </label>
+                    </div>
+
+                    <div class="toolbar-inline" style="margin-top: 10px;">
+                        <button class="action-btn" prop:disabled=move || integration_busy.get() on:click=move |_| (save_secret)()>
+                            {move || if integration_busy.get() { "Working..." } else { "Store Secret" }}
+                        </button>
+                        <button class="action-btn" prop:disabled=move || integration_busy.get() on:click=move |_| (test_secret)()>
+                            "Test Secret"
+                        </button>
+                        <button class="action-btn danger" prop:disabled=move || integration_busy.get() on:click=move |_| (revoke_secret)()>
+                            "Revoke Secret"
+                        </button>
+                    </div>
+                </article>
+
+                <article class="card">
+                    <h3>"OAuth Actions"</h3>
+                    <div class="form-grid single-col">
+                        <label>
+                            <span>"Provider"</span>
+                            <select
+                                class="select-input"
+                                prop:value=move || oauth_provider.get()
+                                on:change=move |ev| set_oauth_provider.set(event_target_value(&ev))
+                            >
+                                <option value="openai">"openai"</option>
+                                <option value="anthropic">"anthropic"</option>
+                                <option value="gemini">"gemini"</option>
+                                <option value="nvidia">"nvidia"</option>
+                            </select>
+                        </label>
+                    </div>
+
+                    <div class="toolbar-inline" style="margin-top: 10px;">
+                        <button class="action-btn" prop:disabled=move || integration_busy.get() on:click=move |_| (start_oauth)()>
+                            "Start OAuth"
+                        </button>
+                        <button class="action-btn" prop:disabled=move || integration_busy.get() on:click=move |_| (refresh_oauth_token)()>
+                            "Refresh OAuth"
+                        </button>
+                        <button class="action-btn danger" prop:disabled=move || integration_busy.get() on:click=move |_| (disconnect_oauth)()>
+                            "Disconnect OAuth"
+                        </button>
+                    </div>
                 </article>
             </div>
 
@@ -1950,6 +2359,7 @@ pub fn DetachedChatView() -> impl IntoView {
     let (messages, set_messages) = create_signal(Vec::<InferenceChatMessage>::new());
     let (input, set_input) = create_signal(String::new());
     let (is_sending, set_is_sending) = create_signal(false);
+    let (chat_error, set_chat_error) = create_signal(String::new());
     let chat_log_ref = create_node_ref::<html::Div>();
 
     let refresh_history: Rc<dyn Fn()> = Rc::new(move || {
@@ -2009,7 +2419,7 @@ pub fn DetachedChatView() -> impl IntoView {
 
             let refresh_history = Rc::clone(&refresh_history);
             wasm_bindgen_futures::spawn_local(async move {
-                let _ = core_request::<Value>(CoreRequestInput {
+                match core_request::<Value>(CoreRequestInput {
                     method: "POST".to_string(),
                     path: "/api/chat".to_string(),
                     body: Some(json!({
@@ -2018,7 +2428,11 @@ pub fn DetachedChatView() -> impl IntoView {
                     })),
                     admin_token: None,
                 })
-                .await;
+                .await
+                {
+                    Ok(_) => set_chat_error.set(String::new()),
+                    Err(err) => set_chat_error.set(format!("Send failed: {}", err)),
+                }
                 (refresh_history)();
                 set_is_sending.set(false);
             });
@@ -2089,6 +2503,14 @@ pub fn DetachedChatView() -> impl IntoView {
                                 {move || if is_sending.get() { "Sending..." } else { "Send" }}
                             </button>
                         </div>
+
+                        {move || {
+                            if chat_error.get().is_empty() {
+                                ().into_view()
+                            } else {
+                                view! { <div class="notice error">{chat_error.get()}</div> }.into_view()
+                            }
+                        }}
                     </div>
                 </div>
             </main>

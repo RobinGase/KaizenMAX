@@ -185,6 +185,21 @@ pub struct SecretMetadata {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretTestResponse {
+    pub provider: String,
+    pub configured: bool,
+    pub test_passed: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthStartResponse {
+    pub provider: String,
+    pub redirect_url: String,
+    pub state_token: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OAuthStatusResponse {
     pub provider: String,
     pub supported: bool,
