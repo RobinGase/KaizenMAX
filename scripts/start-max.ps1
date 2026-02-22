@@ -9,6 +9,7 @@
     Use -InitEnv to create .env from .env.example when .env is missing.
 #>
 
+[CmdletBinding(PositionalBinding = $false)]
 param(
     [switch]$CoreOnly,
     [switch]$UIOnly,
