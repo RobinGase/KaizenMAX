@@ -13,11 +13,28 @@ param(
     [switch]$CoreOnly,
     [switch]$UIOnly,
     [switch]$InitEnv,
-    [string]$EnvFile = "$PSScriptRoot\..\.env"
+    [string]$EnvFile = "",
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$ExtraArgs
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+$defaultEnvFile = "$PSScriptRoot\..\.env"
+
+if ($null -ne $ExtraArgs -and $ExtraArgs.Count -gt 0) {
+    Write-Host "[Kaizen MAX] Ignoring extra launcher args: $($ExtraArgs -join ' ')" -ForegroundColor Yellow
+}
+
+$envFileCandidate = if ($null -eq $EnvFile) { "" } else { $EnvFile.Trim() }
+$envFileCandidate = $envFileCandidate.Trim('"').Trim("'")
+
+if ([string]::IsNullOrWhiteSpace($envFileCandidate)) {
+    $EnvFile = $defaultEnvFile
+} else {
+    $EnvFile = $envFileCandidate
+}
 
 if ($CoreOnly -and $UIOnly) {
     throw "CoreOnly and UIOnly cannot be used together."
