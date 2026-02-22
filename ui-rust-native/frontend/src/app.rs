@@ -173,160 +173,14 @@ pub fn MainMissionView() -> impl IntoView {
         dragging.set(None);
     });
 
-    view! {
-        <div class="app-shell">
-            <div
-                class="mission-layout"
-                style=move || format!("grid-template-columns: {}px 4px 1fr 4px {}px", left_width.get(), right_width.get())
-            >
-                <nav class="nav-rail">
-                    <div class="brand">
-                        <div class="brand-title">"Kaizen MAX"</div>
-                    </div>
-                    <div class="panel-title">"Agents"</div>
-                    {move || {
-                        app_state
-                            .agents
-                            .get()
-                            .into_iter()
-                            .map(|agent| {
-                                let agent_id = agent.id.clone();
-                                view! {
-                                    <div class="agent-item" style="display: flex; justify-content: space-between; align-items: center;">
-                                        <span>{agent.name}</span>
-                                        <button
-                                            style="background: transparent; border: 1px solid #444; color: #aaa; border-radius: 4px; padding: 2px 6px; cursor: pointer; font-size: 10px;"
-                                            on:click=move |_| {
-                                                let id = agent_id.clone();
-                                                wasm_bindgen_futures::spawn_local(async move {
-                                                    detach_agent(id).await;
-                                                });
-                                            }
-                                        >
-                                            "Detach"
-                                        </button>
-                                    </div>
-                                }
-                            })
-                            .collect_view()
-                    }}
-                </nav>
-
-                <div
-                    class="resizer-h"
-                    class:active=move || dragging.get() == Some("left")
-                    on:mousedown=move |_| dragging.set(Some("left"))
-                />
-
-                <main class="main-shell">
-                    <header class="top-bar">
-                        <span class="status-chip ok">
-                            "Health: "
-                            {move || health.get().map_or("-".to_string(), |h| h.status)}
-                        </span>
-                    </header>
-                    <div class="chat-panel">
-                        <div class="chat-log">
-                            <div class="message agent">
-                                <div class="msg-sender">"Codex"</div>
-                                "Welcome to Kaizen MAX. How can we build today?"
-                            </div>
-                            <div class="message user">
-                                <div class="msg-sender">"User"</div>
-                                "Implement the initial tri-pane layout."
-                            </div>
-                            <div class="message agent">
-                                <div class="msg-sender">"Frontend Agent"</div>
-                                "I have implemented the layout and applied Codex-style CSS."
-                            </div>
-                        </div>
-                        <div class="composer-container">
-                            <textarea class="composer" rows="3" placeholder="Message the agents..."></textarea>
-                        </div>
-                    </div>
-                </main>
-
-                <div
-                    class="resizer-h"
-                    class:active=move || dragging.get() == Some("right")
-                    on:mousedown=move |_| dragging.set(Some("right"))
-                />
-
-                <div class="branches-panel">
-                    <div class="panel-title">"Company Branches"</div>
-                    <div class="hierarchy" style="font-family: var(--font-mono); font-size: 12px;">
-                        <div class="orchestrator-node" style="margin-bottom: 12px;">
-                            <div style="color: var(--mc-text); font-weight: bold; margin-bottom: 4px;">"▼ Orchestrator"</div>
-                            <div class="branch-nodes" style="margin-left: 8px; border-left: 1px solid var(--mc-border); padding-left: 12px;">
-                                <div class="branch-node">
-                                    <div style="color: var(--mc-text); margin-bottom: 4px;">"▼ Branch: Primary"</div>
-                                    <div class="mission-nodes" style="margin-left: 8px; border-left: 1px solid var(--mc-border); padding-left: 12px;">
-                                        {move || {
-                                            let agents = app_state.agents.get();
-                                            let mut missions: BTreeMap<String, Vec<SubAgent>> = BTreeMap::new();
-                                            for agent in agents {
-                                                let tid = agent.task_id.clone().unwrap_or_else(|| "general".to_string());
-                                                missions.entry(tid).or_default().push(agent);
-                                            }
-
-                                            missions.into_iter().map(|(tid, workers)| {
-                                                let active_count = workers.iter().filter(|w| matches!(w.status, AgentStatus::Active)).count();
-                                                let total_count = workers.len();
-
-                                                view! {
-                                                    <div class="mission-node" style="margin-bottom: 8px;">
-                                                        <div style="color: var(--mc-muted); display: flex; justify-content: space-between; margin-bottom: 2px;">
-                                                            <span>"▼ Mission: " {tid}</span>
-                                                            <span style="font-size: 10px; opacity: 0.6;">{format!("{}/{}", active_count, total_count)}</span>
-                                                        </div>
-                                                        <div class="worker-nodes" style="margin-left: 8px; border-left: 1px solid var(--mc-border); padding-left: 12px;">
-                                                            {workers.into_iter().map(|worker| {
-                                                                let status_color = match worker.status {
-                                                                    AgentStatus::Active => "#4caf50",
-                                                                    AgentStatus::Idle => "#888888",
-                                                                    AgentStatus::Blocked => "#f44336",
-                                                                    AgentStatus::Done => "#2196f3",
-                                                                };
-                                                                view! {
-                                                                    <div class="worker-node" style="margin-top: 2px; display: flex; align-items: center; gap: 8px;">
-                                                                        <span style=format!("width: 6px; height: 6px; border-radius: 50%; background: {};", status_color)></span>
-                                                                        <span style="color: var(--mc-text); opacity: 0.8;">{worker.name}</span>
-                                                                    </div>
-                                                                }
-                                                            }).collect_view()}
-                                                        </div>
-                                                    </div>
-                                                }
-                                            }).collect_view()
-                                        }}
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    }
-}
-
-#[component]
-pub fn DetachedChatView() -> impl IntoView {
-    let params = use_params_map();
-    let agent_id = move || params.with(|p| p.get("id").cloned().unwrap_or_default());
-
     let (messages, set_messages) = create_signal(Vec::<InferenceChatMessage>::new());
     let (input, set_input) = create_signal(String::new());
 
     let refresh_history = move || {
-        let id = agent_id();
-        if id.is_empty() {
-            return;
-        }
         wasm_bindgen_futures::spawn_local(async move {
             if let Ok(res) = core_request::<ChatHistoryResponse>(CoreRequestInput {
                 method: "GET".to_string(),
-                path: format!("/api/chat/history?agent_id={}", id),
+                path: "/api/chat/history".to_string(),
                 body: None,
                 admin_token: None,
             })
@@ -348,9 +202,8 @@ pub fn DetachedChatView() -> impl IntoView {
     });
 
     let send_message = move || {
-        let id = agent_id();
         let text = input.get();
-        if text.is_empty() || id.is_empty() {
+        if text.is_empty() {
             return;
         }
 
@@ -362,7 +215,7 @@ pub fn DetachedChatView() -> impl IntoView {
                 path: "/api/chat".to_string(),
                 body: Some(json!({
                     "message": text,
-                    "agent_id": Some(id),
+                    "agent_id": None::<String>,
                 })),
                 admin_token: None,
             })
@@ -371,73 +224,33 @@ pub fn DetachedChatView() -> impl IntoView {
         });
     };
 
-    view! {
-        <div class="app-shell" style="grid-template-columns: 1fr;">
-            <main class="main-shell">
-                <header class="top-bar">
-                    <span class="status-chip neutral">
-                        "Detached Agent Chat: " {agent_id}
-                    </span>
-                </header>
-                <div class="chat-panel">
-                    <div class="chat-log" style="overflow-y: auto; flex: 1;">
-                        <For
-                            each=move || messages.get()
-                            key=|msg| format!("{}-{}", msg.role, msg.content.len())
-                            children=move |msg| {
-                                let role_class = if msg.role == "user" { "message user" } else { "message agent" };
-                                let sender = if msg.role == "user" { "User" } else { "Agent" };
-                                view! {
-                                    <div class=role_class>
-                                        <div class="msg-sender">{sender}</div>
-                                        {msg.content}
-                                    </div>
-                                }
-                            }
-                        />
-                    </div>
-                    <div class="composer-container" style="display: flex; gap: 8px; align-items: flex-end;">
-                        <textarea
-                            class="composer"
-                            style="flex: 1;"
-                            rows="3"
-                            placeholder="Message agent..."
-                            prop:value=move || input.get()
-                            on:input=move |ev| set_input.set(event_target_value(&ev))
-                            on:keydown=move |ev| {
-                                if ev.key() == "Enter" && !ev.shift_key() {
-                                    ev.prevent_default();
-                                    send_message();
-                                }
-                            }
-                        ></textarea>
-                        <button
-                            style="background: #444; color: white; border: none; border-radius: 4px; padding: 8px 16px; cursor: pointer; margin-bottom: 8px;"
-                            on:click=move |_| send_message()
-                        >
-                            "Send"
-                        </button>
-                    </div>
-                </div>
-            </main>
-        </div>
-    }
-}
-
-#[component]
-pub fn MissionControlApp() -> impl IntoView {
-    let app_state = AppState::new();
-    app_state.start_polling();
-    provide_context(app_state.clone());
 
     view! {
-        <Router>
-            <main>
-                <Routes>
-                    <Route path="/" view=MainMissionView/>
-                    <Route path="/chat/:id" view=DetachedChatView/>
-                </Routes>
-            </main>
-        </Router>
-    }
-}
+        <div class="app-shell">
+            <div
+                class="mission-layout"
+                style=move || format!("grid-template-columns: {}px 4px 1fr 4px {}px", left_width.get(), right_width.get())
+            >
+                <nav class="nav-rail">
+                    <div class="brand">
+                        <div class="brand-title">"Kaizen MAX"</div>
+                    </div>
+
+                    <div class="nav-tabs">
+                        <div class="nav-tab active">"Mission"</div>
+                        <div class="nav-tab">"Branches"</div>
+                        <div class="nav-tab">"Gates"</div>
+                        <div class="nav-tab">"Activity"</div>
+                        <div class="nav-tab">"Workspace"</div>
+                        <div class="nav-tab">"Integrations"</div>
+                        <div class="nav-tab">"Settings"</div>
+                    </div>
+
+                    <div class="panel-title">"Agents"</div>
+                    {move || {
+                        app_state
+                            .agents
+                            .get()
+                            .into_iter()
+                            .map(|agent| {
+                                let agent_id = agent
