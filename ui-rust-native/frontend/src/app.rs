@@ -209,7 +209,7 @@ impl AppState {
             let _ = state_init.refresh_events().await;
         });
 
-        let handle = set_interval_with_handle(
+        if let Ok(handle) = set_interval_with_handle(
             move || {
                 let state_clone = state.clone();
                 wasm_bindgen_futures::spawn_local(async move {
@@ -219,12 +219,11 @@ impl AppState {
                 });
             },
             Duration::from_secs(5),
-        )
-        .expect("Failed to create interval");
-
-        on_cleanup(move || {
-            handle.clear();
-        });
+        ) {
+            on_cleanup(move || {
+                handle.clear();
+            });
+        }
     }
 
     async fn refresh_health(&self) -> Result<(), String> {
@@ -293,13 +292,13 @@ fn MissionTabView(app_state: AppState) -> impl IntoView {
         create_effect(move |_| {
             (refresh_main_history)();
             let refresh_main_history = Rc::clone(&refresh_main_history);
-            let handle =
+            if let Ok(handle) =
                 set_interval_with_handle(move || (refresh_main_history)(), Duration::from_secs(3))
-                    .expect("Failed to set mission refresh interval");
-
-            on_cleanup(move || {
-                handle.clear();
-            });
+            {
+                on_cleanup(move || {
+                    handle.clear();
+                });
+            }
         });
     }
 
@@ -615,10 +614,11 @@ fn GatesTabView(app_state: AppState) -> impl IntoView {
         create_effect(move |_| {
             (refresh_gates)();
             let refresh_gates = Rc::clone(&refresh_gates);
-            let handle =
+            if let Ok(handle) =
                 set_interval_with_handle(move || (refresh_gates)(), Duration::from_secs(12))
-                    .expect("Failed to set gates interval");
-            on_cleanup(move || handle.clear());
+            {
+                on_cleanup(move || handle.clear());
+            }
         });
     }
 
@@ -1267,10 +1267,12 @@ fn IntegrationsTabView(app_state: AppState) -> impl IntoView {
         create_effect(move |_| {
             (refresh_integrations)();
             let refresh_integrations = Rc::clone(&refresh_integrations);
-            let handle =
-                set_interval_with_handle(move || (refresh_integrations)(), Duration::from_secs(20))
-                    .expect("Failed to set integrations interval");
-            on_cleanup(move || handle.clear());
+            if let Ok(handle) = set_interval_with_handle(
+                move || (refresh_integrations)(),
+                Duration::from_secs(20),
+            ) {
+                on_cleanup(move || handle.clear());
+            }
         });
     }
 
@@ -1654,7 +1656,11 @@ pub fn MainMissionView() -> impl IntoView {
             if side == "left" {
                 left_width.set(x.max(170).min(520));
             } else if let Some(win) = web_sys::window() {
-                let window_width = win.inner_width().unwrap().as_f64().unwrap() as i32;
+                let window_width = win
+                    .inner_width()
+                    .ok()
+                    .and_then(|value| value.as_f64())
+                    .unwrap_or(1280.0) as i32;
                 right_width.set((window_width - x).max(240).min(620));
             }
         }
@@ -1979,13 +1985,13 @@ pub fn DetachedChatView() -> impl IntoView {
         create_effect(move |_| {
             (refresh_history)();
             let refresh_history = Rc::clone(&refresh_history);
-            let handle =
+            if let Ok(handle) =
                 set_interval_with_handle(move || (refresh_history)(), Duration::from_secs(3))
-                    .expect("Failed to set detached chat interval");
-
-            on_cleanup(move || {
-                handle.clear();
-            });
+            {
+                on_cleanup(move || {
+                    handle.clear();
+                });
+            }
         });
     }
 
@@ -2032,9 +2038,16 @@ pub fn DetachedChatView() -> impl IntoView {
                 <div class="chat-panel">
                     <div class="chat-log" node_ref=chat_log_ref>
                         <For
-                            each=move || messages.get()
-                            key=|msg| format!("{}-{}", msg.role, msg.content.len())
-                            children=move |msg| {
+                            each=move || {
+                                messages
+                                    .get()
+                                    .into_iter()
+                                    .enumerate()
+                                    .collect::<Vec<_>>()
+                            }
+                            key=|item| format!("{}-{}-{}", item.0, item.1.role, item.1.content.len())
+                            children=move |item| {
+                                let msg = item.1;
                                 let role_class = if msg.role == "user" {
                                     "message user"
                                 } else {
