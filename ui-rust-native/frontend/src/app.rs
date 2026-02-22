@@ -2,6 +2,7 @@ use leptos::ev;
 use leptos::html;
 use leptos::*;
 use leptos_router::*;
+use pulldown_cmark::{html::push_html, Event, Options, Parser};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashSet};
 use std::rc::Rc;
@@ -61,6 +62,27 @@ fn bool_patch(field: &str, value: bool) -> Value {
 
 fn normalize_provider(value: &str) -> String {
     value.trim().to_ascii_lowercase()
+}
+
+fn render_markdown(content: &str) -> String {
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_TASKLISTS);
+
+    let parser = Parser::new_ext(content, options).filter_map(|event| match event {
+        Event::Html(_) | Event::InlineHtml(_) => None,
+        _ => Some(event),
+    });
+
+    let mut rendered = String::new();
+    push_html(&mut rendered, parser);
+
+    if rendered.trim().is_empty() {
+        format!("<p>{}</p>", content)
+    } else {
+        rendered
+    }
 }
 
 async fn detach_agent(agent_id: String) {
@@ -395,10 +417,20 @@ fn MissionTabView(app_state: AppState) -> impl IntoView {
                                             "message assistant"
                                         };
                                         let sender = sender_label(&msg.role);
+                                        let content_view = if msg.role == "assistant" {
+                                            let rendered = render_markdown(&msg.content);
+                                            view! {
+                                                <div class="message-body markdown-body" inner_html=rendered></div>
+                                            }
+                                                .into_view()
+                                        } else {
+                                            view! { <div class="message-body plain-message">{msg.content.clone()}</div> }
+                                                .into_view()
+                                        };
                                         view! {
                                             <div class=role_class>
                                                 <div class="msg-sender">{sender}</div>
-                                                {msg.content}
+                                                {content_view}
                                             </div>
                                         }
                                     }
@@ -2385,10 +2417,20 @@ pub fn DetachedChatView() -> impl IntoView {
                                     "message assistant"
                                 };
                                 let sender = sender_label(&msg.role);
+                                let content_view = if msg.role == "assistant" {
+                                    let rendered = render_markdown(&msg.content);
+                                    view! {
+                                        <div class="message-body markdown-body" inner_html=rendered></div>
+                                    }
+                                        .into_view()
+                                } else {
+                                    view! { <div class="message-body plain-message">{msg.content.clone()}</div> }
+                                        .into_view()
+                                };
                                 view! {
                                     <div class=role_class>
                                         <div class="msg-sender">{sender}</div>
-                                        {msg.content}
+                                        {content_view}
                                     </div>
                                 }
                             }
