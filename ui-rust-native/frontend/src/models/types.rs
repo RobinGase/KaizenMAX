@@ -50,7 +50,6 @@ pub struct CrystalBallEvent {
     pub visibility: String,
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InferenceChatMessage {
     pub role: String,
@@ -69,7 +68,6 @@ pub struct ChatResponse {
     pub source: String,
     pub target: String,
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompanyBranch {

@@ -5,6 +5,11 @@
     <title>Kaizen MAX</title>
     <script>
       (function () {
+        var debugFlag = /[?&]debug=?(1|true)?/i.test(window.location.search) ||
+          window.localStorage.getItem("KAIZEN_DEBUG_BOOT") === "1";
+
+        function noop() {}
+
         function ensureLogPane() {
           var pane = document.getElementById("__kaizen_boot_log");
           if (!pane) {
@@ -40,27 +45,41 @@
         }
 
         function pushBootLog(msg) {
+          if (!debugFlag) {
+            return;
+          }
           var pane = ensureLogPane();
           pane.hidden = false;
           var stamp = new Date().toISOString().split("T")[1].replace("Z", "");
           pane.textContent += "[" + stamp + "] " + msg + "\n";
         }
 
-        window.__kaizenPushBootLog = pushBootLog;
+        window.__kaizenPushBootLog = debugFlag ? pushBootLog : noop;
+
+        if (!debugFlag) {
+          return;
+        }
 
         var _origConsoleError = console.error;
-        console.error = function() {
+        console.error = function () {
           var args = Array.prototype.slice.call(arguments);
           _origConsoleError.apply(console, args);
           pushBootLog("console.error: " + args.join(" "));
         };
 
         window.addEventListener("error", function (event) {
-          pushBootLog("window.error: " + (event.message || "unknown") + " @ " + (event.filename || "<inline>") + ":" + (event.lineno || 0));
+          pushBootLog(
+            "window.error: " +
+              (event.message || "unknown") +
+              " @ " +
+              (event.filename || "<inline>") +
+              ":" +
+              (event.lineno || 0)
+          );
         });
 
         window.addEventListener("unhandledrejection", function (event) {
-          var reason = event && event.reason ? (event.reason.message || String(event.reason)) : "unknown";
+          var reason = event && event.reason ? event.reason.message || String(event.reason) : "unknown";
           pushBootLog("unhandledrejection: " + reason);
         });
 
@@ -69,20 +88,23 @@
         });
 
         setTimeout(function () {
-          if (!document.querySelector('.app-shell')) {
+          if (!document.querySelector(".app-shell")) {
             pushBootLog("No .app-shell mounted after 4s.");
           }
         }, 4000);
 
         setTimeout(function () {
-          var tauriOk = !!(window.__TAURI__ && window.__TAURI__.core && typeof window.__TAURI__.core.invoke === "function");
+          var tauriOk =
+            !!(window.__TAURI__ &&
+              window.__TAURI__.core &&
+              typeof window.__TAURI__.core.invoke === "function");
           if (!tauriOk) {
             pushBootLog("window.__TAURI__.core.invoke is not available after 2s.");
           }
         }, 2000);
       })();
     </script>
-    <link data-trunk rel="rust" />
+    <link data-trunk rel="rust" data-wasm-opt="z" />
     <link data-trunk rel="css" href="src/styles.css" />
   </head>
   <body></body>

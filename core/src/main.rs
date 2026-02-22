@@ -591,9 +591,12 @@ fn parse_cors_origins(csv: &str) -> Result<Vec<HeaderValue>, String> {
             continue;
         }
 
-        if !(origin.starts_with("http://") || origin.starts_with("https://")) {
+        if !(origin.starts_with("http://")
+            || origin.starts_with("https://")
+            || origin.starts_with("tauri://"))
+        {
             return Err(format!(
-                "Invalid CORS origin '{origin}'. Origins must start with http:// or https://"
+                "Invalid CORS origin '{origin}'. Origins must start with http://, https://, or tauri://"
             ));
         }
 
@@ -1217,67 +1220,67 @@ async fn chat(
         )
         .await
         {
-                Ok((provider, model, mut api_key)) => {
-                    let settings = state.settings.read().await;
-                    let max_tokens = settings.inference_max_tokens;
-                    let temperature = settings.inference_temperature;
-                    drop(settings);
+            Ok((provider, model, mut api_key)) => {
+                let settings = state.settings.read().await;
+                let max_tokens = settings.inference_max_tokens;
+                let temperature = settings.inference_temperature;
+                drop(settings);
 
-                    let history = get_conversation(&state, &conversation_key).await;
+                let history = get_conversation(&state, &conversation_key).await;
 
-                    let mut messages = history;
-                    messages.push(InferenceChatMessage {
-                        role: "user".to_string(),
-                        content: message.to_string(),
-                    });
+                let mut messages = history;
+                messages.push(InferenceChatMessage {
+                    role: "user".to_string(),
+                    content: message.to_string(),
+                });
 
-                    let req = InferenceRequest {
-                        provider,
-                        model: model.clone(),
-                        system_prompt: apply_mode_prompt(
-                            state.system_prompt.as_ref(),
-                            selected_mode.as_deref(),
-                        ),
-                        messages,
-                        max_tokens,
-                        temperature,
-                    };
+                let req = InferenceRequest {
+                    provider,
+                    model: model.clone(),
+                    system_prompt: apply_mode_prompt(
+                        state.system_prompt.as_ref(),
+                        selected_mode.as_deref(),
+                    ),
+                    messages,
+                    max_tokens,
+                    temperature,
+                };
 
-                    let inference_result = state.inference.complete(&api_key, &req).await;
-                    wipe_string(&mut api_key);
+                let inference_result = state.inference.complete(&api_key, &req).await;
+                wipe_string(&mut api_key);
 
-                    match inference_result {
-                        Ok(resp) => {
-                            // Store in conversation history
-                            append_to_conversation(
-                                &state,
-                                &conversation_key,
-                                message,
-                                &resp.content,
-                                expected_conversation_version,
-                            )
-                            .await;
+                match inference_result {
+                    Ok(resp) => {
+                        // Store in conversation history
+                        append_to_conversation(
+                            &state,
+                            &conversation_key,
+                            message,
+                            &resp.content,
+                            expected_conversation_version,
+                        )
+                        .await;
 
-                            (
-                                resp.content,
-                                Some(resp.model),
-                                Some(resp.provider),
-                                resp.input_tokens,
-                                resp.output_tokens,
-                            )
-                        }
-                        Err(e) => {
-                            tracing::error!("Inference failed: {}", e);
-                            (
-                                format!("[Inference error] {e}"),
-                                Some(model),
-                                Some(provider.to_string()),
-                                None,
-                                None,
-                            )
-                        }
+                        (
+                            resp.content,
+                            Some(resp.model),
+                            Some(resp.provider),
+                            resp.input_tokens,
+                            resp.output_tokens,
+                        )
+                    }
+                    Err(e) => {
+                        tracing::error!("Inference failed: {}", e);
+                        (
+                            format!("[Inference error] {e}"),
+                            Some(model),
+                            Some(provider.to_string()),
+                            None,
+                            None,
+                        )
                     }
                 }
+            }
             Err((_status, reason)) => {
                 // Fallback: no vault or no API key configured - return helpful message
                 tracing::warn!("Inference not available: {}", reason);
@@ -1512,6 +1515,7 @@ async fn chat_stream(
                                 AnthropicStreamEvent::ContentBlockDelta { delta, .. } => {
                                     if let Some(text) = delta.text {
                                         full_response.push_str(&text);
+                                        tracing::trace!("Anthropic SSE chunk emitted: {}", text);
                                         let token_event = Event::default()
                                             .event("token")
                                             .data(serde_json::json!({ "text": text }).to_string());
@@ -1519,6 +1523,7 @@ async fn chat_stream(
                                     }
                                 }
                                 AnthropicStreamEvent::MessageStop {} => {
+                                    tracing::info!("Stream complete for agent {}", conv_key);
                                     append_to_conversation(
                                         &state_clone,
                                         &conv_key,
@@ -1546,6 +1551,7 @@ async fn chat_stream(
                             for choice in &chunk.choices {
                                 if let Some(ref text) = choice.delta.content {
                                     full_response.push_str(text);
+                                    tracing::trace!("OpenAI/Nvidia SSE chunk emitted: {}", text);
                                     let token_event = Event::default()
                                         .event("token")
                                         .data(serde_json::json!({ "text": text }).to_string());
@@ -1558,6 +1564,7 @@ async fn chat_stream(
                         let tokens = parse_gemini_stream_tokens(data);
                         for text in tokens {
                             full_response.push_str(&text);
+                            tracing::trace!("Gemini SSE chunk emitted: {}", text);
                             let token_event = Event::default()
                                 .event("token")
                                 .data(serde_json::json!({ "text": text }).to_string());
@@ -1573,6 +1580,7 @@ async fn chat_stream(
         }
 
         if !done_emitted {
+            tracing::info!("Stream complete for agent {}", conv_key);
             append_to_conversation(
                 &state_clone,
                 &conv_key,
@@ -2799,7 +2807,7 @@ async fn main() {
 
     // CORS: explicit allowlist only.
     let allowed_origins = std::env::var("KAIZEN_CORS_ORIGINS")
-        .unwrap_or_else(|_| "http://localhost:3000,http://127.0.0.1:3000".to_string());
+        .unwrap_or_else(|_| "http://localhost:3000,http://127.0.0.1:3000,tauri://localhost,http://tauri.localhost,https://tauri.localhost".to_string());
     let origins = parse_cors_origins(&allowed_origins)
         .unwrap_or_else(|err| panic!("CORS configuration invalid: {err}"));
 
@@ -2955,9 +2963,10 @@ mod security_tests {
 
     #[test]
     fn parse_cors_origins_accepts_valid_list() {
-        let result = parse_cors_origins("http://localhost:3000,https://example.com");
+        let result =
+            parse_cors_origins("http://localhost:3000,https://example.com,tauri://localhost");
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().len(), 2);
+        assert_eq!(result.unwrap().len(), 3);
     }
 
     #[test]
@@ -3007,5 +3016,4 @@ mod security_tests {
         let sanitized = sanitize_uri_for_log(&uri);
         assert!(!sanitized.contains("sk-test-secret-1234567890"));
     }
-
 }

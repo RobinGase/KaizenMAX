@@ -4,8 +4,8 @@
 //! Secrets are app-scoped and encrypted at rest with the same SecretVault backend.
 
 use axum::{
-    body::Body,
     Json, Router,
+    body::Body,
     extract::{Path, State},
     http::{HeaderMap, HeaderName, HeaderValue, Request, StatusCode, header},
     middleware::{self, Next},
@@ -302,9 +302,12 @@ async fn use_secret(
 }
 
 fn load_auth_config() -> Result<AuthConfig, String> {
-    let admin_token = read_env_or_file("KAIZEN_VAULTD_ADMIN_TOKEN", "KAIZEN_VAULTD_ADMIN_TOKEN_FILE")?
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty());
+    let admin_token = read_env_or_file(
+        "KAIZEN_VAULTD_ADMIN_TOKEN",
+        "KAIZEN_VAULTD_ADMIN_TOKEN_FILE",
+    )?
+    .map(|v| v.trim().to_string())
+    .filter(|v| !v.is_empty());
     let admin_cross_app_bypass = std::env::var("KAIZEN_VAULTD_ADMIN_CROSS_APP_BYPASS")
         .ok()
         .map(|v| parse_bool(&v))
@@ -355,10 +358,15 @@ fn load_auth_config() -> Result<AuthConfig, String> {
     })
 }
 
-async fn authorize(state: &VaultdState, headers: &HeaderMap) -> Result<AuthContext, (StatusCode, String)> {
+async fn authorize(
+    state: &VaultdState,
+    headers: &HeaderMap,
+) -> Result<AuthContext, (StatusCode, String)> {
     let app_id = extract_app_id(headers)?;
-    let token = extract_token(headers)
-        .ok_or((StatusCode::UNAUTHORIZED, "Missing vault auth token".to_string()))?;
+    let token = extract_token(headers).ok_or((
+        StatusCode::UNAUTHORIZED,
+        "Missing vault auth token".to_string(),
+    ))?;
 
     if auth_currently_blocked(state, &app_id).await {
         return Err((
@@ -445,7 +453,10 @@ fn read_env_or_file(env_key: &str, file_key: &str) -> Result<Option<String>, Str
         let trimmed_path = path.trim();
         if !trimmed_path.is_empty() {
             let content = fs::read_to_string(trimmed_path).map_err(|err| {
-                format!("Failed to read {} from '{}': {}", file_key, trimmed_path, err)
+                format!(
+                    "Failed to read {} from '{}': {}",
+                    file_key, trimmed_path, err
+                )
             })?;
             let trimmed = content.trim().to_string();
             if !trimmed.is_empty() {
@@ -470,7 +481,10 @@ fn parse_bool(value: &str) -> bool {
 fn extract_app_id(headers: &HeaderMap) -> Result<String, (StatusCode, String)> {
     let value = headers
         .get("x-vault-app")
-        .ok_or((StatusCode::BAD_REQUEST, "Missing x-vault-app header".to_string()))?
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            "Missing x-vault-app header".to_string(),
+        ))?
         .to_str()
         .map_err(|_| {
             (
@@ -514,9 +528,7 @@ fn normalize_app_id(value: &str) -> Result<String, String> {
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
     {
-        return Err(
-            "App id contains invalid characters; allowed: a-z 0-9 - _ .".to_string(),
-        );
+        return Err("App id contains invalid characters; allowed: a-z 0-9 - _ .".to_string());
     }
 
     Ok(app)
@@ -525,7 +537,10 @@ fn normalize_app_id(value: &str) -> Result<String, String> {
 fn normalize_provider(value: &str) -> Result<String, (StatusCode, String)> {
     let provider = value.trim().to_ascii_lowercase();
     if provider.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "Provider cannot be empty".to_string()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Provider cannot be empty".to_string(),
+        ));
     }
 
     if provider.contains('/') || provider.contains('\\') || provider.contains(':') {
