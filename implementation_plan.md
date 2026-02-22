@@ -8,9 +8,9 @@
 
 ## 2) Current Context
 - This plan replaces the previous status snapshot that marked implementation as complete.
-- Frontend direction is now **Dioxus desktop** on branch `DioxusFrontend`.
-- Previous egui exploration is preserved on branch `RustEguiTestBranch`.
-- The UI is now in active redesign to match the user vision and prioritize agent workflow speed.
+- Frontend direction is now **Tauri v2 host + SolidJS Mission Control**.
+- Previous Dioxus and legacy web UI are archived in legacy history branches/tags.
+- The UI is now in active rebuild to match the user vision and prioritize agent workflow speed.
 
 ## 3) Product Goal
 Build a Windows-first developer cockpit that integrates Kaizen core with a high-velocity multi-agent workspace so the team can:
@@ -52,9 +52,9 @@ Build a Windows-first developer cockpit that integrates Kaizen core with a high-
 ```text
 KaizenMAX/
   core/                  # Kaizen runtime/gateway (Rust)
-  ui-dioxus/             # Active desktop frontend (Dioxus)
-  ui/                    # Legacy frontend assets
-  protocol/              # Nex_Alignment fork and MCP assets
+  ui-tauri-solid/        # Active desktop frontend (Tauri v2 + SolidJS)
+  tools/Nex_Alignment/   # External governance/alignment toolkit (submodule)
+  protocol/              # Protocol and MCP assets
   compat/                # Optional compatibility adapters
   scripts/
     start-max.ps1        # Start core + desktop app

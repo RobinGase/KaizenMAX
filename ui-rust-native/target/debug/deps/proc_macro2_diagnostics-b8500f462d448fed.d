@@ -1,0 +1,10 @@
+C:\Users\Robin\Desktop\ARGTECH\KaizenMAX\ui-rust-native\target\debug\deps\proc_macro2_diagnostics-b8500f462d448fed.d: C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro2-diagnostics-0.10.1\src\lib.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro2-diagnostics-0.10.1\src\ext.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro2-diagnostics-0.10.1\src\diagnostic.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro2-diagnostics-0.10.1\src\line.rs
+
+C:\Users\Robin\Desktop\ARGTECH\KaizenMAX\ui-rust-native\target\debug\deps\libproc_macro2_diagnostics-b8500f462d448fed.rlib: C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro2-diagnostics-0.10.1\src\lib.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro2-diagnostics-0.10.1\src\ext.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro2-diagnostics-0.10.1\src\diagnostic.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro2-diagnostics-0.10.1\src\line.rs
+
+C:\Users\Robin\Desktop\ARGTECH\KaizenMAX\ui-rust-native\target\debug\deps\libproc_macro2_diagnostics-b8500f462d448fed.rmeta: C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro2-diagnostics-0.10.1\src\lib.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro2-diagnostics-0.10.1\src\ext.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro2-diagnostics-0.10.1\src\diagnostic.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro2-diagnostics-0.10.1\src\line.rs
+
+C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro2-diagnostics-0.10.1\src\lib.rs:
+C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro2-diagnostics-0.10.1\src\ext.rs:
+C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro2-diagnostics-0.10.1\src\diagnostic.rs:
+C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro2-diagnostics-0.10.1\src\line.rs:

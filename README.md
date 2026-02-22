@@ -12,7 +12,7 @@ Kaizen MAX is a Windows-first operator cockpit for AI-assisted engineering.
 1. Start the stack:
    - `scripts/start-max.bat`
    - or `scripts/start-max.ps1`
-2. The native Rust desktop UI opens as `Kaizen MAX`.
+2. The native desktop Mission Control UI opens (`Tauri v2 + SolidJS`).
 3. Open `Settings -> Providers`
 4. Configure inference:
     - choose provider/model
@@ -56,12 +56,14 @@ Vault standalone alignment policy: `contexts/policies/vault_repo_sync_rule.md`.
 
 - Windows 10/11
 - Rust stable toolchain (`cargo`)
+- Node.js + npm (for Mission Control UI dev/build)
 
 The legacy React frontend is retired on the `RustTestBranch` rewrite path.
 
 ## Verify Build
 
 - Core tests: run `cargo test` in `core/`
-- UI build: run `cargo build` in `ui-dioxus/`
+- UI checks: run `npm install && npm run check` in `ui-tauri-solid/`
+- UI dev launch: run `npm run tauri:dev` in `ui-tauri-solid/`
 
 For full architecture and rollout details, see `implementation_plan.md`.

@@ -1,0 +1,3 @@
+[submodule "tools/Nex_Alignment"]
+	path = tools/Nex_Alignment
+	url = https://github.com/RobinGase/Nex_Alignment.git

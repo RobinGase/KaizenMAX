@@ -9,7 +9,7 @@ $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
 $coreDir = Join-Path $root "core"
-$uiDir = Join-Path $root "ui-dioxus"
+$uiDir = Join-Path $root "ui-rust-native"
 $logRoot = Join-Path $root "logs\stress"
 $runStamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $runDir = Join-Path $logRoot $runStamp
@@ -61,9 +61,9 @@ $hardStop = $false
 $stopReason = "completed"
 
 try {
-    $coreProc = Start-Process cargo -WorkingDirectory $coreDir -ArgumentList "run" -PassThru
+    $coreProc = Start-Process "$env:USERPROFILE\.cargo\bin\cargo.exe" -WorkingDirectory $coreDir -ArgumentList "run", "--bin", "kaizen-gateway" -PassThru
     Start-Sleep -Seconds 6
-    $uiProc = Start-Process cargo -WorkingDirectory $uiDir -ArgumentList "run" -PassThru
+    $uiProc = Start-Process cmd.exe -WorkingDirectory $uiDir -ArgumentList "/d", "/c", "`"$env:USERPROFILE\.cargo\bin\cargo.exe`" tauri dev" -PassThru
 
     Wait-Health
     $null = Log-Metric "startup-ok"
@@ -147,7 +147,11 @@ finally {
     if ($coreProc -and -not $coreProc.HasExited) {
         Stop-Process -Id $coreProc.Id -Force
     }
-    Get-Process ui-dioxus -ErrorAction SilentlyContinue | Stop-Process -Force
+    Get-CimInstance Win32_Process | Where-Object {
+        $name = if ($null -eq $_.Name) { "" } else { $_.Name.ToLowerInvariant() }
+        $cmd = if ($null -eq $_.CommandLine) { "" } else { $_.CommandLine.ToLowerInvariant() }
+        $name -eq "node.exe" -and $cmd -like "*ui-rust-native*"
+    } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     Get-Process kaizen-gateway -ErrorAction SilentlyContinue | Stop-Process -Force
     Get-Process zeroclaw-gateway -ErrorAction SilentlyContinue | Stop-Process -Force
 }

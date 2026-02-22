@@ -1,0 +1,14 @@
+C:\Users\Robin\Desktop\ARGTECH\KaizenMAX\ui-rust-native\target\debug\deps\serde-ce075c3231a6c0bd.d: C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs C:\Users\Robin\Desktop\ARGTECH\KaizenMAX\ui-rust-native\target\debug\build\serde-0dff6664a64bb2a7\out/private.rs
+
+C:\Users\Robin\Desktop\ARGTECH\KaizenMAX\ui-rust-native\target\debug\deps\libserde-ce075c3231a6c0bd.rlib: C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs C:\Users\Robin\Desktop\ARGTECH\KaizenMAX\ui-rust-native\target\debug\build\serde-0dff6664a64bb2a7\out/private.rs
+
+C:\Users\Robin\Desktop\ARGTECH\KaizenMAX\ui-rust-native\target\debug\deps\libserde-ce075c3231a6c0bd.rmeta: C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs C:\Users\Robin\Desktop\ARGTECH\KaizenMAX\ui-rust-native\target\debug\build\serde-0dff6664a64bb2a7\out/private.rs
+
+C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs:
+C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs:
+C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs:
+C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs:
+C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs:
+C:\Users\Robin\Desktop\ARGTECH\KaizenMAX\ui-rust-native\target\debug\build\serde-0dff6664a64bb2a7\out/private.rs:
+
+# env-dep:OUT_DIR=C:\\Users\\Robin\\Desktop\\ARGTECH\\KaizenMAX\\ui-rust-native\\target\\debug\\build\\serde-0dff6664a64bb2a7\\out

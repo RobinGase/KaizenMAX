@@ -1,0 +1,10 @@
+C:\Users\Robin\Desktop\ARGTECH\KaizenMAX\ui-rust-native\target\debug\deps\proc_macro_utils-72ca113ac118e6fa.d: C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro-utils-0.8.0\src\lib.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro-utils-0.8.0\src\parser.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro-utils-0.8.0\src\assert.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro-utils-0.8.0\src\__private.rs
+
+C:\Users\Robin\Desktop\ARGTECH\KaizenMAX\ui-rust-native\target\debug\deps\libproc_macro_utils-72ca113ac118e6fa.rlib: C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro-utils-0.8.0\src\lib.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro-utils-0.8.0\src\parser.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro-utils-0.8.0\src\assert.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro-utils-0.8.0\src\__private.rs
+
+C:\Users\Robin\Desktop\ARGTECH\KaizenMAX\ui-rust-native\target\debug\deps\libproc_macro_utils-72ca113ac118e6fa.rmeta: C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro-utils-0.8.0\src\lib.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro-utils-0.8.0\src\parser.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro-utils-0.8.0\src\assert.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro-utils-0.8.0\src\__private.rs
+
+C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro-utils-0.8.0\src\lib.rs:
+C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro-utils-0.8.0\src\parser.rs:
+C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro-utils-0.8.0\src\assert.rs:
+C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro-utils-0.8.0\src\__private.rs:

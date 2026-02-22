@@ -3,7 +3,7 @@
     Start Kaizen MAX pipeline.
 
 .DESCRIPTION
-    Starts Kaizen core and Rust UI processes under a Windows Job Object.
+    Starts Kaizen core and Mission Control UI processes under a Windows Job Object.
     If one process exits, the remaining processes are stopped.
     If the terminal closes, the Job Object ensures child processes are terminated.
     Use -InitEnv to create .env from .env.example when .env is missing.
@@ -264,7 +264,13 @@ function Stop-StaleKaizenProcesses {
         $name = if ($null -eq $PSItem.Name) { "" } else { $PSItem.Name.ToLowerInvariant() }
         $cmd = if ($null -eq $PSItem.CommandLine) { "" } else { $PSItem.CommandLine.ToLowerInvariant() }
 
-        if ($name -eq "ui-dioxus.exe" -or $name -eq "kaizen-gateway.exe" -or $name -eq "zeroclaw-gateway.exe") {
+        if (
+            $name -eq "ui-dioxus.exe" -or
+            $name -eq "kaizen-gateway.exe" -or
+            $name -eq "zeroclaw-gateway.exe" -or
+            $name -eq "kaizen max mission control.exe" -or
+            $name -eq "kaizen_max_mission_control.exe"
+        ) {
             return $true
         }
 
@@ -315,6 +321,8 @@ function Write-UiCrashReport {
             $null -ne $PSItem.Message -and
             (
                 $PSItem.Message -like "*ui-dioxus.exe*" -or
+                $PSItem.Message -like "*kaizen max mission control.exe*" -or
+                $PSItem.Message -like "*kaizen_max_mission_control.exe*" -or
                 $PSItem.Message -like "*kaizen-gateway.exe*" -or
                 $PSItem.Message -like "*zeroclaw-gateway.exe*"
             )
@@ -323,7 +331,7 @@ function Write-UiCrashReport {
 
     $eventList = @($events)
     if ($eventList.Count -eq 0) {
-        $lines.Add("No recent Application Error/Windows Error Reporting events for ui-dioxus.exe in the last 10 minutes.")
+        $lines.Add("No recent Application Error/Windows Error Reporting events for Mission Control UI in the last 10 minutes.")
     } else {
         foreach ($event in $eventList) {
             $lines.Add("event_time=$($event.TimeCreated.ToUniversalTime().ToString('o'))")
@@ -344,7 +352,7 @@ Write-Host "[Kaizen MAX] Loaded environment from $EnvFile" -ForegroundColor Cyan
 
 $repoRoot = (Resolve-Path "$PSScriptRoot\..").Path
 $coreDir = Join-Path $repoRoot "core"
-$uiDir = Join-Path $repoRoot "ui-dioxus"
+$uiDir = Join-Path $repoRoot "ui-rust-native"
 Stop-StaleKaizenProcesses -RepoRoot $repoRoot
 $jobHandle = New-KillOnCloseJob
 
@@ -361,7 +369,9 @@ try {
             $coreProcess = Start-ExecutableProcess -Name "Kaizen Core" -ExecutablePath $coreExe -WorkingDirectory $coreDir -JobHandle $jobHandle -NoNewWindow
         } else {
             Write-Host "[Kaizen MAX] Release core binary not found. Using cargo run." -ForegroundColor Yellow
-            $coreProcess = Start-CommandProcess -Name "Kaizen Core" -WorkingDirectory $coreDir -Command "cargo run" -JobHandle $jobHandle
+            $cargoPath = Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe"
+            if (-not (Test-Path $cargoPath)) { $cargoPath = "cargo" }
+            $coreProcess = Start-CommandProcess -Name "Kaizen Core" -WorkingDirectory $coreDir -Command "`"$cargoPath`" run --bin kaizen-gateway" -JobHandle $jobHandle
         }
 
         $started.Add([PSCustomObject]@{
@@ -371,13 +381,19 @@ try {
     }
 
     if (-not $CoreOnly) {
-        $uiExe = Join-Path $uiDir "target\release\ui-dioxus.exe"
+        $uiExeCandidates = @(
+            (Join-Path $uiDir "src-tauri\target\release\kaizen_mission_control.exe")
+        )
 
-        if (Test-Path $uiExe) {
+        $uiExe = $uiExeCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+        if ($uiExe) {
             $uiProcess = Start-ExecutableProcess -Name "Kaizen MAX UI" -ExecutablePath $uiExe -WorkingDirectory $uiDir -JobHandle $jobHandle
         } else {
-            Write-Host "[Kaizen MAX] Release Dioxus UI binary not found. Using cargo run." -ForegroundColor Yellow
-            $uiProcess = Start-CommandProcess -Name "Kaizen MAX UI" -WorkingDirectory $uiDir -Command "cargo run" -JobHandle $jobHandle
+            Write-Host "[Kaizen MAX] Release Mission Control binary not found. Using cargo tauri dev." -ForegroundColor Yellow
+            $cargoPath = Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe"
+            if (-not (Test-Path $cargoPath)) { $cargoPath = "cargo" }
+            $uiProcess = Start-CommandProcess -Name "Kaizen MAX UI" -WorkingDirectory $uiDir -Command "`"$cargoPath`" tauri dev" -JobHandle $jobHandle
         }
 
         $started.Add([PSCustomObject]@{

@@ -1,0 +1,74 @@
+use reqwest::Method;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
+
+pub struct CoreClientState {
+    pub core_base_url: String,
+    pub client: reqwest::Client,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoreRequestInput {
+    pub method: String,
+    pub path: String,
+    #[serde(default)]
+    pub body: Option<Value>,
+    #[serde(default)]
+    pub admin_token: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CoreResponseOutput {
+    pub status: u16,
+    pub body: Value,
+}
+
+#[tauri::command]
+pub async fn core_request(
+    input: CoreRequestInput,
+    state: State<'_, CoreClientState>,
+) -> Result<CoreResponseOutput, String> {
+    Ok(CoreResponseOutput { status: 200, body: Value::Null })
+}
+
+#[tauri::command]
+pub async fn open_agent_window(app: AppHandle, agent_id: String) -> Result<(), String> {
+    let label = format!("agent-{}", agent_id);
+    
+    if let Some(window) = app.get_webview_window(&label) {
+        window.set_focus().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    WebviewWindowBuilder::new(
+        &app,
+        label,
+        WebviewUrl::App(format!("index.html#/chat/{}", agent_id).into()),
+    )
+    .title(format!("Agent {}", agent_id))
+    .inner_size(800.0, 600.0)
+    .build()
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn focus_agent_window(app: AppHandle, agent_id: String) -> Result<(), String> {
+    let label = format!("agent-{}", agent_id);
+    if let Some(window) = app.get_webview_window(&label) {
+        window.set_focus().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn close_agent_window(app: AppHandle, agent_id: String) -> Result<(), String> {
+    let label = format!("agent-{}", agent_id);
+    if let Some(window) = app.get_webview_window(&label) {
+        window.close().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}

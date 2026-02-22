@@ -13,6 +13,7 @@ data/
 core/target/
 ui-rs/target/
 ui-dioxus/target/
+ui-tauri-solid/src-tauri/target/
 **/*.rs.bk
 
 # ----- Node / UI -----
@@ -20,6 +21,13 @@ ui/node_modules/
 ui/dist/
 ui/.vite/
 ui/.next/
+ui-tauri-solid/node_modules/
+ui-tauri-solid/dist/
+ui-tauri-solid/.vite/
+ui-rust-native/frontend/dist/
+ui-rust-native/frontend/.trunk/
+ui-rust-native/src-tauri/target/
+ui-rust-native/frontend/target/
 *.tsbuildinfo
 
 # ----- OS -----

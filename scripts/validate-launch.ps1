@@ -10,7 +10,7 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $coreDir = Join-Path $repoRoot "core"
-$uiDir = Join-Path $repoRoot "ui-dioxus"
+$uiDir = Join-Path $repoRoot "ui-rust-native"
 $startMaxPath = Join-Path $PSScriptRoot "start-max.ps1"
 
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
@@ -164,8 +164,8 @@ try {
         $startMaxProc = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $startMaxPath -WorkingDirectory $repoRoot -PassThru
         $startedProcesses.Add($startMaxProc)
     } else {
-        $coreProc = Start-Process -FilePath "cargo" -ArgumentList "run" -WorkingDirectory $coreDir -PassThru
-        $uiProc = Start-Process -FilePath "cargo" -ArgumentList "run" -WorkingDirectory $uiDir -PassThru
+        $coreProc = Start-Process -FilePath "cargo" -ArgumentList "run", "--bin", "kaizen-gateway" -WorkingDirectory $coreDir -PassThru
+        $uiProc = Start-Process -FilePath "cargo" -ArgumentList "tauri", "dev" -WorkingDirectory $uiDir -PassThru
         $startedProcesses.Add($coreProc)
         $startedProcesses.Add($uiProc)
     }
@@ -241,7 +241,9 @@ finally {
     Start-Sleep -Milliseconds 300
     Get-Process kaizen-gateway -ErrorAction SilentlyContinue | Stop-Process -Force
     Get-Process zeroclaw-gateway -ErrorAction SilentlyContinue | Stop-Process -Force
-    Get-Process ui-dioxus -ErrorAction SilentlyContinue | Stop-Process -Force
+    Get-Process "kaizen max mission control" -ErrorAction SilentlyContinue | Stop-Process -Force
+    Get-Process kaizen_max_mission_control -ErrorAction SilentlyContinue | Stop-Process -Force
+    Get-Process trunk -ErrorAction SilentlyContinue | Stop-Process -Force
 }
 
 $passCount = @($results | Where-Object { $_.Passed }).Count

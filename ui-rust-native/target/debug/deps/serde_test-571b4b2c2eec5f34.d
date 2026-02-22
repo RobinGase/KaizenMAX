@@ -1,0 +1,11 @@
+C:\Users\Robin\Desktop\ARGTECH\KaizenMAX\ui-rust-native\target\debug\deps\serde_test-571b4b2c2eec5f34.d: C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_test-1.0.177\src\lib.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_test-1.0.177\src\assert.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_test-1.0.177\src\configure.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_test-1.0.177\src\de.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_test-1.0.177\src\error.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_test-1.0.177\src\ser.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_test-1.0.177\src\token.rs
+
+C:\Users\Robin\Desktop\ARGTECH\KaizenMAX\ui-rust-native\target\debug\deps\libserde_test-571b4b2c2eec5f34.rmeta: C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_test-1.0.177\src\lib.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_test-1.0.177\src\assert.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_test-1.0.177\src\configure.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_test-1.0.177\src\de.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_test-1.0.177\src\error.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_test-1.0.177\src\ser.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_test-1.0.177\src\token.rs
+
+C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_test-1.0.177\src\lib.rs:
+C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_test-1.0.177\src\assert.rs:
+C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_test-1.0.177\src\configure.rs:
+C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_test-1.0.177\src\de.rs:
+C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_test-1.0.177\src\error.rs:
+C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_test-1.0.177\src\ser.rs:
+C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_test-1.0.177\src\token.rs:

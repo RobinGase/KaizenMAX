@@ -1,0 +1,2 @@
+cargo:rustc-link-search=native=C:\Users\Robin\Desktop\ARGTECH\KaizenMAX\ui-rust-native\target\debug\build\webview2-com-sys-14529481df7f6b4b\out\x64
+cargo:rustc-link-lib=advapi32

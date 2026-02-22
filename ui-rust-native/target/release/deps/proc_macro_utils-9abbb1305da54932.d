@@ -1,0 +1,10 @@
+C:\Users\Robin\Desktop\ARGTECH\KaizenMAX\ui-rust-native\target\release\deps\proc_macro_utils-9abbb1305da54932.d: C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro-utils-0.10.0\src\lib.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro-utils-0.10.0\src\parser.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro-utils-0.10.0\src\assert.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro-utils-0.10.0\src\__private.rs
+
+C:\Users\Robin\Desktop\ARGTECH\KaizenMAX\ui-rust-native\target\release\deps\libproc_macro_utils-9abbb1305da54932.rlib: C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro-utils-0.10.0\src\lib.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro-utils-0.10.0\src\parser.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro-utils-0.10.0\src\assert.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro-utils-0.10.0\src\__private.rs
+
+C:\Users\Robin\Desktop\ARGTECH\KaizenMAX\ui-rust-native\target\release\deps\libproc_macro_utils-9abbb1305da54932.rmeta: C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro-utils-0.10.0\src\lib.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro-utils-0.10.0\src\parser.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro-utils-0.10.0\src\assert.rs C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro-utils-0.10.0\src\__private.rs
+
+C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro-utils-0.10.0\src\lib.rs:
+C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro-utils-0.10.0\src\parser.rs:
+C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro-utils-0.10.0\src\assert.rs:
+C:\Users\Robin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\proc-macro-utils-0.10.0\src\__private.rs:

@@ -1,0 +1,201 @@
+:root {
+  /* Color - monochrome */
+  --mc-bg-canvas: #0B0B0B;
+  --mc-bg-surface-1: #111111;
+  --mc-bg-surface-2: #161616;
+  --mc-bg-elevated: #1C1C1C;
+  --mc-bg-inverse: #F5F5F5;
+
+  --mc-fg-primary: #F2F2F2;
+  --mc-fg-secondary: #C7C7C7;
+  --mc-fg-muted: #8E8E8E;
+  --mc-fg-inverse: #0E0E0E;
+
+  --mc-border-strong: #3A3A3A;
+  --mc-border-default: #2A2A2A;
+  --mc-border-subtle: #202020;
+
+  --mc-state-hover: #202020;
+  --mc-state-active: #2A2A2A;
+  --mc-state-selected: #2F2F2F;
+  --mc-focus-ring: #E8E8E8;
+
+  /* Typography */
+  --mc-font-ui: "IBM Plex Sans", "Segoe UI", sans-serif;
+  --mc-font-mono: "JetBrains Mono", "Cascadia Code", monospace;
+
+  --mc-fs-11: 11px;
+  --mc-fs-12: 12px;
+  --mc-fs-13: 13px;
+  --mc-fs-14: 14px;
+}
+
+html, body, #root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  font-family: var(--mc-font-ui);
+  font-size: var(--mc-fs-13);
+  color: var(--mc-fg-primary);
+  background-color: var(--mc-bg-canvas);
+}
+
+/* Layout Rules requested */
+.app-shell {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+}
+
+.nav-rail {
+  width: 240px;
+  background-color: var(--mc-bg-surface-1);
+  border-right: 1px solid var(--mc-border-default);
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  box-sizing: border-box;
+  overflow-y: auto;
+}
+
+.main-shell {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  background-color: var(--mc-bg-canvas);
+}
+
+.mission-layout {
+  display: grid;
+  grid-template-columns: 240px 1fr 300px;
+  flex: 1;
+  overflow: hidden;
+}
+
+.mission-layout > * {
+  border-right: 1px solid var(--mc-border-default);
+}
+
+.mission-layout > *:last-child {
+  border-right: none;
+}
+
+.chat-panel {
+  display: flex;
+  flex-direction: column;
+  background-color: var(--mc-bg-canvas);
+  flex: 1;
+  overflow: hidden;
+}
+
+.chat-log {
+  flex: 1;
+  padding: 24px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.composer-container {
+  padding: 16px 24px;
+  border-top: 1px solid var(--mc-border-default);
+  background-color: var(--mc-bg-surface-1);
+}
+
+.composer {
+  width: 100%;
+  background-color: var(--mc-bg-surface-2);
+  border: 1px solid var(--mc-border-default);
+  border-radius: 6px;
+  padding: 12px;
+  color: var(--mc-fg-primary);
+  font-family: var(--mc-font-ui);
+  font-size: var(--mc-fs-14);
+  resize: none;
+  box-sizing: border-box;
+}
+
+.composer:focus {
+  outline: none;
+  border-color: var(--mc-border-strong);
+}
+
+/* Other helper classes for rendering */
+.brand-title {
+  font-family: var(--mc-font-mono);
+  font-size: var(--mc-fs-14);
+  font-weight: bold;
+  color: var(--mc-fg-primary);
+  margin-bottom: 24px;
+}
+
+.top-bar {
+  height: 48px;
+  border-bottom: 1px solid var(--mc-border-default);
+  display: flex;
+  align-items: center;
+  padding: 0 24px;
+  background-color: var(--mc-bg-surface-1);
+}
+
+.status-chip {
+  font-family: var(--mc-font-mono);
+  font-size: var(--mc-fs-12);
+  color: var(--mc-fg-muted);
+}
+.status-chip.ok {
+  color: #4ADE80;
+}
+
+/* Agent and Branch Panels */
+.agents-panel, .branches-panel {
+  padding: 16px;
+  background-color: var(--mc-bg-surface-1);
+  overflow-y: auto;
+}
+
+.panel-title {
+  font-family: var(--mc-font-mono);
+  font-size: var(--mc-fs-12);
+  color: var(--mc-fg-muted);
+  text-transform: uppercase;
+  margin-bottom: 16px;
+}
+
+.agent-item, .branch-item {
+  padding: 8px;
+  margin-bottom: 8px;
+  background-color: var(--mc-bg-surface-2);
+  border: 1px solid var(--mc-border-default);
+  border-radius: 4px;
+}
+
+.message {
+  padding: 12px 16px;
+  border-radius: 6px;
+  max-width: 80%;
+  line-height: 1.5;
+}
+
+.message.user {
+  align-self: flex-end;
+  background-color: var(--mc-border-default);
+}
+
+.message.agent {
+  align-self: flex-start;
+  background-color: var(--mc-bg-surface-2);
+  border: 1px solid var(--mc-border-subtle);
+}
+
+.msg-sender {
+  font-family: var(--mc-font-mono);
+  font-size: var(--mc-fs-11);
+  color: var(--mc-fg-muted);
+  margin-bottom: 4px;
+}
