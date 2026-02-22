@@ -22,16 +22,18 @@ pub struct HealthResponse {
 pub struct SubAgent {
     pub id: String,
     pub name: String,
-    pub task_id: Option<String>,
+    pub task_id: String,
     pub objective: String,
     pub status: AgentStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentStatus {
     Idle,
     Active,
     Blocked,
+    ReviewPending,
     Done,
 }
 
@@ -70,27 +72,124 @@ pub struct ChatResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CompanyBranch {
-    pub id: String,
-    pub name: String,
-    pub location: String,
-    pub status: String,
-    pub manager_id: Option<String>,
+#[serde(rename_all = "snake_case")]
+pub enum GateState {
+    Plan,
+    Execute,
+    Review,
+    HumanSmokeTest,
+    Deploy,
+    Complete,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Mission {
-    pub id: String,
-    pub title: String,
-    pub description: String,
-    pub status: String,
+pub struct GateConditions {
+    pub plan_defined: bool,
+    pub plan_acknowledged: bool,
+    pub execution_artifacts_present: bool,
+    pub passed_reasoners_test: bool,
+    pub kaizen_review_approved: bool,
+    pub human_smoke_test_passed: bool,
+    pub deploy_validation_passed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Worker {
-    pub id: String,
-    pub name: String,
-    pub role: String,
-    pub active: bool,
-    pub branch_id: Option<String>,
+pub struct GateSnapshot {
+    pub current_state: GateState,
+    pub conditions: GateConditions,
+    pub hard_gates_enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GateTransitionResult {
+    pub allowed: bool,
+    pub from: GateState,
+    pub to: GateState,
+    pub blocked_by: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KaizenSettings {
+    pub runtime_engine: String,
+    pub openclaw_compat_enabled: bool,
+    pub auto_spawn_subagents: bool,
+    pub max_subagents: u32,
+    pub main_chat_pinned: bool,
+    pub new_agent_chat_default_state: String,
+    pub allow_direct_user_to_subagent_chat: bool,
+    pub crystal_ball_enabled: bool,
+    pub crystal_ball_default_open: bool,
+    pub hard_gates_enabled: bool,
+    pub require_human_smoke_test_before_deploy: bool,
+    pub provider_inference_only: bool,
+    pub credentials_ui_enabled: bool,
+    pub agent_name_editable_after_spawn: bool,
+    pub secrets_storage_mode: String,
+    pub write_plaintext_secrets_to_env: bool,
+    pub show_only_masked_secrets_in_ui: bool,
+    pub mattermost_url: String,
+    pub mattermost_channel_id: String,
+    pub selected_github_repo: String,
+    pub inference_provider: String,
+    pub inference_model: String,
+    pub inference_max_tokens: u32,
+    pub inference_temperature: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitHubStatusResponse {
+    pub authenticated: bool,
+    pub host: String,
+    pub login: Option<String>,
+    pub token_source: Option<String>,
+    pub scopes: Vec<String>,
+    pub git_protocol: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitHubRepoSummary {
+    pub name_with_owner: String,
+    pub is_private: bool,
+    pub updated_at: String,
+    pub url: String,
+    pub viewer_permission: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitHubReposResponse {
+    pub connected: bool,
+    pub repos: Vec<GitHubRepoSummary>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultStatusResponse {
+    pub available: bool,
+    pub key_source: String,
+    pub vault_path: String,
+    pub key_path: Option<String>,
+    pub bootstrap_created: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretMetadata {
+    pub provider: String,
+    pub configured: bool,
+    pub key_id: String,
+    pub created_at: String,
+    pub last_updated: String,
+    pub last4: String,
+    pub secret_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthStatusResponse {
+    pub provider: String,
+    pub supported: bool,
+    pub connected: bool,
+    pub access_token_configured: bool,
+    pub refresh_token_configured: bool,
+    pub message: String,
 }
