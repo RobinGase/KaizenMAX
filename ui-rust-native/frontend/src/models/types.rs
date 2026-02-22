@@ -1,5 +1,13 @@
 use serde::{Deserialize, Serialize};
 
+fn default_primary_branch() -> String {
+    "primary".to_string()
+}
+
+fn default_general_mission() -> String {
+    "general".to_string()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TabId {
     Mission,
@@ -22,9 +30,63 @@ pub struct HealthResponse {
 pub struct SubAgent {
     pub id: String,
     pub name: String,
+    #[serde(default = "default_primary_branch")]
+    pub branch_id: String,
+    #[serde(default = "default_general_mission")]
+    pub mission_id: String,
     pub task_id: String,
     pub objective: String,
     pub status: AgentStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BranchStatus {
+    Active,
+    Paused,
+    Archived,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MissionStatus {
+    Backlog,
+    InProgress,
+    Review,
+    Done,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Branch {
+    pub id: String,
+    pub name: String,
+    pub status: BranchStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Mission {
+    pub id: String,
+    pub branch_id: String,
+    pub name: String,
+    pub objective: String,
+    pub status: MissionStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MissionTopologyNode {
+    pub mission: Mission,
+    pub workers: Vec<SubAgent>,
+    pub active_workers: usize,
+    pub blocked_workers: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchTopologyNode {
+    pub branch: Branch,
+    pub missions: Vec<MissionTopologyNode>,
+    pub total_workers: usize,
+    pub active_workers: usize,
+    pub blocked_workers: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,6 +175,7 @@ pub struct KaizenSettings {
     pub runtime_engine: String,
     pub openclaw_compat_enabled: bool,
     pub auto_spawn_subagents: bool,
+    pub orchestrator_full_control: bool,
     pub max_subagents: u32,
     pub main_chat_pinned: bool,
     pub new_agent_chat_default_state: String,

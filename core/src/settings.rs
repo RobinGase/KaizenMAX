@@ -13,6 +13,8 @@ pub struct KaizenSettings {
     pub openclaw_compat_enabled: bool,
     #[serde(default)]
     pub auto_spawn_subagents: bool,
+    #[serde(default = "default_true")]
+    pub orchestrator_full_control: bool,
     #[serde(default = "default_max_subagents")]
     pub max_subagents: u32,
     #[serde(default = "default_true")]
@@ -79,6 +81,7 @@ impl Default for KaizenSettings {
             runtime_engine: "kaizen".to_string(),
             openclaw_compat_enabled: false,
             auto_spawn_subagents: false,
+            orchestrator_full_control: true,
             max_subagents: 5,
             main_chat_pinned: true,
             new_agent_chat_default_state: "closed".to_string(),
@@ -109,6 +112,7 @@ pub struct SettingsPatch {
     pub runtime_engine: Option<String>,
     pub openclaw_compat_enabled: Option<bool>,
     pub auto_spawn_subagents: Option<bool>,
+    pub orchestrator_full_control: Option<bool>,
     pub max_subagents: Option<u32>,
     pub main_chat_pinned: Option<bool>,
     pub new_agent_chat_default_state: Option<String>,
@@ -202,6 +206,9 @@ impl KaizenSettings {
         if let Ok(val) = std::env::var("ADMIN_AUTO_SPAWN") {
             self.auto_spawn_subagents = val.parse().unwrap_or(self.auto_spawn_subagents);
         }
+        if let Ok(val) = std::env::var("ADMIN_ORCHESTRATOR_FULL_CONTROL") {
+            self.orchestrator_full_control = val.parse().unwrap_or(self.orchestrator_full_control);
+        }
         if let Ok(val) = std::env::var("ADMIN_REQUIRE_HUMAN_SMOKE_TEST") {
             self.require_human_smoke_test_before_deploy = val
                 .parse()
@@ -244,6 +251,9 @@ impl KaizenSettings {
         }
         if let Some(value) = patch.auto_spawn_subagents {
             self.auto_spawn_subagents = value;
+        }
+        if let Some(value) = patch.orchestrator_full_control {
+            self.orchestrator_full_control = value;
         }
         if let Some(value) = patch.max_subagents {
             self.max_subagents = value;
@@ -411,6 +421,7 @@ mod tests {
             runtime_engine: Some("zeroclaw".to_string()),
             openclaw_compat_enabled: None,
             auto_spawn_subagents: None,
+            orchestrator_full_control: None,
             max_subagents: None,
             main_chat_pinned: None,
             new_agent_chat_default_state: None,

@@ -18,7 +18,7 @@ use axum::{
 };
 use futures_util::Stream;
 use kaizen_gateway::{
-    agents::{AgentRegistry, AgentStatus, SubAgent},
+    agents::{AgentRegistry, AgentStatus, Branch, Mission, SubAgent},
     crystal_ball::{
         CrystalBallClient, CrystalBallConfig, CrystalBallEvent, MattermostSmokeResult,
         MattermostValidation, redact_sensitive,
@@ -1606,14 +1606,202 @@ async fn chat_stream(
 #[derive(Debug, Deserialize)]
 struct SpawnAgentRequest {
     agent_name: String,
-    task_id: String,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    mission_id: Option<String>,
+    #[serde(default)]
+    branch_id: Option<String>,
     objective: String,
     #[serde(default)]
     user_requested: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct CreateBranchRequest {
+    id: String,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateMissionRequest {
+    id: String,
+    branch_id: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    objective: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListMissionsQuery {
+    branch_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct MissionTopologyNode {
+    mission: Mission,
+    workers: Vec<SubAgent>,
+    active_workers: usize,
+    blocked_workers: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct BranchTopologyNode {
+    branch: Branch,
+    missions: Vec<MissionTopologyNode>,
+    total_workers: usize,
+    active_workers: usize,
+    blocked_workers: usize,
+}
+
+fn normalize_scope_id(raw: &str) -> String {
+    raw.trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string()
+}
+
 async fn list_agents(State(state): State<AppState>) -> Json<Vec<SubAgent>> {
     Json(state.agents.read().await.list().to_vec())
+}
+
+async fn list_branches(State(state): State<AppState>) -> Json<Vec<Branch>> {
+    Json(state.agents.read().await.list_branches().to_vec())
+}
+
+async fn create_branch(
+    State(state): State<AppState>,
+    Json(request): Json<CreateBranchRequest>,
+) -> Result<Json<Branch>, (StatusCode, String)> {
+    let id = normalize_scope_id(&request.id);
+    if id.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "Branch id cannot be empty".to_string()));
+    }
+
+    let name = request
+        .name
+        .unwrap_or_else(|| id.replace('-', " "))
+        .trim()
+        .to_string();
+    if name.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Branch name cannot be empty".to_string(),
+        ));
+    }
+
+    let branch = {
+        let mut registry = state.agents.write().await;
+        registry
+            .create_branch(id, name)
+            .map_err(|err| (StatusCode::BAD_REQUEST, err))?
+    };
+
+    Ok(Json(branch))
+}
+
+async fn list_missions(
+    State(state): State<AppState>,
+    Query(query): Query<ListMissionsQuery>,
+) -> Json<Vec<Mission>> {
+    let registry = state.agents.read().await;
+    let missions = if let Some(branch_id) = query.branch_id {
+        let normalized = normalize_scope_id(&branch_id);
+        registry.list_missions_for_branch(normalized.as_str())
+    } else {
+        registry.list_missions().to_vec()
+    };
+
+    Json(missions)
+}
+
+async fn create_mission(
+    State(state): State<AppState>,
+    Json(request): Json<CreateMissionRequest>,
+) -> Result<Json<Mission>, (StatusCode, String)> {
+    let id = normalize_scope_id(&request.id);
+    let branch_id = normalize_scope_id(&request.branch_id);
+
+    if id.is_empty() || branch_id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Mission id and branch id are required".to_string(),
+        ));
+    }
+
+    let name = request.name.unwrap_or_else(|| id.clone());
+    let objective = request.objective.unwrap_or_else(|| "Mission objective pending".to_string());
+
+    let mission = {
+        let mut registry = state.agents.write().await;
+        registry
+            .create_mission(id, branch_id, name, objective)
+            .map_err(|err| (StatusCode::BAD_REQUEST, err))?
+    };
+
+    Ok(Json(mission))
+}
+
+async fn get_topology(State(state): State<AppState>) -> Json<Vec<BranchTopologyNode>> {
+    let registry = state.agents.read().await;
+    let mut workers_by_scope: HashMap<(String, String), Vec<SubAgent>> = HashMap::new();
+
+    for worker in registry.list() {
+        workers_by_scope
+            .entry((worker.branch_id.clone(), worker.mission_id.clone()))
+            .or_default()
+            .push(worker.clone());
+    }
+
+    let mut branches = Vec::new();
+    for branch in registry.list_branches() {
+        let mut mission_nodes = Vec::new();
+        for mission in registry.list_missions_for_branch(&branch.id) {
+            let workers = workers_by_scope
+                .remove(&(branch.id.clone(), mission.id.clone()))
+                .unwrap_or_default();
+
+            let active_workers = workers
+                .iter()
+                .filter(|worker| matches!(worker.status, AgentStatus::Active))
+                .count();
+            let blocked_workers = workers
+                .iter()
+                .filter(|worker| matches!(worker.status, AgentStatus::Blocked))
+                .count();
+
+            mission_nodes.push(MissionTopologyNode {
+                mission,
+                workers,
+                active_workers,
+                blocked_workers,
+            });
+        }
+
+        let total_workers = mission_nodes.iter().map(|node| node.workers.len()).sum();
+        let active_workers = mission_nodes.iter().map(|node| node.active_workers).sum();
+        let blocked_workers = mission_nodes.iter().map(|node| node.blocked_workers).sum();
+
+        branches.push(BranchTopologyNode {
+            branch: branch.clone(),
+            missions: mission_nodes,
+            total_workers,
+            active_workers,
+            blocked_workers,
+        });
+    }
+
+    Json(branches)
 }
 
 async fn spawn_agent(
@@ -1621,21 +1809,53 @@ async fn spawn_agent(
     Json(request): Json<SpawnAgentRequest>,
 ) -> Result<Json<SubAgent>, (StatusCode, String)> {
     let settings = state.settings.read().await.clone();
-    if !settings.auto_spawn_subagents && !request.user_requested {
+    if !request.user_requested && !(settings.auto_spawn_subagents || settings.orchestrator_full_control) {
         return Err((
             StatusCode::FORBIDDEN,
-            "Sub-agent spawn denied: explicit user request required".to_string(),
+            "Sub-agent spawn denied: explicit user request required or enable orchestrator control".to_string(),
         ));
     }
+
+    let branch_id = request
+        .branch_id
+        .as_deref()
+        .map(normalize_scope_id)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "primary".to_string());
+
+    let mission_id = request
+        .mission_id
+        .as_deref()
+        .map(normalize_scope_id)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            request
+                .task_id
+                .as_deref()
+                .map(normalize_scope_id)
+                .filter(|value| !value.is_empty())
+        })
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            "Mission id (or legacy task_id) is required".to_string(),
+        ))?;
+
+    let task_id = request
+        .task_id
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| mission_id.clone());
 
     let agent_id = next_id(&state, "agent");
     let created = {
         let mut registry = state.agents.write().await;
         let created = registry
-            .spawn(
+            .spawn_scoped(
                 agent_id,
                 request.agent_name,
-                request.task_id,
+                branch_id,
+                mission_id,
+                task_id,
                 request.objective,
             )
             .map_err(|err| (StatusCode::BAD_REQUEST, err))?;
@@ -1653,7 +1873,10 @@ async fn spawn_agent(
             target_actor: created.name.clone(),
             target_agent_id: created.id.clone(),
             task_id: created.task_id.clone(),
-            message: format!("Spawned '{}' for task {}", created.name, created.task_id),
+            message: format!(
+                "Spawned '{}' in branch '{}' for mission '{}'",
+                created.name, created.branch_id, created.mission_id
+            ),
             visibility: "operator".to_string(),
         },
     )
@@ -2859,6 +3082,9 @@ async fn main() {
         .route("/api/chat", post(chat))
         .route("/api/chat/history", get(get_chat_history))
         .route("/api/chat/stream", post(chat_stream))
+        .route("/api/topology", get(get_topology))
+        .route("/api/branches", get(list_branches).post(create_branch))
+        .route("/api/missions", get(list_missions).post(create_mission))
         .route("/api/agents", get(list_agents).post(spawn_agent))
         .route("/api/agents/{agent_id}/status", patch(update_agent_status))
         .route(

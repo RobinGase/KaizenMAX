@@ -20,6 +20,11 @@
       "default": false,
       "description": "Allow Kaizen to auto-spawn sub-agents without explicit user instruction."
     },
+    "orchestrator_full_control": {
+      "type": "boolean",
+      "default": true,
+      "description": "Allow Kaizen orchestrator to create and coordinate branch workers without manual spawn-only restrictions."
+    },
     "max_subagents": {
       "type": "integer",
       "minimum": 0,

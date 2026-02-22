@@ -4,6 +4,7 @@
   "agent_name_editable_after_spawn": true,
   "allow_direct_user_to_subagent_chat": true,
   "auto_spawn_subagents": false,
+  "orchestrator_full_control": true,
   "credentials_ui_enabled": true,
   "crystal_ball_default_open": false,
   "crystal_ball_enabled": true,
