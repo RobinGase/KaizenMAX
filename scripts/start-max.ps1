@@ -175,6 +175,35 @@ function Add-ProcessToJob {
     }
 }
 
+function Start-ProcessWithNoWindowFallback {
+    param(
+        [hashtable]$StartArgs,
+        [string]$Name,
+        [bool]$PreferNoNewWindow
+    )
+
+    if ($PreferNoNewWindow) {
+        $StartArgs["NoNewWindow"] = $true
+    }
+
+    try {
+        return Start-Process @StartArgs
+    } catch {
+        $message = $_.Exception.Message
+        $pipeClosed =
+            ($message -match "(?i)0x800700e8") -or
+            ($message -match "(?i)pipe is being closed")
+
+        if ($PreferNoNewWindow -and $pipeClosed) {
+            Write-Host "[Kaizen MAX] ${Name}: retrying without -NoNewWindow (detached console host)." -ForegroundColor Yellow
+            $StartArgs.Remove("NoNewWindow") | Out-Null
+            return Start-Process @StartArgs
+        }
+
+        throw
+    }
+}
+
 function Start-CommandProcess {
     param(
         [string]$Name,
@@ -184,7 +213,14 @@ function Start-CommandProcess {
     )
 
     Write-Host "[Kaizen MAX] Starting ${Name}: $Command" -ForegroundColor Green
-    $process = Start-Process -FilePath "cmd.exe" -ArgumentList "/d", "/c", $Command -WorkingDirectory $WorkingDirectory -PassThru -NoNewWindow
+    $startArgs = @{
+        FilePath = "cmd.exe"
+        ArgumentList = @("/d", "/c", $Command)
+        WorkingDirectory = $WorkingDirectory
+        PassThru = $true
+    }
+
+    $process = Start-ProcessWithNoWindowFallback -StartArgs $startArgs -Name $Name -PreferNoNewWindow $true
 
     try {
         Add-ProcessToJob -JobHandle $JobHandle -Process $process
@@ -212,11 +248,7 @@ function Start-ExecutableProcess {
         PassThru = $true
     }
 
-    if ($NoNewWindow) {
-        $startArgs["NoNewWindow"] = $true
-    }
-
-    $process = Start-Process @startArgs
+    $process = Start-ProcessWithNoWindowFallback -StartArgs $startArgs -Name $Name -PreferNoNewWindow $NoNewWindow.IsPresent
 
     try {
         Add-ProcessToJob -JobHandle $JobHandle -Process $process
@@ -255,9 +287,15 @@ function Stop-StaleKaizenProcesses {
 
     $repoRootLower = $RepoRoot.ToLowerInvariant()
     $selfPid = $PID
+    $selfParentPid = 0
+
+    $selfProc = Get-CimInstance Win32_Process -Filter "ProcessId = $selfPid" -ErrorAction SilentlyContinue
+    if ($null -ne $selfProc) {
+        $selfParentPid = [int]$selfProc.ParentProcessId
+    }
 
     $stale = Get-CimInstance Win32_Process | Where-Object {
-        if ($PSItem.ProcessId -eq $selfPid) {
+        if ($PSItem.ProcessId -eq $selfPid -or ($selfParentPid -gt 0 -and $PSItem.ProcessId -eq $selfParentPid)) {
             return $false
         }
 
