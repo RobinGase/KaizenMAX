@@ -2,7 +2,7 @@ use leptos::*;
 use leptos::ev;
 use leptos_router::*;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 use wasm_bindgen::prelude::*;
 
@@ -20,7 +20,12 @@ fn js_error(value: JsValue) -> String {
         .unwrap_or_else(|| "tauri invoke rejected".to_string())
 }
 
-async fn detach_agent(agent_id: String) {
+async fn check_window_exists(agent_id: &str) -> bool {
+    // simplified check for demo
+    false
+}
+
+async fn focus_or_detach_agent(agent_id: String) {
     let args = json!({ "agent_id": agent_id });
     if let Ok(js_args) = serde_wasm_bindgen::to_value(&args) {
         let _ = tauri_invoke("open_agent_window", js_args).await;
@@ -67,6 +72,7 @@ pub struct AppState {
     pub health: RwSignal<Option<HealthResponse>>,
     pub agents: RwSignal<Vec<SubAgent>>,
     pub events: RwSignal<Vec<CrystalBallEvent>>,
+    pub is_loading: RwSignal<bool>,
 }
 
 impl AppState {
@@ -76,21 +82,21 @@ impl AppState {
             health: create_rw_signal(None),
             agents: create_rw_signal(vec![]),
             events: create_rw_signal(vec![]),
+            is_loading: create_rw_signal(true),
         }
     }
 
     fn start_polling(&self) {
         let state = self.clone();
 
-        // Initial fetch
         let state_init = state.clone();
         wasm_bindgen_futures::spawn_local(async move {
             let _ = state_init.refresh_health().await;
             let _ = state_init.refresh_agents().await;
             let _ = state_init.refresh_events().await;
+            state_init.is_loading.set(false);
         });
 
-        // Polling every 5 seconds
         let handle = set_interval_with_handle(
             move || {
                 let state_clone = state.clone();
@@ -150,10 +156,14 @@ impl AppState {
 pub fn MainMissionView() -> impl IntoView {
     let app_state = use_context::<AppState>().unwrap_or_else(AppState::new);
     let health = app_state.health;
+    let is_loading = app_state.is_loading;
 
     let left_width = create_rw_signal(260);
     let right_width = create_rw_signal(320);
     let dragging = create_rw_signal(None::<&'static str>);
+    
+    let chat_log_ref = create_node_ref::<html::Div>();
+    let telemetry_ref = create_node_ref::<html::Div>();
 
     window_event_listener(ev::mousemove, move |ev| {
         if let Some(side) = dragging.get_untracked() {
@@ -200,6 +210,20 @@ pub fn MainMissionView() -> impl IntoView {
             handle.clear();
         });
     });
+    
+    create_effect(move |_| {
+        messages.track();
+        if let Some(el) = chat_log_ref.get() {
+            el.set_scroll_top(el.scroll_height());
+        }
+    });
+    
+    create_effect(move |_| {
+        app_state.events.track();
+        if let Some(el) = telemetry_ref.get() {
+            el.set_scroll_top(el.scroll_height());
+        }
+    });
 
     let send_message = move || {
         let text = input.get();
@@ -224,7 +248,6 @@ pub fn MainMissionView() -> impl IntoView {
         });
     };
 
-
     view! {
         <div class="app-shell">
             <div
@@ -238,19 +261,4 @@ pub fn MainMissionView() -> impl IntoView {
 
                     <div class="nav-tabs">
                         <div class="nav-tab active">"Mission"</div>
-                        <div class="nav-tab">"Branches"</div>
-                        <div class="nav-tab">"Gates"</div>
-                        <div class="nav-tab">"Activity"</div>
-                        <div class="nav-tab">"Workspace"</div>
-                        <div class="nav-tab">"Integrations"</div>
-                        <div class="nav-tab">"Settings"</div>
-                    </div>
-
-                    <div class="panel-title">"Agents"</div>
-                    {move || {
-                        app_state
-                            .agents
-                            .get()
-                            .into_iter()
-                            .map(|agent| {
-                                let agent_id = agent
+                        

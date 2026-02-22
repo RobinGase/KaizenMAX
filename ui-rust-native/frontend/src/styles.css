@@ -309,3 +309,27 @@ button:hover,
 .event-time { color: #555; }
 .event-type { color: #a87ffb; width: 80px; flex-shrink: 0; }
 .event-msg { flex: 1; color: #ccc; }
+
+/* Collapsible Hierarchy */
+details.hierarchy-group > summary { list-style: none; cursor: pointer; color: var(--mc-text); font-weight: bold; margin-bottom: 4px; display: flex; align-items: center; gap: 4px; }
+details.hierarchy-group > summary::before { content: '▶'; font-size: 10px; color: var(--mc-muted); transition: transform 0.2s; }
+details.hierarchy-group[open] > summary::before { transform: rotate(90deg); }
+details.hierarchy-group > summary::-webkit-details-marker { display: none; }
+.hierarchy-content { margin-left: 8px; border-left: 1px solid var(--mc-border); padding-left: 12px; }
+
+/* Expanded Resizer */
+.resizer-h { position: relative; }
+.resizer-h::after { content: ""; position: absolute; width: 16px; left: -6px; height: 100%; cursor: col-resize; z-index: 11; }
+
+/* Status Pulse Header */
+.status-chip { display: flex; align-items: center; gap: 6px; }
+.engine-badge { color: var(--mc-muted); font-weight: normal; margin-left: 8px; }
+.status-chip.ok::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background-color: #4caf50; animation: pulse-green 2s infinite; }
+@keyframes pulse-green { 0% { box-shadow: 0 0 0 0 rgba(76, 175, 80, 0.4); } 70% { box-shadow: 0 0 0 4px rgba(76, 175, 80, 0); } 100% { box-shadow: 0 0 0 0 rgba(76, 175, 80, 0); } }
+
+/* Skeletons */
+.skeleton-pulse { background: linear-gradient(90deg, var(--mc-surface) 25%, var(--mc-border) 50%, var(--mc-surface) 75%); background-size: 200% 100%; animation: skeleton-loading 1.5s infinite; border-radius: 4px; height: 20px; width: 100%; margin-bottom: 8px; }
+@keyframes skeleton-loading { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+/* Timestamp Typography */
+.msg-time { font-family: var(--font-mono); font-size: 10px; opacity: 0.5; margin-right: 8px; }
