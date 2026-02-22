@@ -193,13 +193,6 @@ pub struct SecretTestResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OAuthStartResponse {
-    pub provider: String,
-    pub redirect_url: String,
-    pub state_token: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OAuthStatusResponse {
     pub provider: String,
     pub supported: bool,

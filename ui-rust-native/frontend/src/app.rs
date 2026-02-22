@@ -1457,89 +1457,6 @@ fn IntegrationsTabView(app_state: AppState) -> impl IntoView {
         }
     });
 
-    let start_oauth: Rc<dyn Fn()> = Rc::new({
-        let app_state = app_state.clone();
-        move || {
-            if integration_busy.get() {
-                return;
-            }
-
-            let provider = normalize_provider(&oauth_provider.get());
-            if provider.is_empty() {
-                set_integration_error.set("OAuth provider is required.".to_string());
-                return;
-            }
-
-            set_integration_busy.set(true);
-            let app_state = app_state.clone();
-            wasm_bindgen_futures::spawn_local(async move {
-                match core_request::<OAuthStartResponse>(CoreRequestInput {
-                    method: "GET".to_string(),
-                    path: format!("/api/oauth/{}/start", provider),
-                    body: None,
-                    admin_token: app_state.admin_token_opt(),
-                })
-                .await
-                {
-                    Ok(response) => {
-                        if let Some(window) = web_sys::window() {
-                            let _ = window.open_with_url(&response.redirect_url);
-                        }
-                        set_integration_error.set(String::new());
-                        set_integration_notice
-                            .set(format!("Opened OAuth flow for {}.", response.provider));
-                    }
-                    Err(err) => {
-                        set_integration_notice.set(String::new());
-                        set_integration_error.set(format!("OAuth start failed: {}", err));
-                    }
-                }
-                set_integration_busy.set(false);
-            });
-        }
-    });
-
-    let refresh_oauth_token: Rc<dyn Fn()> = Rc::new({
-        let app_state = app_state.clone();
-        let refresh_integrations = Rc::clone(&refresh_integrations);
-        move || {
-            if integration_busy.get() {
-                return;
-            }
-
-            let provider = normalize_provider(&oauth_provider.get());
-            if provider.is_empty() {
-                set_integration_error.set("OAuth provider is required.".to_string());
-                return;
-            }
-
-            set_integration_busy.set(true);
-            let app_state = app_state.clone();
-            let refresh_integrations = Rc::clone(&refresh_integrations);
-            wasm_bindgen_futures::spawn_local(async move {
-                match core_request::<Value>(CoreRequestInput {
-                    method: "POST".to_string(),
-                    path: format!("/api/oauth/{}/refresh", provider),
-                    body: None,
-                    admin_token: app_state.admin_token_opt(),
-                })
-                .await
-                {
-                    Ok(_) => {
-                        set_integration_error.set(String::new());
-                        set_integration_notice.set("OAuth token refreshed.".to_string());
-                    }
-                    Err(err) => {
-                        set_integration_notice.set(String::new());
-                        set_integration_error.set(format!("OAuth refresh failed: {}", err));
-                    }
-                }
-                set_integration_busy.set(false);
-                (refresh_integrations)();
-            });
-        }
-    });
-
     let disconnect_oauth: Rc<dyn Fn()> = Rc::new({
         let app_state = app_state.clone();
         let refresh_integrations = Rc::clone(&refresh_integrations);
@@ -1595,6 +1512,9 @@ fn IntegrationsTabView(app_state: AppState) -> impl IntoView {
         });
     }
 
+    let refresh_integrations_top = Rc::clone(&refresh_integrations);
+    let refresh_integrations_oauth = Rc::clone(&refresh_integrations);
+
     view! {
         <section class="tab-view">
             <div class="tab-head">
@@ -1606,7 +1526,7 @@ fn IntegrationsTabView(app_state: AppState) -> impl IntoView {
                 <button
                     class="action-btn"
                     prop:disabled=move || integration_busy.get()
-                    on:click=move |_| (refresh_integrations)()
+                    on:click=move |_| (refresh_integrations_top)()
                 >
                     {move || if integration_busy.get() { "Refreshing..." } else { "Refresh Integrations" }}
                 </button>
@@ -1762,11 +1682,8 @@ fn IntegrationsTabView(app_state: AppState) -> impl IntoView {
                     </div>
 
                     <div class="toolbar-inline" style="margin-top: 10px;">
-                        <button class="action-btn" prop:disabled=move || integration_busy.get() on:click=move |_| (start_oauth)()>
-                            "Start OAuth"
-                        </button>
-                        <button class="action-btn" prop:disabled=move || integration_busy.get() on:click=move |_| (refresh_oauth_token)()>
-                            "Refresh OAuth"
+                        <button class="action-btn" prop:disabled=move || integration_busy.get() on:click=move |_| (refresh_integrations_oauth)()>
+                            "Reload OAuth Status"
                         </button>
                         <button class="action-btn danger" prop:disabled=move || integration_busy.get() on:click=move |_| (disconnect_oauth)()>
                             "Disconnect OAuth"
