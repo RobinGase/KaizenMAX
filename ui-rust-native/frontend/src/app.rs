@@ -1,10 +1,12 @@
+use gloo_timers::future::TimeoutFuture;
 use leptos::ev;
 use leptos::html;
 use leptos::*;
 use leptos_router::*;
 use pulldown_cmark::{html::push_html, Event, Options, Parser};
 use serde_json::{json, Map, Value};
-use std::collections::{BTreeMap, HashSet};
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
 use wasm_bindgen::prelude::*;
@@ -80,6 +82,8 @@ fn render_markdown(content: &str) -> String {
     let mut rendered = String::new();
     push_html(&mut rendered, parser);
 
+    let rendered = wrap_code_blocks_with_copy_controls(&rendered);
+
     if rendered.trim().is_empty() {
         format!("<p>{}</p>", content)
     } else {
@@ -127,6 +131,9 @@ fn tab_label(tab: &TabId) -> &'static str {
         TabId::Branches => "Branches",
         TabId::Gates => "Gates",
         TabId::Activity => "Activity",
+        TabId::Memory => "Memory",
+        TabId::Calendar => "Calendar",
+        TabId::Kanban => "Kanban",
         TabId::Workspace => "Workspace",
         TabId::Integrations => "Integrations",
         TabId::Settings => "Settings",
@@ -195,6 +202,277 @@ fn grouped_branches(agents: &[SubAgent]) -> BTreeMap<String, BTreeMap<String, Ve
             .push(agent.clone());
     }
     map
+}
+
+#[derive(Clone, PartialEq)]
+struct ActivityEventRow {
+    event: CrystalBallEvent,
+    branch_id: String,
+    mission_id: String,
+}
+
+#[derive(Clone, PartialEq)]
+struct JournalEntryRow {
+    task_id: String,
+    branch_id: String,
+    mission_id: String,
+    first_timestamp: String,
+    last_timestamp: String,
+    event_count: usize,
+    highlights: Vec<String>,
+}
+
+#[derive(Clone, PartialEq)]
+struct ScheduledTaskRow {
+    slot: String,
+    branch_id: String,
+    mission_id: String,
+    worker_name: String,
+    objective: String,
+    directive: String,
+}
+
+#[derive(Clone, PartialEq)]
+struct MissionKanbanCard {
+    branch_id: String,
+    mission_id: String,
+    workers: Vec<SubAgent>,
+    active_count: usize,
+    blocked_count: usize,
+    review_count: usize,
+    done_count: usize,
+    lane: &'static str,
+}
+
+fn normalize_scope_key(value: &str) -> String {
+    value
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string()
+}
+
+fn event_timestamp_seconds(raw: &str) -> Option<f64> {
+    raw.trim().parse::<f64>().ok()
+}
+
+fn iso_timestamp(raw: &str) -> Option<String> {
+    let seconds = event_timestamp_seconds(raw)?;
+    js_sys::Date::new(&JsValue::from_f64(seconds * 1000.0))
+        .to_iso_string()
+        .as_string()
+}
+
+fn day_bucket_label(raw: &str) -> String {
+    iso_timestamp(raw)
+        .map(|iso| iso.chars().take(10).collect::<String>())
+        .unwrap_or_else(|| raw.chars().take(10).collect())
+}
+
+fn time_bucket_label(raw: &str) -> String {
+    if let Some(iso) = iso_timestamp(raw) {
+        if let Some((_, right)) = iso.split_once('T') {
+            return right.chars().take(5).collect();
+        }
+    }
+    compact_time(raw)
+}
+
+fn infer_event_scope(event: &CrystalBallEvent, agents: &[SubAgent]) -> (String, String) {
+    let find_by_id = |id: &str| {
+        let trimmed = id.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            agents.iter().find(|agent| agent.id == trimmed)
+        }
+    };
+
+    if let Some(agent) = find_by_id(&event.source_agent_id).or_else(|| find_by_id(&event.target_agent_id)) {
+        return (branch_label(&agent.branch_id), mission_label(agent));
+    }
+
+    let source_actor = event.source_actor.trim();
+    let target_actor = event.target_actor.trim();
+    if let Some(agent) = agents.iter().find(|agent| {
+        (!source_actor.is_empty() && agent.name.eq_ignore_ascii_case(source_actor))
+            || (!target_actor.is_empty() && agent.name.eq_ignore_ascii_case(target_actor))
+    }) {
+        return (branch_label(&agent.branch_id), mission_label(agent));
+    }
+
+    let task_key = normalize_scope_key(&event.task_id);
+    if !task_key.is_empty() {
+        if let Some(agent) = agents.iter().find(|agent| {
+            normalize_scope_key(&agent.mission_id) == task_key
+                || normalize_scope_key(&agent.task_id) == task_key
+        }) {
+            return (branch_label(&agent.branch_id), mission_label(agent));
+        }
+
+        let mission = if matches!(task_key.as_str(), "chat" | "settings" | "smoke") {
+            "general".to_string()
+        } else {
+            task_key
+        };
+        return ("primary".to_string(), mission);
+    }
+
+    ("primary".to_string(), "general".to_string())
+}
+
+fn mission_lane_for_workers(workers: &[SubAgent]) -> &'static str {
+    if workers.is_empty() {
+        "backlog"
+    } else if workers
+        .iter()
+        .all(|worker| matches!(worker.status, AgentStatus::Done))
+    {
+        "done"
+    } else if workers
+        .iter()
+        .any(|worker| matches!(worker.status, AgentStatus::ReviewPending))
+    {
+        "review"
+    } else if workers
+        .iter()
+        .any(|worker| matches!(worker.status, AgentStatus::Active | AgentStatus::Blocked))
+    {
+        "in_progress"
+    } else {
+        "backlog"
+    }
+}
+
+fn polar_percent(index: usize, total: usize, radius: f64) -> (f64, f64) {
+    if total <= 1 {
+        return (50.0, 50.0);
+    }
+
+    let angle = (index as f64 / total as f64) * std::f64::consts::TAU - std::f64::consts::FRAC_PI_2;
+    (50.0 + radius * angle.cos(), 50.0 + radius * angle.sin())
+}
+
+fn mission_pod_style(index: usize, total: usize) -> String {
+    let (x, y) = polar_percent(index, total.max(1), 34.0);
+    format!("left: {:.1}%; top: {:.1}%;", x, y)
+}
+
+fn worker_seat_style(index: usize, total: usize) -> String {
+    let radius = if total <= 1 {
+        0.0
+    } else if total <= 3 {
+        20.0
+    } else {
+        25.0
+    };
+    let (x, y) = polar_percent(index, total.max(1), radius);
+    format!("left: {:.1}%; top: {:.1}%;", x, y)
+}
+
+fn wrap_code_blocks_with_copy_controls(rendered: &str) -> String {
+    const OPEN_BLOCK: &str = "<pre><code";
+    const CLOSE_BLOCK: &str = "</code></pre>";
+
+    let mut output = String::with_capacity(rendered.len() + 192);
+    let mut cursor = 0usize;
+
+    while let Some(relative_start) = rendered[cursor..].find(OPEN_BLOCK) {
+        let block_start = cursor + relative_start;
+        output.push_str(&rendered[cursor..block_start]);
+
+        let Some(relative_end) = rendered[block_start..].find(CLOSE_BLOCK) else {
+            output.push_str(&rendered[block_start..]);
+            return output;
+        };
+
+        let block_end = block_start + relative_end + CLOSE_BLOCK.len();
+        output.push_str(
+            "<div class=\"code-block-shell\"><button type=\"button\" class=\"code-copy-btn\" data-copy-state=\"idle\">Copy</button>",
+        );
+        output.push_str(&rendered[block_start..block_end]);
+        output.push_str("</div>");
+
+        cursor = block_end;
+    }
+
+    output.push_str(&rendered[cursor..]);
+    output
+}
+
+fn set_copy_button_state(button: &web_sys::Element, label: &str, state: &str) {
+    button.set_text_content(Some(label));
+    let _ = button.set_attribute("data-copy-state", state);
+}
+
+fn handle_markdown_copy_click(event: web_sys::MouseEvent) {
+    let Some(target) = event.target() else {
+        return;
+    };
+
+    let Ok(target_element) = target.dyn_into::<web_sys::Element>() else {
+        return;
+    };
+
+    let button = if target_element.class_list().contains("code-copy-btn") {
+        Some(target_element)
+    } else {
+        target_element
+            .closest(".code-copy-btn")
+            .ok()
+            .flatten()
+    };
+
+    let Some(button) = button else {
+        return;
+    };
+
+    event.prevent_default();
+
+    let code_text = button
+        .parent_element()
+        .and_then(|shell| shell.query_selector("pre code").ok().flatten())
+        .and_then(|code| code.text_content())
+        .unwrap_or_default();
+
+    if code_text.trim().is_empty() {
+        set_copy_button_state(&button, "No code", "error");
+        let button_reset = button.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            TimeoutFuture::new(900).await;
+            set_copy_button_state(&button_reset, "Copy", "idle");
+        });
+        return;
+    }
+
+    let Some(window) = web_sys::window() else {
+        set_copy_button_state(&button, "Clipboard off", "error");
+        return;
+    };
+
+    let clipboard = window.navigator().clipboard();
+
+    set_copy_button_state(&button, "Copying...", "busy");
+    let promise = clipboard.write_text(&code_text);
+    let button_reset = button.clone();
+    wasm_bindgen_futures::spawn_local(async move {
+        if JsFuture::from(promise).await.is_ok() {
+            set_copy_button_state(&button_reset, "Copied", "ok");
+            TimeoutFuture::new(1200).await;
+        } else {
+            set_copy_button_state(&button_reset, "Failed", "error");
+            TimeoutFuture::new(1500).await;
+        }
+        set_copy_button_state(&button_reset, "Copy", "idle");
+    });
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -482,7 +760,11 @@ fn MissionTabView(app_state: AppState) -> impl IntoView {
     view! {
         <div class="main-mission">
             <div class="chat-panel">
-                <div class="chat-log" node_ref=chat_log_ref>
+                <div
+                    class="chat-log"
+                    node_ref=chat_log_ref
+                    on:click=move |ev| handle_markdown_copy_click(ev)
+                >
                     {move || {
                         if messages.get().is_empty() {
                             view! {
@@ -625,7 +907,7 @@ fn BranchesTabView(app_state: AppState) -> impl IntoView {
         <section class="tab-view">
             <div class="tab-head">
                 <h2>"Branches"</h2>
-                <p>"Company hierarchy with org chart and desk simulation views."</p>
+                <p>"Company hierarchy with org chart and spatial office views."</p>
             </div>
 
             <div class="card toolbar-card">
@@ -676,7 +958,7 @@ fn BranchesTabView(app_state: AppState) -> impl IntoView {
                             }
                             on:click=move |_| set_show_desk_view.set(true)
                         >
-                            "2D Desk"
+                            "Office 2D"
                         </button>
                     </div>
                 </div>
@@ -688,7 +970,7 @@ fn BranchesTabView(app_state: AppState) -> impl IntoView {
                         .into_view()
                 } else if show_desk_view.get() {
                     view! {
-                        <div class="desk-board">
+                        <div class="desk-board office-board">
                             <For
                                 each=move || branch_rows.get()
                                 key=|item| item.0.clone()
@@ -698,6 +980,7 @@ fn BranchesTabView(app_state: AppState) -> impl IntoView {
                                         .1
                                         .into_iter()
                                         .collect::<Vec<(String, Vec<SubAgent>)>>();
+                                    let mission_total = missions.len();
 
                                     view! {
                                         <article class="card desk-branch-card">
@@ -714,23 +997,37 @@ fn BranchesTabView(app_state: AppState) -> impl IntoView {
                                                 </span>
                                             </div>
 
-                                            <div class="desk-grid">
+                                            <div class="office-floor">
+                                                <div class="office-center-hub">
+                                                    <div class="hub-title">"Kaizen Hub"</div>
+                                                    <div class="hub-copy">{format!("{} missions", mission_total)}</div>
+                                                </div>
+
                                                 {missions
                                                     .into_iter()
-                                                    .map(|(mission_id, workers)| {
+                                                    .enumerate()
+                                                    .map(|(mission_index, (mission_id, workers))| {
+                                                        let pod_style = mission_pod_style(mission_index, mission_total);
+                                                        let worker_total = workers.len();
+                                                        let lane_label = mission_lane_for_workers(&workers)
+                                                            .replace('_', " ");
+
                                                         view! {
-                                                            <div class="desk-lane">
-                                                                <div class="desk-lane-head">
+                                                            <section class="mission-pod" style=pod_style>
+                                                                <div class="mission-pod-head">
                                                                     <span>{mission_id.clone()}</span>
-                                                                    <span class="tiny-pill">{workers.len()}</span>
+                                                                    <span class="tiny-pill">{format!("{} | {}", worker_total, lane_label)}</span>
                                                                 </div>
-                                                                <div class="desk-workers">
+
+                                                                <div class="pod-workers">
                                                                     {workers
                                                                         .into_iter()
-                                                                        .map(|worker| {
+                                                                        .enumerate()
+                                                                        .map(|(worker_index, worker)| {
                                                                             let status = status_class(&worker.status).to_string();
+                                                                            let seat_style = worker_seat_style(worker_index, worker_total);
                                                                             view! {
-                                                                                <div class="desk-worker">
+                                                                                <div class="office-worker" style=seat_style>
                                                                                     <span class=format!("status-dot {}", status)></span>
                                                                                     <div class="worker-meta">
                                                                                         <div>{worker.name}</div>
@@ -741,7 +1038,7 @@ fn BranchesTabView(app_state: AppState) -> impl IntoView {
                                                                         })
                                                                         .collect_view()}
                                                                 </div>
-                                                            </div>
+                                                            </section>
                                                         }
                                                     })
                                                     .collect_view()}
@@ -1218,13 +1515,55 @@ fn GatesTabView(app_state: AppState) -> impl IntoView {
 fn ActivityTabView(app_state: AppState) -> impl IntoView {
     let (query, set_query) = create_signal(String::new());
     let (kind, set_kind) = create_signal(String::new());
+    let (branch_scope, set_branch_scope) = create_signal(String::new());
+    let (mission_scope, set_mission_scope) = create_signal(String::new());
 
-    let event_types = create_memo(move |_| {
-        let mut values = app_state
+    let scoped_events = create_memo(move |_| {
+        let agents = app_state.agents.get();
+        app_state
             .events
             .get()
             .into_iter()
-            .map(|event| event.event_type)
+            .map(|event| {
+                let (branch_id, mission_id) = infer_event_scope(&event, &agents);
+                ActivityEventRow {
+                    event,
+                    branch_id,
+                    mission_id,
+                }
+            })
+            .collect::<Vec<_>>()
+    });
+
+    let event_types = create_memo(move |_| {
+        let mut values = scoped_events
+            .get()
+            .into_iter()
+            .map(|row| row.event.event_type)
+            .collect::<Vec<_>>();
+        values.sort();
+        values.dedup();
+        values
+    });
+
+    let branch_options = create_memo(move |_| {
+        let mut values = scoped_events
+            .get()
+            .into_iter()
+            .map(|row| row.branch_id)
+            .collect::<Vec<_>>();
+        values.sort();
+        values.dedup();
+        values
+    });
+
+    let mission_options = create_memo(move |_| {
+        let selected_branch = branch_scope.get();
+        let mut values = scoped_events
+            .get()
+            .into_iter()
+            .filter(|row| selected_branch.is_empty() || row.branch_id == selected_branch)
+            .map(|row| row.mission_id)
             .collect::<Vec<_>>();
         values.sort();
         values.dedup();
@@ -1234,18 +1573,25 @@ fn ActivityTabView(app_state: AppState) -> impl IntoView {
     let filtered_events = create_memo(move |_| {
         let needle = query.get().to_lowercase();
         let selected_kind = kind.get();
-        app_state
-            .events
+        let selected_branch = branch_scope.get();
+        let selected_mission = mission_scope.get();
+
+        scoped_events
             .get()
             .into_iter()
-            .filter(|event| {
+            .filter(|row| {
+                let event = &row.event;
                 let type_match = selected_kind.is_empty() || event.event_type == selected_kind;
+                let branch_match = selected_branch.is_empty() || row.branch_id == selected_branch;
+                let mission_match = selected_mission.is_empty() || row.mission_id == selected_mission;
                 let text_match = needle.is_empty()
                     || event.message.to_lowercase().contains(&needle)
                     || event.source_actor.to_lowercase().contains(&needle)
                     || event.target_actor.to_lowercase().contains(&needle)
-                    || event.task_id.to_lowercase().contains(&needle);
-                type_match && text_match
+                    || event.task_id.to_lowercase().contains(&needle)
+                    || row.branch_id.to_lowercase().contains(&needle)
+                    || row.mission_id.to_lowercase().contains(&needle);
+                type_match && branch_match && mission_match && text_match
             })
             .collect::<Vec<_>>()
     });
@@ -1280,6 +1626,36 @@ fn ActivityTabView(app_state: AppState) -> impl IntoView {
                         />
                     </select>
 
+                    <select
+                        class="select-input"
+                        prop:value=move || branch_scope.get()
+                        on:change=move |ev| {
+                            let selected = event_target_value(&ev);
+                            set_branch_scope.set(selected);
+                            set_mission_scope.set(String::new());
+                        }
+                    >
+                        <option value="">"All branches"</option>
+                        <For
+                            each=move || branch_options.get()
+                            key=|value| value.clone()
+                            children=move |value| view! { <option value=value.clone()>{value}</option> }
+                        />
+                    </select>
+
+                    <select
+                        class="select-input"
+                        prop:value=move || mission_scope.get()
+                        on:change=move |ev| set_mission_scope.set(event_target_value(&ev))
+                    >
+                        <option value="">"All missions"</option>
+                        <For
+                            each=move || mission_options.get()
+                            key=|value| value.clone()
+                            children=move |value| view! { <option value=value.clone()>{value}</option> }
+                        />
+                    </select>
+
                     <span class="tiny-pill">"Rows " {move || filtered_events.get().len()}</span>
                 </div>
             </div>
@@ -1288,6 +1664,8 @@ fn ActivityTabView(app_state: AppState) -> impl IntoView {
                 <div class="table-header row">
                     <span>"Time"</span>
                     <span>"Type"</span>
+                    <span>"Branch"</span>
+                    <span>"Mission"</span>
                     <span>"Source"</span>
                     <span>"Target"</span>
                     <span>"Task"</span>
@@ -1302,12 +1680,19 @@ fn ActivityTabView(app_state: AppState) -> impl IntoView {
                         view! {
                             <For
                                 each=move || filtered_events.get()
-                                key=|event| event.event_id.clone()
-                                children=move |event| {
+                                key=|row| row.event.event_id.clone()
+                                children=move |row| {
+                                    let ActivityEventRow {
+                                        event,
+                                        branch_id,
+                                        mission_id,
+                                    } = row;
                                     view! {
                                         <div class="table-row row">
-                                            <span>{compact_time(&event.timestamp)}</span>
+                                            <span>{time_bucket_label(&event.timestamp)}</span>
                                             <span>{event.event_type}</span>
+                                            <span>{branch_id}</span>
+                                            <span>{mission_id}</span>
                                             <span>{event.source_actor}</span>
                                             <span>{event.target_actor}</span>
                                             <span>{event.task_id}</span>
@@ -1333,6 +1718,56 @@ fn WorkspaceTabView(app_state: AppState) -> impl IntoView {
     let (spawn_objective, set_spawn_objective) = create_signal(String::new());
     let (workspace_busy, set_workspace_busy) = create_signal(false);
     let (workspace_notice, set_workspace_notice) = create_signal(String::new());
+    let (control_branch_scope, set_control_branch_scope) = create_signal(String::new());
+    let (control_mission_scope, set_control_mission_scope) = create_signal(String::new());
+
+    let app_state_for_branch_options = app_state.clone();
+    let control_branch_options = create_memo(move |_| {
+        let mut values = app_state_for_branch_options
+            .agents
+            .get()
+            .into_iter()
+            .map(|agent| branch_label(&agent.branch_id))
+            .collect::<Vec<_>>();
+        values.sort();
+        values.dedup();
+        values
+    });
+
+    let app_state_for_mission_options = app_state.clone();
+    let control_mission_options = create_memo(move |_| {
+        let selected_branch = control_branch_scope.get();
+        let mut values = app_state_for_mission_options
+            .agents
+            .get()
+            .into_iter()
+            .filter(|agent| {
+                selected_branch.is_empty() || branch_label(&agent.branch_id) == selected_branch
+            })
+            .map(|agent| mission_label(&agent))
+            .collect::<Vec<_>>();
+        values.sort();
+        values.dedup();
+        values
+    });
+
+    let app_state_for_filters = app_state.clone();
+    let filtered_control_agents = create_memo(move |_| {
+        let selected_branch = control_branch_scope.get();
+        let selected_mission = control_mission_scope.get();
+
+        app_state_for_filters
+            .agents
+            .get()
+            .into_iter()
+            .filter(|agent| {
+                let branch = branch_label(&agent.branch_id);
+                let mission = mission_label(agent);
+                (selected_branch.is_empty() || branch == selected_branch)
+                    && (selected_mission.is_empty() || mission == selected_mission)
+            })
+            .collect::<Vec<_>>()
+    });
 
     let run_request: Rc<dyn Fn(String, String, Option<Value>)> = Rc::new({
         let app_state = app_state.clone();
@@ -1476,14 +1911,51 @@ fn WorkspaceTabView(app_state: AppState) -> impl IntoView {
 
             <div class="card">
                 <h3>"Agent Control"</h3>
+                <div class="toolbar-inline" style="margin-bottom: 10px;">
+                    <select
+                        class="select-input"
+                        prop:value=move || control_branch_scope.get()
+                        on:change=move |ev| {
+                            let selected = event_target_value(&ev);
+                            set_control_branch_scope.set(selected);
+                            set_control_mission_scope.set(String::new());
+                        }
+                    >
+                        <option value="">"All branches"</option>
+                        <For
+                            each=move || control_branch_options.get()
+                            key=|value| value.clone()
+                            children=move |value| view! { <option value=value.clone()>{value}</option> }
+                        />
+                    </select>
+
+                    <select
+                        class="select-input"
+                        prop:value=move || control_mission_scope.get()
+                        on:change=move |ev| set_control_mission_scope.set(event_target_value(&ev))
+                    >
+                        <option value="">"All missions"</option>
+                        <For
+                            each=move || control_mission_options.get()
+                            key=|value| value.clone()
+                            children=move |value| view! { <option value=value.clone()>{value}</option> }
+                        />
+                    </select>
+
+                    <span class="tiny-pill">"Visible " {move || filtered_control_agents.get().len()}</span>
+                </div>
+
                 {move || {
                     let run_request = Rc::clone(&run_request_for_view);
                     if app_state.agents.get().is_empty() {
                         view! { <div class="muted">"No active sub-agents."</div> }.into_view()
+                    } else if filtered_control_agents.get().is_empty() {
+                        view! { <div class="muted">"No agents match the selected branch/mission scope."</div> }
+                            .into_view()
                     } else {
                         view! {
                             <For
-                                each=move || app_state.agents.get()
+                                each=move || filtered_control_agents.get()
                                 key=|agent| agent.id.clone()
                                 children=move |agent| {
                                     let status = status_class(&agent.status).to_string();
@@ -1618,6 +2090,517 @@ fn WorkspaceTabView(app_state: AppState) -> impl IntoView {
                     }
                 }}
             </div>
+        </section>
+    }
+}
+
+#[component]
+fn MemoryTabView(app_state: AppState) -> impl IntoView {
+    let (query, set_query) = create_signal(String::new());
+    let (branch_scope, set_branch_scope) = create_signal(String::new());
+
+    let journal_entries = create_memo(move |_| {
+        let agents = app_state.agents.get();
+        let mut by_task = HashMap::<String, Vec<CrystalBallEvent>>::new();
+
+        for event in app_state.events.get() {
+            let task_key = normalize_scope_key(&event.task_id);
+            let key = if task_key.is_empty() {
+                "general".to_string()
+            } else {
+                task_key
+            };
+            by_task.entry(key).or_default().push(event);
+        }
+
+        let mut rows = by_task
+            .into_iter()
+            .map(|(task_id, mut events)| {
+                events.sort_by(|left, right| {
+                    event_timestamp_seconds(&left.timestamp)
+                        .partial_cmp(&event_timestamp_seconds(&right.timestamp))
+                        .unwrap_or(Ordering::Equal)
+                });
+
+                let first_timestamp = events
+                    .first()
+                    .map(|event| event.timestamp.clone())
+                    .unwrap_or_default();
+                let last_timestamp = events
+                    .last()
+                    .map(|event| event.timestamp.clone())
+                    .unwrap_or_default();
+
+                let (branch_id, mission_id) = events
+                    .last()
+                    .map(|event| infer_event_scope(event, &agents))
+                    .unwrap_or_else(|| ("primary".to_string(), "general".to_string()));
+
+                let mut highlights = Vec::new();
+                let mut seen = HashSet::<String>::new();
+                for event in events.iter().rev() {
+                    let line = event.message.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+
+                    if seen.insert(line.to_string()) {
+                        highlights.push(line.to_string());
+                    }
+
+                    if highlights.len() == 3 {
+                        break;
+                    }
+                }
+
+                JournalEntryRow {
+                    task_id,
+                    branch_id,
+                    mission_id,
+                    first_timestamp,
+                    last_timestamp,
+                    event_count: events.len(),
+                    highlights,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        rows.sort_by(|left, right| {
+            event_timestamp_seconds(&right.last_timestamp)
+                .partial_cmp(&event_timestamp_seconds(&left.last_timestamp))
+                .unwrap_or(Ordering::Equal)
+        });
+        rows
+    });
+
+    let branch_options = create_memo(move |_| {
+        let mut values = journal_entries
+            .get()
+            .into_iter()
+            .map(|entry| entry.branch_id)
+            .collect::<Vec<_>>();
+        values.sort();
+        values.dedup();
+        values
+    });
+
+    let filtered_entries = create_memo(move |_| {
+        let needle = query.get().to_lowercase();
+        let selected_branch = branch_scope.get();
+
+        journal_entries
+            .get()
+            .into_iter()
+            .filter(|entry| {
+                let branch_match = selected_branch.is_empty() || entry.branch_id == selected_branch;
+                let text_match = needle.is_empty()
+                    || entry.task_id.to_lowercase().contains(&needle)
+                    || entry.branch_id.to_lowercase().contains(&needle)
+                    || entry.mission_id.to_lowercase().contains(&needle)
+                    || entry
+                        .highlights
+                        .iter()
+                        .any(|line| line.to_lowercase().contains(&needle));
+                branch_match && text_match
+            })
+            .collect::<Vec<_>>()
+    });
+
+    view! {
+        <section class="tab-view">
+            <div class="tab-head">
+                <h2>"Memory"</h2>
+                <p>"Journalized Crystal Ball history grouped by task and scope."</p>
+            </div>
+
+            <div class="card toolbar-card">
+                <div class="toolbar">
+                    <input
+                        class="text-input"
+                        type="text"
+                        placeholder="Search task, branch, mission, memory line..."
+                        prop:value=move || query.get()
+                        on:input=move |ev| set_query.set(event_target_value(&ev))
+                    />
+
+                    <select
+                        class="select-input"
+                        prop:value=move || branch_scope.get()
+                        on:change=move |ev| set_branch_scope.set(event_target_value(&ev))
+                    >
+                        <option value="">"All branches"</option>
+                        <For
+                            each=move || branch_options.get()
+                            key=|value| value.clone()
+                            children=move |value| view! { <option value=value.clone()>{value}</option> }
+                        />
+                    </select>
+
+                    <span class="tiny-pill">"Entries " {move || filtered_entries.get().len()}</span>
+                </div>
+            </div>
+
+            {move || {
+                if filtered_entries.get().is_empty() {
+                    view! { <div class="card"><div class="table-empty">"No memory entries match the current filters."</div></div> }
+                        .into_view()
+                } else {
+                    view! {
+                        <div class="journal-grid">
+                            <For
+                                each=move || filtered_entries.get()
+                                key=|entry| entry.task_id.clone()
+                                children=move |entry| {
+                                    view! {
+                                        <article class="card journal-card">
+                                            <div class="journal-head">
+                                                <div>
+                                                    <h3>{format!("Task: {}", entry.task_id)}</h3>
+                                                    <div class="journal-meta">
+                                                        <span class="tiny-pill">{format!("{} / {}", entry.branch_id, entry.mission_id)}</span>
+                                                        <span class="tiny-pill">{format!("{} events", entry.event_count)}</span>
+                                                        <span class="tiny-pill">
+                                                            {format!(
+                                                                "{} -> {}",
+                                                                day_bucket_label(&entry.first_timestamp),
+                                                                day_bucket_label(&entry.last_timestamp)
+                                                            )}
+                                                        </span>
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            <div class="journal-highlights">
+                                                {entry
+                                                    .highlights
+                                                    .into_iter()
+                                                    .map(|line| {
+                                                        view! { <div class="journal-line">{line}</div> }
+                                                    })
+                                                    .collect_view()}
+                                            </div>
+                                        </article>
+                                    }
+                                }
+                            />
+                        </div>
+                    }
+                        .into_view()
+                }
+            }}
+        </section>
+    }
+}
+
+#[component]
+fn CalendarTabView(app_state: AppState) -> impl IntoView {
+    let app_state_for_schedule = app_state.clone();
+    let scheduled_rows = create_memo(move |_| {
+        let mut workers = app_state_for_schedule.agents.get();
+        let status_priority = |status: &AgentStatus| -> u8 {
+            match status {
+                AgentStatus::Blocked => 0,
+                AgentStatus::ReviewPending => 1,
+                AgentStatus::Active => 2,
+                AgentStatus::Idle => 3,
+                AgentStatus::Done => 4,
+            }
+        };
+
+        workers.sort_by(|left, right| {
+            status_priority(&left.status)
+                .cmp(&status_priority(&right.status))
+                .then_with(|| left.name.cmp(&right.name))
+        });
+
+        workers
+            .into_iter()
+            .enumerate()
+            .map(|(index, worker)| {
+                let hour = 9 + (index / 2) as i32;
+                let minute = if index % 2 == 0 { 0 } else { 30 };
+                let directive = match worker.status {
+                    AgentStatus::Blocked => "Escalate blocker and unblock execution",
+                    AgentStatus::ReviewPending => "Review handoff and approve closure",
+                    AgentStatus::Active => "Continue execution sprint",
+                    AgentStatus::Idle => "Start mission kickoff",
+                    AgentStatus::Done => "Archive output and report",
+                }
+                .to_string();
+
+                ScheduledTaskRow {
+                    slot: format!("{:02}:{:02}", hour, minute),
+                    branch_id: branch_label(&worker.branch_id),
+                    mission_id: mission_label(&worker),
+                    worker_name: worker.name,
+                    objective: worker.objective,
+                    directive,
+                }
+            })
+            .collect::<Vec<_>>()
+    });
+
+    let app_state_for_days = app_state.clone();
+    let day_buckets = create_memo(move |_| {
+        let agents = app_state_for_days.agents.get();
+        let mut grouped = BTreeMap::<String, Vec<ActivityEventRow>>::new();
+
+        for event in app_state_for_days.events.get() {
+            let (branch_id, mission_id) = infer_event_scope(&event, &agents);
+            grouped
+                .entry(day_bucket_label(&event.timestamp))
+                .or_default()
+                .push(ActivityEventRow {
+                    event,
+                    branch_id,
+                    mission_id,
+                });
+        }
+
+        let mut days = grouped.into_iter().collect::<Vec<_>>();
+        days.sort_by(|left, right| right.0.cmp(&left.0));
+        days.truncate(5);
+
+        for (_, rows) in &mut days {
+            rows.sort_by(|left, right| {
+                event_timestamp_seconds(&right.event.timestamp)
+                    .partial_cmp(&event_timestamp_seconds(&left.event.timestamp))
+                    .unwrap_or(Ordering::Equal)
+            });
+            rows.truncate(8);
+        }
+
+        days
+    });
+
+    view! {
+        <section class="tab-view">
+            <div class="tab-head">
+                <h2>"Calendar"</h2>
+                <p>"Auto-scheduled worker queue plus recent multi-day execution timeline."</p>
+            </div>
+
+            <div class="calendar-grid">
+                <article class="card">
+                    <h3>"Scheduled Queue"</h3>
+                    {move || {
+                        if scheduled_rows.get().is_empty() {
+                            view! { <div class="table-empty">"No active workers to schedule."</div> }
+                                .into_view()
+                        } else {
+                            view! {
+                                <div class="schedule-list">
+                                    <For
+                                        each=move || scheduled_rows.get()
+                                        key=|row| format!("{}:{}", row.worker_name, row.slot)
+                                        children=move |row| {
+                                            view! {
+                                                <div class="schedule-row">
+                                                    <div class="schedule-slot">{row.slot}</div>
+                                                    <div class="schedule-body">
+                                                        <div class="schedule-title">
+                                                            {format!("{} ({}/{})", row.worker_name, row.branch_id, row.mission_id)}
+                                                        </div>
+                                                        <div class="schedule-copy">{row.directive}</div>
+                                                        <div class="schedule-meta">{row.objective}</div>
+                                                    </div>
+                                                </div>
+                                            }
+                                        }
+                                    />
+                                </div>
+                            }
+                                .into_view()
+                        }
+                    }}
+                </article>
+
+                <article class="card">
+                    <h3>"Recent Calendar"</h3>
+                    {move || {
+                        if day_buckets.get().is_empty() {
+                            view! { <div class="table-empty">"No timeline events available yet."</div> }
+                                .into_view()
+                        } else {
+                            view! {
+                                <div class="calendar-days">
+                                    <For
+                                        each=move || day_buckets.get()
+                                        key=|day| day.0.clone()
+                                        children=move |day| {
+                                            let day_label = day.0;
+                                            let rows = day.1;
+                                            view! {
+                                                <div class="calendar-day">
+                                                    <div class="calendar-day-head">{day_label}</div>
+                                                    <div class="calendar-day-body">
+                                                        {rows
+                                                            .into_iter()
+                                                            .map(|row| {
+                                                                view! {
+                                                                    <div class="calendar-event">
+                                                                        <span class="event-time">{time_bucket_label(&row.event.timestamp)}</span>
+                                                                        <span class="event-type">{row.event.event_type}</span>
+                                                                        <span class="event-msg">{format!("[{}/{}] {}", row.branch_id, row.mission_id, row.event.message)}</span>
+                                                                    </div>
+                                                                }
+                                                            })
+                                                            .collect_view()}
+                                                    </div>
+                                                </div>
+                                            }
+                                        }
+                                    />
+                                </div>
+                            }
+                                .into_view()
+                        }
+                    }}
+                </article>
+            </div>
+        </section>
+    }
+}
+
+#[component]
+fn KanbanTabView(app_state: AppState) -> impl IntoView {
+    let mission_cards = create_memo(move |_| {
+        let mut cards = grouped_branches(&app_state.agents.get())
+            .into_iter()
+            .flat_map(|(branch_id, missions)| {
+                missions.into_iter().map(move |(mission_id, workers)| {
+                    let active_count = workers
+                        .iter()
+                        .filter(|worker| matches!(worker.status, AgentStatus::Active))
+                        .count();
+                    let blocked_count = workers
+                        .iter()
+                        .filter(|worker| matches!(worker.status, AgentStatus::Blocked))
+                        .count();
+                    let review_count = workers
+                        .iter()
+                        .filter(|worker| matches!(worker.status, AgentStatus::ReviewPending))
+                        .count();
+                    let done_count = workers
+                        .iter()
+                        .filter(|worker| matches!(worker.status, AgentStatus::Done))
+                        .count();
+
+                    MissionKanbanCard {
+                        branch_id: branch_id.clone(),
+                        mission_id,
+                        workers: workers.clone(),
+                        active_count,
+                        blocked_count,
+                        review_count,
+                        done_count,
+                        lane: mission_lane_for_workers(&workers),
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        cards.sort_by(|left, right| {
+            left.branch_id
+                .cmp(&right.branch_id)
+                .then_with(|| left.mission_id.cmp(&right.mission_id))
+        });
+        cards
+    });
+
+    view! {
+        <section class="tab-view">
+            <div class="tab-head">
+                <h2>"Kanban"</h2>
+                <p>"Mission flow board from backlog to done using live worker state."</p>
+            </div>
+
+            {move || {
+                if mission_cards.get().is_empty() {
+                    view! { <div class="card"><div class="table-empty">"No missions available for Kanban yet."</div></div> }
+                        .into_view()
+                } else {
+                    view! {
+                        <div class="kanban-board">
+                            {[
+                                ("backlog", "Backlog"),
+                                ("in_progress", "In Progress"),
+                                ("review", "Review"),
+                                ("done", "Done"),
+                            ]
+                                .into_iter()
+                                .map(|(lane, title)| {
+                                    let cards = mission_cards
+                                        .get()
+                                        .into_iter()
+                                        .filter(|card| card.lane == lane)
+                                        .collect::<Vec<_>>();
+
+                                    view! {
+                                        <section class=format!("kanban-column lane-{}", lane)>
+                                            <div class="kanban-column-head">
+                                                <span>{title}</span>
+                                                <span class="tiny-pill">{cards.len()}</span>
+                                            </div>
+
+                                            <div class="kanban-cards">
+                                                {if cards.is_empty() {
+                                                    view! { <div class="kanban-empty">"No missions"</div> }.into_view()
+                                                } else {
+                                                    cards
+                                                        .into_iter()
+                                                        .map(|card| {
+                                                            let MissionKanbanCard {
+                                                                branch_id,
+                                                                mission_id,
+                                                                workers,
+                                                                active_count,
+                                                                blocked_count,
+                                                                review_count,
+                                                                done_count,
+                                                                ..
+                                                            } = card;
+
+                                                            view! {
+                                                                <article class="kanban-card">
+                                                                    <div class="kanban-title">{mission_id}</div>
+                                                                    <div class="kanban-meta">{branch_id}</div>
+                                                                    <div class="kanban-stats">
+                                                                        <span class="tiny-pill">{format!("active {}", active_count)}</span>
+                                                                        <span class="tiny-pill">{format!("blocked {}", blocked_count)}</span>
+                                                                        <span class="tiny-pill">{format!("review {}", review_count)}</span>
+                                                                        <span class="tiny-pill">{format!("done {}", done_count)}</span>
+                                                                    </div>
+                                                                    <div class="kanban-workers">
+                                                                        {workers
+                                                                            .into_iter()
+                                                                            .map(|worker| {
+                                                                                let status = status_class(&worker.status).to_string();
+                                                                                view! {
+                                                                                    <div class="kanban-worker">
+                                                                                        <span class=format!("status-dot {}", status)></span>
+                                                                                        <span>{worker.name}</span>
+                                                                                    </div>
+                                                                                }
+                                                                            })
+                                                                            .collect_view()}
+                                                                    </div>
+                                                                </article>
+                                                            }
+                                                        })
+                                                        .collect_view()
+                                                        .into_view()
+                                                }}
+                                            </div>
+                                        </section>
+                                    }
+                                })
+                                .collect_view()}
+                        </div>
+                    }
+                        .into_view()
+                }
+            }}
         </section>
     }
 }
@@ -2436,8 +3419,11 @@ pub fn MainMissionView() -> impl IntoView {
                                     vec![
                                         TabId::Mission,
                                         TabId::Branches,
+                                        TabId::Kanban,
                                         TabId::Gates,
                                         TabId::Activity,
+                                        TabId::Memory,
+                                        TabId::Calendar,
                                         TabId::Workspace,
                                         TabId::Integrations,
                                         TabId::Settings,
@@ -2595,8 +3581,11 @@ pub fn MainMissionView() -> impl IntoView {
                         match app_state_for_tabs.active_tab.get() {
                             TabId::Mission => view! { <MissionTabView app_state=app_state_for_tabs.clone()/> }.into_view(),
                             TabId::Branches => view! { <BranchesTabView app_state=app_state_for_tabs.clone()/> }.into_view(),
+                            TabId::Kanban => view! { <KanbanTabView app_state=app_state_for_tabs.clone()/> }.into_view(),
                             TabId::Gates => view! { <GatesTabView app_state=app_state_for_tabs.clone()/> }.into_view(),
                             TabId::Activity => view! { <ActivityTabView app_state=app_state_for_tabs.clone()/> }.into_view(),
+                            TabId::Memory => view! { <MemoryTabView app_state=app_state_for_tabs.clone()/> }.into_view(),
+                            TabId::Calendar => view! { <CalendarTabView app_state=app_state_for_tabs.clone()/> }.into_view(),
                             TabId::Workspace => view! { <WorkspaceTabView app_state=app_state_for_tabs.clone()/> }.into_view(),
                             TabId::Integrations => view! { <IntegrationsTabView app_state=app_state_for_tabs.clone()/> }.into_view(),
                             TabId::Settings => view! { <SettingsTabView app_state=app_state_for_tabs.clone()/> }.into_view(),
@@ -2873,7 +3862,11 @@ pub fn DetachedChatView() -> impl IntoView {
                 </header>
 
                 <div class="chat-panel">
-                    <div class="chat-log" node_ref=chat_log_ref>
+                    <div
+                        class="chat-log"
+                        node_ref=chat_log_ref
+                        on:click=move |ev| handle_markdown_copy_click(ev)
+                    >
                         <For
                             each=move || {
                                 messages

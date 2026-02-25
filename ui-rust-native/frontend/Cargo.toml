@@ -15,7 +15,21 @@ gloo-net = { version = "0.5" }
 gloo-timers = { version = "0.3", features = ["futures"] }
 wasm-bindgen = { version = "0.2" }
 wasm-bindgen-futures = { version = "0.4" }
-web-sys = { version = "0.3", features = ["Window", "Storage", "Document"] }
+web-sys = { version = "0.3", features = [
+  "Window",
+  "Storage",
+  "Document",
+  "Element",
+  "Navigator",
+  "Clipboard",
+  "DomTokenList",
+  "MouseEvent",
+  "Request",
+  "RequestInit",
+  "Response",
+  "ReadableStream",
+  "ReadableStreamDefaultReader",
+] }
 uuid = { version = "1", features = ["v4", "js"] }
 serde-wasm-bindgen = "0.6"
 js-sys = "0.3"

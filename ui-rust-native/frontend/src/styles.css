@@ -498,12 +498,46 @@ body,
   color: #c5c5c5;
 }
 
-.markdown-body pre {
+.code-block-shell {
+  position: relative;
   margin: 0 0 10px;
+}
+
+.code-copy-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  border: 1px solid var(--mc-border-strong);
+  border-radius: 7px;
+  background: rgba(16, 16, 16, 0.9);
+  color: #d9d9d9;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 3px 7px;
+  cursor: pointer;
+  z-index: 2;
+}
+
+.code-copy-btn[data-copy-state="busy"] {
+  color: #bfbfbf;
+}
+
+.code-copy-btn[data-copy-state="ok"] {
+  border-color: #f3f3f3;
+  color: #ffffff;
+}
+
+.code-copy-btn[data-copy-state="error"] {
+  border-color: #666666;
+  color: #c7c7c7;
+}
+
+.markdown-body pre {
+  margin: 0;
   border: 1px solid var(--mc-border);
   border-radius: 10px;
   background: #111111;
-  padding: 10px 11px;
+  padding: 12px 11px 10px;
   overflow-x: auto;
 }
 
@@ -716,43 +750,98 @@ body,
   gap: 10px;
 }
 
-.desk-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: 10px;
+.office-board {
+  gap: 12px;
 }
 
-.desk-lane {
+.office-floor {
+  position: relative;
+  min-height: 460px;
   border: 1px solid var(--mc-border);
-  border-radius: 10px;
-  background: var(--mc-surface);
-  min-height: 120px;
+  border-radius: 12px;
+  background:
+    radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.06) 0%, transparent 42%),
+    repeating-linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0.03) 0,
+      rgba(255, 255, 255, 0.03) 1px,
+      transparent 1px,
+      transparent 40px
+    ),
+    linear-gradient(180deg, #111111, #0d0d0d);
+  overflow: hidden;
 }
 
-.desk-lane-head {
+.office-center-hub {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 140px;
+  height: 140px;
+  border-radius: 50%;
+  border: 1px solid var(--mc-border-strong);
+  background: rgba(15, 15, 15, 0.88);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+.hub-title {
+  color: #ffffff;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.hub-copy {
+  margin-top: 4px;
+  color: var(--mc-muted);
+  font-size: 10px;
+}
+
+.mission-pod {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  width: clamp(220px, 28vw, 300px);
+  border: 1px solid var(--mc-border);
+  border-radius: 12px;
+  background: rgba(20, 20, 20, 0.9);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.mission-pod-head {
   border-bottom: 1px solid var(--mc-border);
   padding: 8px 10px;
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
   font-family: var(--font-mono);
   font-size: 11px;
 }
 
-.desk-workers {
-  padding: 8px;
-  display: grid;
-  gap: 7px;
+.pod-workers {
+  position: relative;
+  min-height: 132px;
+  padding: 10px;
 }
 
-.desk-worker {
+.office-worker {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  min-width: 130px;
+  max-width: 170px;
   border: 1px solid var(--mc-border);
-  border-radius: 8px;
-  background: var(--mc-surface-2);
-  padding: 7px;
+  border-radius: 9px;
+  background: rgba(33, 33, 33, 0.98);
+  padding: 6px;
   display: flex;
   align-items: flex-start;
-  gap: 8px;
+  gap: 7px;
 }
 
 .tree-group,
@@ -969,7 +1058,7 @@ details[open] > summary::before {
 
 .row {
   display: grid;
-  grid-template-columns: 110px 190px 130px 130px 120px 1fr;
+  grid-template-columns: 82px 170px 120px 120px 120px 120px 90px minmax(180px, 1fr);
   gap: 8px;
   align-items: center;
 }
@@ -995,6 +1084,211 @@ details[open] > summary::before {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.journal-grid,
+.calendar-grid,
+.kanban-board {
+  display: grid;
+  gap: 12px;
+}
+
+.journal-card {
+  padding: 12px;
+}
+
+.journal-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.journal-meta,
+.kanban-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.journal-highlights {
+  display: grid;
+  gap: 6px;
+}
+
+.journal-line {
+  border: 1px solid var(--mc-border);
+  border-radius: 8px;
+  background: var(--mc-surface-2);
+  padding: 7px 8px;
+  color: #d8d8d8;
+  font-size: 12px;
+}
+
+.calendar-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.schedule-list {
+  display: grid;
+  gap: 7px;
+}
+
+.schedule-row {
+  display: grid;
+  grid-template-columns: 56px 1fr;
+  gap: 9px;
+  border: 1px solid var(--mc-border);
+  border-radius: 9px;
+  background: var(--mc-surface-2);
+  padding: 8px;
+}
+
+.schedule-slot {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: #ffffff;
+  padding-top: 2px;
+}
+
+.schedule-title {
+  color: #ffffff;
+  font-size: 12px;
+}
+
+.schedule-copy {
+  color: #d7d7d7;
+  font-size: 11px;
+  margin-top: 2px;
+}
+
+.schedule-meta {
+  color: var(--mc-muted);
+  font-size: 10px;
+  margin-top: 4px;
+}
+
+.calendar-days {
+  display: grid;
+  gap: 8px;
+}
+
+.calendar-day {
+  border: 1px solid var(--mc-border);
+  border-radius: 9px;
+  overflow: hidden;
+  background: var(--mc-surface-2);
+}
+
+.calendar-day-head {
+  padding: 7px 9px;
+  border-bottom: 1px solid var(--mc-border);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: #ffffff;
+}
+
+.calendar-day-body {
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 7px 9px;
+  display: grid;
+  gap: 6px;
+}
+
+.calendar-event {
+  display: grid;
+  grid-template-columns: 56px 140px 1fr;
+  gap: 7px;
+  align-items: baseline;
+}
+
+.kanban-board {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.kanban-column {
+  border: 1px solid var(--mc-border);
+  border-radius: 12px;
+  background: var(--mc-surface);
+  min-height: 220px;
+  display: flex;
+  flex-direction: column;
+}
+
+.kanban-column.lane-backlog {
+  border-top: 2px solid #666666;
+}
+
+.kanban-column.lane-in_progress {
+  border-top: 2px solid #c8c8c8;
+}
+
+.kanban-column.lane-review {
+  border-top: 2px solid #e5e5e5;
+}
+
+.kanban-column.lane-done {
+  border-top: 2px solid #ffffff;
+}
+
+.kanban-column-head {
+  border-bottom: 1px solid var(--mc-border);
+  padding: 8px 10px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.kanban-cards {
+  padding: 8px;
+  display: grid;
+  gap: 8px;
+}
+
+.kanban-empty {
+  border: 1px dashed var(--mc-border-strong);
+  border-radius: 8px;
+  padding: 8px;
+  color: var(--mc-muted);
+  font-size: 11px;
+}
+
+.kanban-card {
+  border: 1px solid var(--mc-border);
+  border-radius: 9px;
+  background: var(--mc-surface-2);
+  padding: 8px;
+}
+
+.kanban-title {
+  color: #ffffff;
+  font-size: 12px;
+}
+
+.kanban-meta {
+  margin-top: 2px;
+  color: var(--mc-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.kanban-workers {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.kanban-worker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #dfdfdf;
 }
 
 .form-grid {
@@ -1055,8 +1349,45 @@ details[open] > summary::before {
   .card-grid.two-col,
   .card-grid.three-col,
   .form-grid,
+  .calendar-grid,
+  .kanban-board,
+  .calendar-event,
   .row {
     grid-template-columns: 1fr;
+  }
+
+  .office-floor {
+    min-height: 0;
+    display: grid;
+    gap: 8px;
+    padding: 10px;
+    overflow: visible;
+  }
+
+  .office-center-hub {
+    display: none;
+  }
+
+  .mission-pod {
+    position: relative;
+    left: auto;
+    top: auto;
+    transform: none;
+    width: auto;
+  }
+
+  .pod-workers {
+    min-height: 0;
+    display: grid;
+    gap: 7px;
+  }
+
+  .office-worker {
+    position: relative;
+    left: auto;
+    top: auto;
+    transform: none;
+    max-width: none;
   }
 }
 
