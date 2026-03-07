@@ -267,3 +267,22 @@ pub struct OAuthStatusResponse {
     pub refresh_token_configured: bool,
     pub message: String,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthStartResponse {
+    pub provider: String,
+    pub redirect_url: String,
+    pub state_token: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderAuthStatusResponse {
+    pub provider: String,
+    pub resolved_provider: String,
+    pub native_alias: bool,
+    pub auth_method: String,
+    pub configured: bool,
+    pub can_chat: bool,
+    pub message: String,
+    pub env_hints: Vec<String>,
+}

@@ -26,6 +26,21 @@ pub struct CoreResponseOutput {
 }
 
 #[tauri::command]
+pub async fn open_external_url(url: String) -> Result<(), String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err("URL is required.".to_string());
+    }
+    if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
+        return Err("Only http:// and https:// URLs can be opened externally.".to_string());
+    }
+
+    webbrowser::open(trimmed)
+        .map(|_| ())
+        .map_err(|error| format!("Failed to open external URL: {error}"))
+}
+
+#[tauri::command]
 pub async fn core_request(
     input: CoreRequestInput,
     state: State<'_, CoreClientState>,

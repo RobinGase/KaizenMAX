@@ -1,6 +1,6 @@
 mod commands;
 
-use commands::{core_request, CoreClientState};
+use commands::{core_request, open_external_url, CoreClientState};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -19,7 +19,7 @@ pub fn run() {
             core_base_url,
             client,
         })
-        .invoke_handler(tauri::generate_handler![core_request])
+        .invoke_handler(tauri::generate_handler![core_request, open_external_url])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

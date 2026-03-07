@@ -4,6 +4,7 @@
 .env
 .env.local
 .env.*.local
+.venv/
 *.pem
 *.key
 credentials.json
@@ -55,8 +56,10 @@ Desktop.ini
 logs/
 
 # ----- Local smoke/probe artifacts -----
+tmp_*.png
 core/*_body.json
 core/*_health.json
+core/codex_last.txt
 core/health_body.txt
 core/probe_*.json
 core/smoke_*.json
@@ -65,6 +68,3 @@ core/profiles/
 nul
 
 # ----- Scratch / tool config -----
-AGENT_OPERATIONS.md
-opencode.json
-write_app.py

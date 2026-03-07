@@ -9,7 +9,6 @@ Deliver a native desktop Mission Control where a user can plan, execute, review,
 ## Fresh Start Objectives
 - Replace legacy frontend surfaces with a clean Tauri v2 Mission Control.
 - Preserve and extend the Rust core as system-of-record for orchestration, gates, settings, credentials, and Crystal Ball events.
-- Align UX to the clarity and operational tempo inspired by OpenCode and Agent Zero without copying their runtime architecture.
 - Keep the desktop stack Rust-native and remove Node from the default development/runtime path.
 
 ## User Value

@@ -9,7 +9,6 @@ Deliver a production-usable Mission Control by tomorrow with:
 - Branch manager model for orchestrator + worker parallelism
 
 ## Manager and Team
-- Manager (OpenCode): owns scope, sequencing, quality gate decisions, and final integration.
 - Agent 1 - Backend Contract Lead: API contract and route safety map.
 - Agent 2 - Native Rust Frontend Architect: no-Node stack selection and migration path.
 - Agent 3 - Windowing Specialist: detachable native windows and restore logic.

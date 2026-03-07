@@ -1,7 +1,8 @@
 pub mod commands;
 
 use commands::{
-    close_agent_window, core_request, focus_agent_window, open_agent_window, CoreClientState,
+    close_agent_window, core_request, focus_agent_window, open_agent_window, open_external_url,
+    CoreClientState,
 };
 use std::sync::Once;
 
@@ -44,6 +45,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             core_request,
+            open_external_url,
             open_agent_window,
             focus_agent_window,
             close_agent_window

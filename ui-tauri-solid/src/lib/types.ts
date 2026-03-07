@@ -81,25 +81,6 @@ export interface ChatResponse {
   output_tokens: number | null;
 }
 
-export interface SecretMetadata {
-  provider: string;
-  configured: boolean;
-  key_id: string;
-  created_at: string;
-  last_updated: string;
-  last4: string;
-  secret_type: string;
-}
-
-export interface VaultStatus {
-  available: boolean;
-  key_source: string;
-  vault_path: string;
-  key_path: string | null;
-  bootstrap_created: boolean;
-  error: string | null;
-}
-
 export interface OAuthStatus {
   provider: string;
   supported: boolean;
@@ -107,6 +88,17 @@ export interface OAuthStatus {
   access_token_configured: boolean;
   refresh_token_configured: boolean;
   message: string;
+}
+
+export interface ProviderAuthStatus {
+  provider: string;
+  resolved_provider: string;
+  native_alias: boolean;
+  auth_method: string;
+  configured: boolean;
+  can_chat: boolean;
+  message: string;
+  env_hints: string[];
 }
 
 export interface GitHubStatus {

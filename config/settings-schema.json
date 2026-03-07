@@ -91,7 +91,7 @@
     "credentials_ui_enabled": {
       "type": "boolean",
       "default": true,
-      "description": "Show credential management section in settings UI."
+      "description": "Show provider auth status and guidance in settings UI."
     },
     "agent_name_editable_after_spawn": {
       "type": "boolean",
@@ -100,9 +100,9 @@
     },
     "secrets_storage_mode": {
       "type": "string",
-      "enum": ["encrypted_vault"],
-      "default": "encrypted_vault",
-      "description": "Storage backend for secrets. Only encrypted vault is supported."
+      "enum": ["local_env_auth"],
+      "default": "local_env_auth",
+      "description": "Current local auth backend for provider access without Kai-Vault."
     },
     "write_plaintext_secrets_to_env": {
       "type": "boolean",
@@ -116,13 +116,13 @@
     },
     "inference_provider": {
       "type": "string",
-      "enum": ["anthropic", "openai", "gemini", "gemini-cli", "nvidia"],
-      "default": "anthropic",
-      "description": "Active LLM inference provider. API providers require a vault key; gemini-cli uses local OAuth via the Gemini CLI executable."
+      "enum": ["anthropic", "openai", "gemini", "gemini-cli", "codex-cli", "nvidia"],
+      "default": "codex-cli",
+      "description": "Active LLM inference provider that zeroclaw routes through. OpenAI, Anthropic, and NVIDIA use API key env vars; Gemini supports API key auth, app-managed Google OAuth, or Google ADC; gemini-cli uses local CLI OAuth; codex-cli uses local Codex CLI auth, including ChatGPT OAuth."
     },
     "inference_model": {
       "type": "string",
-      "default": "claude-sonnet-4-20250514",
+      "default": "gpt-5.4",
       "description": "Model identifier for the selected inference provider."
     },
     "inference_max_tokens": {

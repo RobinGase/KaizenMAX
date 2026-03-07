@@ -64,10 +64,6 @@ fn bool_patch(field: &str, value: bool) -> Value {
     Value::Object(map)
 }
 
-fn normalize_provider(value: &str) -> String {
-    value.trim().to_ascii_lowercase()
-}
-
 fn render_markdown(content: &str) -> String {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_STRIKETHROUGH);
@@ -103,6 +99,16 @@ async fn focus_agent(agent_id: String) {
     if let Ok(js_args) = serde_wasm_bindgen::to_value(&args) {
         let _ = tauri_invoke("focus_agent_window", js_args).await;
     }
+}
+
+async fn open_external_browser(url: String) -> Result<(), String> {
+    let args = json!({ "url": url });
+    let js_args = serde_wasm_bindgen::to_value(&args)
+        .map_err(|error| format!("failed to serialize open_external_url args: {error}"))?;
+    tauri_invoke("open_external_url", js_args)
+        .await
+        .map_err(js_error)?;
+    Ok(())
 }
 
 fn status_class(status: &AgentStatus) -> &'static str {
@@ -296,7 +302,9 @@ fn infer_event_scope(event: &CrystalBallEvent, agents: &[SubAgent]) -> (String, 
         }
     };
 
-    if let Some(agent) = find_by_id(&event.source_agent_id).or_else(|| find_by_id(&event.target_agent_id)) {
+    if let Some(agent) =
+        find_by_id(&event.source_agent_id).or_else(|| find_by_id(&event.target_agent_id))
+    {
         return (branch_label(&agent.branch_id), mission_label(agent));
     }
 
@@ -425,10 +433,7 @@ fn handle_markdown_copy_click(event: web_sys::MouseEvent) {
     let button = if target_element.class_list().contains("code-copy-btn") {
         Some(target_element)
     } else {
-        target_element
-            .closest(".code-copy-btn")
-            .ok()
-            .flatten()
+        target_element.closest(".code-copy-btn").ok().flatten()
     };
 
     let Some(button) = button else {
@@ -739,8 +744,7 @@ fn MissionTabView(app_state: AppState) -> impl IntoView {
                                 }
                             }
                         } else {
-                            set_chat_notice
-                                .set(format!("Chat stream interrupted: {}", stream_err));
+                            set_chat_notice.set(format!("Chat stream interrupted: {}", stream_err));
                         }
                     }
                 }
@@ -1152,11 +1156,9 @@ async fn stream_chat_reply(
     let payload_text = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
     init.set_body(&JsValue::from_str(&payload_text));
 
-    let request = web_sys::Request::new_with_str_and_init(
-        "http://127.0.0.1:9100/api/chat/stream",
-        &init,
-    )
-    .map_err(js_error)?;
+    let request =
+        web_sys::Request::new_with_str_and_init("http://127.0.0.1:9100/api/chat/stream", &init)
+            .map_err(js_error)?;
     request
         .headers()
         .set("Content-Type", "application/json")
@@ -1179,7 +1181,11 @@ async fn stream_chat_reply(
             .ok()
             .and_then(|v| v.as_string())
             .unwrap_or_default();
-        return Err(format!("stream request failed ({}): {}", response.status(), body_text));
+        return Err(format!(
+            "stream request failed ({}): {}",
+            response.status(),
+            body_text
+        ));
     }
 
     let body = response
@@ -1255,9 +1261,8 @@ async fn stream_chat_reply(
                     }
                 }
                 "done" => {
-                    if let Some(done_text) = serde_json::from_str::<Value>(&data)
-                        .ok()
-                        .and_then(|value| {
+                    if let Some(done_text) =
+                        serde_json::from_str::<Value>(&data).ok().and_then(|value| {
                             value
                                 .get("full_response")
                                 .and_then(|text| text.as_str())
@@ -1583,7 +1588,8 @@ fn ActivityTabView(app_state: AppState) -> impl IntoView {
                 let event = &row.event;
                 let type_match = selected_kind.is_empty() || event.event_type == selected_kind;
                 let branch_match = selected_branch.is_empty() || row.branch_id == selected_branch;
-                let mission_match = selected_mission.is_empty() || row.mission_id == selected_mission;
+                let mission_match =
+                    selected_mission.is_empty() || row.mission_id == selected_mission;
                 let text_match = needle.is_empty()
                     || event.message.to_lowercase().contains(&needle)
                     || event.source_actor.to_lowercase().contains(&needle)
@@ -1813,8 +1819,10 @@ fn WorkspaceTabView(app_state: AppState) -> impl IntoView {
                 || mission_id.is_empty()
                 || objective.is_empty()
             {
-                set_workspace_notice
-                    .set("Provide agent name, branch id, mission id, and objective before spawning.".to_string());
+                set_workspace_notice.set(
+                    "Provide agent name, branch id, mission id, and objective before spawning."
+                        .to_string(),
+                );
                 return;
             }
 
@@ -2609,17 +2617,14 @@ fn KanbanTabView(app_state: AppState) -> impl IntoView {
 fn IntegrationsTabView(app_state: AppState) -> impl IntoView {
     let (gh_status, set_gh_status) = create_signal(None::<GitHubStatusResponse>);
     let (gh_repos, set_gh_repos) = create_signal(Vec::<GitHubRepoSummary>::new());
-    let (vault_status, set_vault_status) = create_signal(None::<VaultStatusResponse>);
-    let (secrets, set_secrets) = create_signal(Vec::<SecretMetadata>::new());
-    let (oauth_statuses, set_oauth_statuses) = create_signal(Vec::<OAuthStatusResponse>::new());
+    let (provider_statuses, set_provider_statuses) =
+        create_signal(Vec::<ProviderAuthStatusResponse>::new());
+    let (current_settings, set_current_settings) = create_signal(None::<KaizenSettings>);
+    let (oauth_statuses, set_oauth_statuses) =
+        create_signal(HashMap::<String, OAuthStatusResponse>::new());
     let (integration_error, set_integration_error) = create_signal(String::new());
     let (integration_notice, set_integration_notice) = create_signal(String::new());
     let (integration_busy, set_integration_busy) = create_signal(false);
-
-    let (secret_provider, set_secret_provider) = create_signal("openai".to_string());
-    let (secret_type, set_secret_type) = create_signal("api_key".to_string());
-    let (secret_value, set_secret_value) = create_signal(String::new());
-    let (oauth_provider, set_oauth_provider) = create_signal("openai".to_string());
 
     let refresh_integrations: Rc<dyn Fn()> = Rc::new({
         let app_state = app_state.clone();
@@ -2632,6 +2637,19 @@ fn IntegrationsTabView(app_state: AppState) -> impl IntoView {
             wasm_bindgen_futures::spawn_local(async move {
                 let token = app_state.admin_token_opt();
                 let mut issues = Vec::<String>::new();
+                let mut next_oauth_statuses = HashMap::<String, OAuthStatusResponse>::new();
+
+                match core_request::<KaizenSettings>(CoreRequestInput {
+                    method: "GET".to_string(),
+                    path: "/api/settings".to_string(),
+                    body: None,
+                    admin_token: token.clone(),
+                })
+                .await
+                {
+                    Ok(settings) => set_current_settings.set(Some(settings)),
+                    Err(err) => issues.push(format!("Settings: {}", err)),
+                }
 
                 match core_request::<GitHubStatusResponse>(CoreRequestInput {
                     method: "GET".to_string(),
@@ -2657,94 +2675,89 @@ fn IntegrationsTabView(app_state: AppState) -> impl IntoView {
                     Err(err) => issues.push(format!("GitHub repos: {}", err)),
                 }
 
-                match core_request::<VaultStatusResponse>(CoreRequestInput {
+                match core_request::<Vec<ProviderAuthStatusResponse>>(CoreRequestInput {
                     method: "GET".to_string(),
-                    path: "/api/vault/status".to_string(),
+                    path: "/api/providers/status".to_string(),
                     body: None,
                     admin_token: token.clone(),
                 })
                 .await
                 {
-                    Ok(status) => set_vault_status.set(Some(status)),
-                    Err(err) => issues.push(format!("Vault status: {}", err)),
+                    Ok(rows) => set_provider_statuses.set(rows),
+                    Err(err) => issues.push(format!("Provider auth: {}", err)),
                 }
 
-                match core_request::<Vec<SecretMetadata>>(CoreRequestInput {
+                match core_request::<OAuthStatusResponse>(CoreRequestInput {
                     method: "GET".to_string(),
-                    path: "/api/secrets".to_string(),
+                    path: "/api/oauth/gemini/status".to_string(),
                     body: None,
-                    admin_token: token.clone(),
+                    admin_token: token,
                 })
                 .await
                 {
-                    Ok(rows) => set_secrets.set(rows),
-                    Err(err) => issues.push(format!("Secrets: {}", err)),
-                }
-
-                let mut oauth_rows = Vec::<OAuthStatusResponse>::new();
-                for provider in ["openai", "anthropic", "gemini", "nvidia"] {
-                    match core_request::<OAuthStatusResponse>(CoreRequestInput {
-                        method: "GET".to_string(),
-                        path: format!("/api/oauth/{}/status", provider),
-                        body: None,
-                        admin_token: token.clone(),
-                    })
-                    .await
-                    {
-                        Ok(status) => oauth_rows.push(status),
-                        Err(err) => issues.push(format!("OAuth {}: {}", provider, err)),
+                    Ok(status) => {
+                        next_oauth_statuses.insert("gemini".to_string(), status);
                     }
+                    Err(err) => issues.push(format!("Gemini OAuth: {}", err)),
                 }
-                set_oauth_statuses.set(oauth_rows);
 
+                set_oauth_statuses.set(next_oauth_statuses);
                 set_integration_error.set(issues.join(" | "));
                 set_integration_busy.set(false);
             });
         }
     });
 
-    let save_secret: Rc<dyn Fn()> = Rc::new({
+    let schedule_oauth_poll: Rc<dyn Fn()> = Rc::new({
+        let refresh_integrations = Rc::clone(&refresh_integrations);
+        move || {
+            let refresh_integrations = Rc::clone(&refresh_integrations);
+            wasm_bindgen_futures::spawn_local(async move {
+                for _ in 0..12 {
+                    TimeoutFuture::new(2500).await;
+                    (refresh_integrations)();
+                }
+            });
+        }
+    });
+
+    let start_gemini_oauth: Rc<dyn Fn()> = Rc::new({
         let app_state = app_state.clone();
+        let schedule_oauth_poll = Rc::clone(&schedule_oauth_poll);
         let refresh_integrations = Rc::clone(&refresh_integrations);
         move || {
             if integration_busy.get() {
                 return;
             }
 
-            let provider = normalize_provider(&secret_provider.get());
-            let secret_kind = secret_type.get().trim().to_string();
-            let value = secret_value.get().trim().to_string();
-
-            if provider.is_empty() || value.is_empty() {
-                set_integration_error
-                    .set("Provider and secret value are required before saving.".to_string());
-                return;
-            }
-
             set_integration_busy.set(true);
             let app_state = app_state.clone();
+            let schedule_oauth_poll = Rc::clone(&schedule_oauth_poll);
             let refresh_integrations = Rc::clone(&refresh_integrations);
             wasm_bindgen_futures::spawn_local(async move {
-                match core_request::<SecretMetadata>(CoreRequestInput {
-                    method: "PUT".to_string(),
-                    path: format!("/api/secrets/{}", provider),
-                    body: Some(json!({
-                        "value": value,
-                        "secret_type": secret_kind,
-                    })),
+                match core_request::<OAuthStartResponse>(CoreRequestInput {
+                    method: "GET".to_string(),
+                    path: "/api/oauth/gemini/start".to_string(),
+                    body: None,
                     admin_token: app_state.admin_token_opt(),
                 })
                 .await
                 {
-                    Ok(meta) => {
-                        set_secret_value.set(String::new());
+                    Ok(start) => {
+                        let open_result = open_external_browser(start.redirect_url.clone()).await;
+                        if open_result.is_err() {
+                            if let Some(window) = web_sys::window() {
+                                let _ = window.open_with_url(&start.redirect_url);
+                            }
+                        }
                         set_integration_error.set(String::new());
                         set_integration_notice
-                            .set(format!("Stored {} credential for {}.", meta.secret_type, meta.provider));
+                            .set("Gemini OAuth opened in your browser.".to_string());
+                        (schedule_oauth_poll)();
                     }
                     Err(err) => {
                         set_integration_notice.set(String::new());
-                        set_integration_error.set(format!("Store secret failed: {}", err));
+                        set_integration_error.set(format!("Gemini OAuth start failed: {}", err));
                     }
                 }
                 set_integration_busy.set(false);
@@ -2753,7 +2766,7 @@ fn IntegrationsTabView(app_state: AppState) -> impl IntoView {
         }
     });
 
-    let test_secret: Rc<dyn Fn()> = Rc::new({
+    let refresh_gemini_oauth: Rc<dyn Fn()> = Rc::new({
         let app_state = app_state.clone();
         let refresh_integrations = Rc::clone(&refresh_integrations);
         move || {
@@ -2761,41 +2774,25 @@ fn IntegrationsTabView(app_state: AppState) -> impl IntoView {
                 return;
             }
 
-            let provider = normalize_provider(&secret_provider.get());
-            if provider.is_empty() {
-                set_integration_error.set("Provider is required before testing.".to_string());
-                return;
-            }
-
             set_integration_busy.set(true);
             let app_state = app_state.clone();
             let refresh_integrations = Rc::clone(&refresh_integrations);
             wasm_bindgen_futures::spawn_local(async move {
-                match core_request::<SecretTestResponse>(CoreRequestInput {
+                match core_request::<Value>(CoreRequestInput {
                     method: "POST".to_string(),
-                    path: format!("/api/secrets/{}/test", provider),
+                    path: "/api/oauth/gemini/refresh".to_string(),
                     body: None,
                     admin_token: app_state.admin_token_opt(),
                 })
                 .await
                 {
-                    Ok(result) => {
-                        if result.test_passed {
-                            set_integration_error.set(String::new());
-                            set_integration_notice
-                                .set(format!("Credential test passed for {}.", result.provider));
-                        } else {
-                            set_integration_notice.set(String::new());
-                            set_integration_error.set(format!(
-                                "Credential test failed for {}: {}",
-                                result.provider,
-                                result.error.unwrap_or_else(|| "unknown error".to_string())
-                            ));
-                        }
+                    Ok(_) => {
+                        set_integration_error.set(String::new());
+                        set_integration_notice.set("Gemini OAuth token refreshed.".to_string());
                     }
                     Err(err) => {
                         set_integration_notice.set(String::new());
-                        set_integration_error.set(format!("Test secret failed: {}", err));
+                        set_integration_error.set(format!("Gemini OAuth refresh failed: {}", err));
                     }
                 }
                 set_integration_busy.set(false);
@@ -2804,17 +2801,11 @@ fn IntegrationsTabView(app_state: AppState) -> impl IntoView {
         }
     });
 
-    let revoke_secret: Rc<dyn Fn()> = Rc::new({
+    let disconnect_gemini_oauth: Rc<dyn Fn()> = Rc::new({
         let app_state = app_state.clone();
         let refresh_integrations = Rc::clone(&refresh_integrations);
         move || {
             if integration_busy.get() {
-                return;
-            }
-
-            let provider = normalize_provider(&secret_provider.get());
-            if provider.is_empty() {
-                set_integration_error.set("Provider is required before revoking.".to_string());
                 return;
             }
 
@@ -2824,7 +2815,7 @@ fn IntegrationsTabView(app_state: AppState) -> impl IntoView {
             wasm_bindgen_futures::spawn_local(async move {
                 match core_request::<Value>(CoreRequestInput {
                     method: "DELETE".to_string(),
-                    path: format!("/api/secrets/{}", provider),
+                    path: "/api/oauth/gemini".to_string(),
                     body: None,
                     admin_token: app_state.admin_token_opt(),
                 })
@@ -2832,52 +2823,12 @@ fn IntegrationsTabView(app_state: AppState) -> impl IntoView {
                 {
                     Ok(_) => {
                         set_integration_error.set(String::new());
-                        set_integration_notice.set("Credential revoked.".to_string());
+                        set_integration_notice.set("Gemini OAuth disconnected.".to_string());
                     }
                     Err(err) => {
                         set_integration_notice.set(String::new());
-                        set_integration_error.set(format!("Revoke secret failed: {}", err));
-                    }
-                }
-                set_integration_busy.set(false);
-                (refresh_integrations)();
-            });
-        }
-    });
-
-    let disconnect_oauth: Rc<dyn Fn()> = Rc::new({
-        let app_state = app_state.clone();
-        let refresh_integrations = Rc::clone(&refresh_integrations);
-        move || {
-            if integration_busy.get() {
-                return;
-            }
-
-            let provider = normalize_provider(&oauth_provider.get());
-            if provider.is_empty() {
-                set_integration_error.set("OAuth provider is required.".to_string());
-                return;
-            }
-
-            set_integration_busy.set(true);
-            let app_state = app_state.clone();
-            let refresh_integrations = Rc::clone(&refresh_integrations);
-            wasm_bindgen_futures::spawn_local(async move {
-                match core_request::<Value>(CoreRequestInput {
-                    method: "DELETE".to_string(),
-                    path: format!("/api/oauth/{}", provider),
-                    body: None,
-                    admin_token: app_state.admin_token_opt(),
-                })
-                .await
-                {
-                    Ok(_) => {
-                        set_integration_error.set(String::new());
-                        set_integration_notice.set("OAuth tokens disconnected.".to_string());
-                    }
-                    Err(err) => {
-                        set_integration_notice.set(String::new());
-                        set_integration_error.set(format!("OAuth disconnect failed: {}", err));
+                        set_integration_error
+                            .set(format!("Gemini OAuth disconnect failed: {}", err));
                     }
                 }
                 set_integration_busy.set(false);
@@ -2891,23 +2842,28 @@ fn IntegrationsTabView(app_state: AppState) -> impl IntoView {
         create_effect(move |_| {
             (refresh_integrations)();
             let refresh_integrations = Rc::clone(&refresh_integrations);
-            if let Ok(handle) = set_interval_with_handle(
-                move || (refresh_integrations)(),
-                Duration::from_secs(20),
-            ) {
+            if let Ok(handle) =
+                set_interval_with_handle(move || (refresh_integrations)(), Duration::from_secs(20))
+            {
                 on_cleanup(move || handle.clear());
             }
         });
     }
 
     let refresh_integrations_top = Rc::clone(&refresh_integrations);
-    let refresh_integrations_oauth = Rc::clone(&refresh_integrations);
+    let gemini_oauth = create_memo(move |_| oauth_statuses.get().get("gemini").cloned());
+    let zeroclaw_status = create_memo(move |_| {
+        provider_statuses
+            .get()
+            .into_iter()
+            .find(|row| row.provider == "zeroclaw")
+    });
 
     view! {
         <section class="tab-view">
             <div class="tab-head">
                 <h2>"Integrations"</h2>
-                <p>"GitHub, Vault, and OAuth integration status."</p>
+                <p>"GitHub and provider auth integration status."</p>
             </div>
 
             <div class="toolbar-inline" style="margin-bottom: 12px;">
@@ -2957,45 +2913,66 @@ fn IntegrationsTabView(app_state: AppState) -> impl IntoView {
                 </article>
 
                 <article class="card">
-                    <h3>"Vault"</h3>
+                    <h3>"Runtime Auth Model"</h3>
                     {move || {
-                        if let Some(status) = vault_status.get() {
+                        if let Some(settings) = current_settings.get() {
                             view! {
                                 <div class="list-stack">
-                                    <div><strong>"Available: "</strong>{if status.available { "Yes" } else { "No" }}</div>
-                                    <div><strong>"Key Source: "</strong>{status.key_source}</div>
-                                    <div><strong>"Vault Path: "</strong>{status.vault_path}</div>
-                                    <div><strong>"Bootstrap: "</strong>{if status.bootstrap_created { "Created" } else { "Existing" }}</div>
+                                    <div><strong>"Runtime Engine: "</strong>{settings.runtime_engine}</div>
+                                    <div><strong>"Inference Provider: "</strong>{settings.inference_provider}</div>
+                                    <div><strong>"Inference Model: "</strong>{settings.inference_model}</div>
+                                    <div><strong>"Gateway: "</strong>{app_state.health.get().map(|status| status.version).unwrap_or_else(|| "-".to_string())}</div>
                                 </div>
                             }
                                 .into_view()
                         } else {
-                            view! { <div class="muted">"No vault status yet."</div> }.into_view()
+                            view! { <div class="muted">"No runtime status yet."</div> }.into_view()
                         }
                     }}
                 </article>
 
                 <article class="card">
-                    <h3>"OAuth Providers"</h3>
+                    <h3>"Gemini OAuth"</h3>
                     {move || {
-                        if oauth_statuses.get().is_empty() {
-                            view! { <div class="muted">"No OAuth status rows loaded."</div> }.into_view()
-                        } else {
+                        if let Some(status) = gemini_oauth.get() {
+                            let start_gemini_oauth = Rc::clone(&start_gemini_oauth);
+                            let refresh_gemini_oauth = Rc::clone(&refresh_gemini_oauth);
+                            let disconnect_gemini_oauth = Rc::clone(&disconnect_gemini_oauth);
                             view! {
-                                <For
-                                    each=move || oauth_statuses.get()
-                                    key=|row| row.provider.clone()
-                                    children=move |row| {
-                                        view! {
-                                            <div class="oauth-row">
-                                                <span>{row.provider}</span>
-                                                <span>{if row.connected { "connected" } else { "not connected" }}</span>
-                                            </div>
-                                        }
-                                    }
-                                />
+                                <div class="list-stack">
+                                    <div><strong>"Supported: "</strong>{if status.supported { "Yes" } else { "No" }}</div>
+                                    <div><strong>"Connected: "</strong>{if status.connected { "Yes" } else { "No" }}</div>
+                                    <div><strong>"Access Token: "</strong>{if status.access_token_configured { "Present" } else { "Missing" }}</div>
+                                    <div><strong>"Refresh Token: "</strong>{if status.refresh_token_configured { "Present" } else { "Missing" }}</div>
+                                    <div>{status.message}</div>
+                                    <div class="toolbar-inline">
+                                        <button
+                                            class="action-btn"
+                                            prop:disabled=move || integration_busy.get()
+                                            on:click=move |_| (start_gemini_oauth)()
+                                        >
+                                            "Connect OAuth"
+                                        </button>
+                                        <button
+                                            class="action-btn subtle"
+                                            prop:disabled=move || integration_busy.get()
+                                            on:click=move |_| (refresh_gemini_oauth)()
+                                        >
+                                            "Refresh Token"
+                                        </button>
+                                        <button
+                                            class="action-btn danger"
+                                            prop:disabled=move || integration_busy.get()
+                                            on:click=move |_| (disconnect_gemini_oauth)()
+                                        >
+                                            "Disconnect"
+                                        </button>
+                                    </div>
+                                </div>
                             }
                                 .into_view()
+                        } else {
+                            view! { <div class="muted">"No Gemini OAuth status loaded."</div> }.into_view()
                         }
                     }}
                 </article>
@@ -3003,79 +2980,22 @@ fn IntegrationsTabView(app_state: AppState) -> impl IntoView {
 
             <div class="card-grid two-col">
                 <article class="card">
-                    <h3>"Credential Actions"</h3>
-                    <div class="form-grid">
-                        <label>
-                            <span>"Provider"</span>
-                            <input
-                                class="text-input"
-                                type="text"
-                                prop:value=move || secret_provider.get()
-                                on:input=move |ev| set_secret_provider.set(event_target_value(&ev))
-                            />
-                        </label>
-                        <label>
-                            <span>"Secret Type"</span>
-                            <select
-                                class="select-input"
-                                prop:value=move || secret_type.get()
-                                on:change=move |ev| set_secret_type.set(event_target_value(&ev))
-                            >
-                                <option value="api_key">"api_key"</option>
-                                <option value="oauth_access">"oauth_access"</option>
-                                <option value="oauth_refresh">"oauth_refresh"</option>
-                                <option value="oauth_client_secret">"oauth_client_secret"</option>
-                            </select>
-                        </label>
-                        <label>
-                            <span>"Secret Value"</span>
-                            <input
-                                class="text-input"
-                                type="password"
-                                prop:value=move || secret_value.get()
-                                on:input=move |ev| set_secret_value.set(event_target_value(&ev))
-                            />
-                        </label>
-                    </div>
-
-                    <div class="toolbar-inline" style="margin-top: 10px;">
-                        <button class="action-btn" prop:disabled=move || integration_busy.get() on:click=move |_| (save_secret)()>
-                            {move || if integration_busy.get() { "Working..." } else { "Store Secret" }}
-                        </button>
-                        <button class="action-btn" prop:disabled=move || integration_busy.get() on:click=move |_| (test_secret)()>
-                            "Test Secret"
-                        </button>
-                        <button class="action-btn danger" prop:disabled=move || integration_busy.get() on:click=move |_| (revoke_secret)()>
-                            "Revoke Secret"
-                        </button>
+                    <h3>"Zeroclaw Control Plane"</h3>
+                    <div class="list-stack">
+                        <div>{move || zeroclaw_status.get().map(|row| row.message).unwrap_or_else(|| "Zeroclaw uses the configured provider and its local auth method.".to_string())}</div>
+                        <div>"Set inference_provider to `codex-cli` when you want zeroclaw to use Codex CLI ChatGPT OAuth."</div>
+                        <div>"Set inference_provider to `gemini` when you want zeroclaw to use Gemini API or Gemini OAuth."</div>
+                        <div>"Set inference_provider to `gemini-cli` when you want zeroclaw to use Gemini CLI local OAuth."</div>
                     </div>
                 </article>
 
                 <article class="card">
-                    <h3>"OAuth Actions"</h3>
-                    <div class="form-grid single-col">
-                        <label>
-                            <span>"Provider"</span>
-                            <select
-                                class="select-input"
-                                prop:value=move || oauth_provider.get()
-                                on:change=move |ev| set_oauth_provider.set(event_target_value(&ev))
-                            >
-                                <option value="openai">"openai"</option>
-                                <option value="anthropic">"anthropic"</option>
-                                <option value="gemini">"gemini"</option>
-                                <option value="nvidia">"nvidia"</option>
-                            </select>
-                        </label>
-                    </div>
-
-                    <div class="toolbar-inline" style="margin-top: 10px;">
-                        <button class="action-btn" prop:disabled=move || integration_busy.get() on:click=move |_| (refresh_integrations_oauth)()>
-                            "Reload OAuth Status"
-                        </button>
-                        <button class="action-btn danger" prop:disabled=move || integration_busy.get() on:click=move |_| (disconnect_oauth)()>
-                            "Disconnect OAuth"
-                        </button>
+                    <h3>"Provider Guidance"</h3>
+                    <div class="list-stack">
+                        <div>"OpenAI / Anthropic / NVIDIA use env vars for API access."</div>
+                        <div>"Gemini app OAuth needs `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_CLOUD_PROJECT`."</div>
+                        <div>"Codex CLI uses `codex login` and its local `~/.codex/auth.json` session."</div>
+                        <div>"If you use API keys, set them in the shell environment before launch."</div>
                     </div>
                 </article>
             </div>
@@ -3107,20 +3027,20 @@ fn IntegrationsTabView(app_state: AppState) -> impl IntoView {
                 </article>
 
                 <article class="card">
-                    <h3>"Stored Secrets"</h3>
+                    <h3>"Provider Details"</h3>
                     {move || {
-                        if secrets.get().is_empty() {
-                            view! { <div class="muted">"No secrets currently stored."</div> }.into_view()
+                        if provider_statuses.get().is_empty() {
+                            view! { <div class="muted">"No provider details loaded."</div> }.into_view()
                         } else {
                             view! {
                                 <For
-                                    each=move || secrets.get()
-                                    key=|secret| secret.provider.clone()
-                                    children=move |secret| {
+                                    each=move || provider_statuses.get()
+                                    key=|row| row.provider.clone()
+                                    children=move |row| {
                                         view! {
                                             <div class="repo-row">
-                                                <span>{secret.provider}</span>
-                                                <span>{format!("{} • {}", secret.secret_type, secret.last4)}</span>
+                                                <span>{format!("{} -> {}", row.provider, row.resolved_provider)}</span>
+                                                <span>{row.message}</span>
                                             </div>
                                         }
                                     }
@@ -3838,8 +3758,7 @@ pub fn DetachedChatView() -> impl IntoView {
                                 }
                             }
                         } else {
-                            set_chat_error
-                                .set(format!("Stream interrupted: {}", stream_err));
+                            set_chat_error.set(format!("Stream interrupted: {}", stream_err));
                         }
                     }
                 }

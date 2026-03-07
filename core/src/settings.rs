@@ -37,7 +37,7 @@ pub struct KaizenSettings {
     pub credentials_ui_enabled: bool,
     #[serde(default = "default_true")]
     pub agent_name_editable_after_spawn: bool,
-    #[serde(default = "default_encrypted_vault")]
+    #[serde(default = "default_local_env_auth")]
     pub secrets_storage_mode: String,
     #[serde(default)]
     pub write_plaintext_secrets_to_env: bool,
@@ -59,14 +59,14 @@ pub struct KaizenSettings {
     pub inference_temperature: f32,
 }
 
-fn default_encrypted_vault() -> String {
-    "encrypted_vault".to_string()
+fn default_local_env_auth() -> String {
+    "local_env_auth".to_string()
 }
 fn default_inference_provider() -> String {
-    "anthropic".to_string()
+    "codex-cli".to_string()
 }
 fn default_inference_model() -> String {
-    "claude-sonnet-4-20250514".to_string()
+    "gpt-5.4".to_string()
 }
 fn default_inference_max_tokens() -> u32 {
     4096
@@ -93,14 +93,14 @@ impl Default for KaizenSettings {
             provider_inference_only: true,
             credentials_ui_enabled: true,
             agent_name_editable_after_spawn: true,
-            secrets_storage_mode: "encrypted_vault".to_string(),
+            secrets_storage_mode: "local_env_auth".to_string(),
             write_plaintext_secrets_to_env: false,
             show_only_masked_secrets_in_ui: true,
             mattermost_url: String::new(),
             mattermost_channel_id: String::new(),
             selected_github_repo: String::new(),
-            inference_provider: "anthropic".to_string(),
-            inference_model: "claude-sonnet-4-20250514".to_string(),
+            inference_provider: "codex-cli".to_string(),
+            inference_model: "gpt-5.4".to_string(),
             inference_max_tokens: 4096,
             inference_temperature: 0.7,
         }

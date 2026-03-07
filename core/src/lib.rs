@@ -7,6 +7,9 @@ pub mod crystal_ball;
 pub mod event_archive;
 pub mod gate_engine;
 pub mod inference;
+pub mod oauth_store;
+pub mod provider_auth;
 pub mod providers;
 pub mod settings;
-pub mod vault;
+// vault module removed - now lives in standalone Kai-Vault repo
+// see: D:\KaizenInnovations\Kai-Vault

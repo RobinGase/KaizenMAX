@@ -41,8 +41,8 @@ pub enum ProviderType {
     NvidiaApi,
     /// Google Gemini CLI (subprocess, OAuth-based, largely free).
     GeminiCli,
-    /// OpenCode AI CLI (subprocess).
-    OpenCode,
+    /// OpenAI Codex CLI (subprocess, typically ChatGPT OAuth-backed locally).
+    CodexCli,
     /// Generic OpenAI-compatible HTTP API.
     OpenAiCompatible,
 }
@@ -67,7 +67,7 @@ impl ProviderType {
 
     /// Returns `true` if this provider invokes a local CLI subprocess.
     pub fn is_cli(&self) -> bool {
-        matches!(self, ProviderType::GeminiCli | ProviderType::OpenCode)
+        matches!(self, ProviderType::GeminiCli | ProviderType::CodexCli)
     }
 
     /// Default browser profile directory name for web providers.
@@ -85,7 +85,7 @@ impl ProviderType {
     pub fn cli_binary(&self) -> Option<&'static str> {
         match self {
             ProviderType::GeminiCli => Some("gemini"),
-            ProviderType::OpenCode => Some("opencode"),
+            ProviderType::CodexCli => Some("codex"),
             _ => None,
         }
     }
@@ -103,7 +103,7 @@ pub enum AuthType {
     BrowserSession,
     /// Static API key.
     ApiKey,
-    /// OAuth2 access token (stored in vault).
+    /// OAuth2 access token (stored locally in the current no-vault build).
     OAuthToken,
     /// CLI handles auth internally (e.g., `gemini auth login`).
     CliManaged,
@@ -302,6 +302,7 @@ mod tests {
         assert!(ProviderType::GeminiWeb.is_web());
         assert!(!ProviderType::OpenAiApi.is_web());
         assert!(!ProviderType::GeminiCli.is_web());
+        assert!(!ProviderType::CodexCli.is_web());
     }
 
     #[test]
@@ -312,12 +313,13 @@ mod tests {
         assert!(ProviderType::NvidiaApi.is_api());
         assert!(!ProviderType::GeminiWeb.is_api());
         assert!(!ProviderType::GeminiCli.is_api());
+        assert!(!ProviderType::CodexCli.is_api());
     }
 
     #[test]
     fn provider_type_cli_classification() {
         assert!(ProviderType::GeminiCli.is_cli());
-        assert!(ProviderType::OpenCode.is_cli());
+        assert!(ProviderType::CodexCli.is_cli());
         assert!(!ProviderType::OpenAiApi.is_cli());
     }
 
@@ -327,12 +329,13 @@ mod tests {
         assert_eq!(ProviderType::GeminiWeb.profile_dir(), Some("gemini"));
         assert_eq!(ProviderType::OpenAiApi.profile_dir(), None);
         assert_eq!(ProviderType::GeminiCli.profile_dir(), None);
+        assert_eq!(ProviderType::CodexCli.profile_dir(), None);
     }
 
     #[test]
     fn cli_binary_only_for_cli() {
         assert_eq!(ProviderType::GeminiCli.cli_binary(), Some("gemini"));
-        assert_eq!(ProviderType::OpenCode.cli_binary(), Some("opencode"));
+        assert_eq!(ProviderType::CodexCli.cli_binary(), Some("codex"));
         assert_eq!(ProviderType::OpenAiApi.cli_binary(), None);
     }
 

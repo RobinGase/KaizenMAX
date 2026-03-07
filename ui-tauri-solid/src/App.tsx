@@ -8,7 +8,10 @@ import {
   onMount
 } from "solid-js";
 import { createStore } from "solid-js/store";
-import { coreRequest } from "./lib/tauri";
+import { coreRequest, openExternalUrl } from "./lib/tauri";
+import headerLogo from "./assets/branding/headerlogo.png";
+import brandEmblem from "./assets/branding/logo-emblem.png";
+import kaizenText from "./assets/branding/kaizen-text.png";
 import type {
   AgentStatus,
   ChatHistoryResponse,
@@ -28,10 +31,9 @@ import type {
   KaizenSettings,
   Notice,
   OAuthStatus,
-  SecretMetadata,
+  ProviderAuthStatus,
   SubAgent,
-  TransitionResult,
-  VaultStatus
+  TransitionResult
 } from "./lib/types";
 
 type TabId = "mission" | "gates" | "activity" | "workspace" | "integrations" | "settings";
@@ -46,21 +48,22 @@ const TABS: Array<{ id: TabId; label: string }> = [
   { id: "gates", label: "Workflow Gates" },
   { id: "activity", label: "Activity" },
   { id: "workspace", label: "Workspace" },
-  { id: "integrations", label: "Providers & Secrets" },
+  { id: "integrations", label: "Providers & Auth" },
   { id: "settings", label: "System Settings" }
 ];
 
 const KAIZEN_MODES = ["yolo", "build", "plan", "reason", "orchestrator"];
 const SUBAGENT_MODES = ["build", "plan"];
 const AGENT_STATUSES: AgentStatus[] = ["idle", "active", "blocked", "review_pending", "done"];
-const SECRET_PROVIDERS = ["anthropic", "openai", "gemini", "nvidia", "kaizen"];
-const OAUTH_PROVIDERS = ["openai", "anthropic"];
+const OAUTH_PROVIDERS = ["gemini"];
 const PROVIDER_MODEL_HINTS: Record<string, string[]> = {
   anthropic: ["claude-sonnet-4-20250514", "claude-3-7-sonnet-latest"],
   openai: ["gpt-4.1", "gpt-4.1-mini", "o3-mini"],
   gemini: ["gemini-2.5-flash", "gemini-2.5-pro"],
+  "codex-cli": ["gpt-5.4", "gpt-5-codex", "use-codex-config"],
   nvidia: ["meta/llama-3.1-70b-instruct", "mistralai/mixtral-8x7b-instruct-v0.1"],
-  kaizen: ["use-configured-provider"]
+  kaizen: ["use-configured-provider"],
+  zeroclaw: ["use-configured-provider"]
 };
 
 const GATE_LABELS: Record<keyof GateConditions, string> = {
@@ -131,13 +134,8 @@ export default function App() {
     selectedRepo: "",
     workspaceInput: "",
     workspaceTiles: loadWorkspaceTiles() as WorkspaceTile[],
-    vaultStatus: null as VaultStatus | null,
-    secrets: [] as SecretMetadata[],
+    providerStatuses: [] as ProviderAuthStatus[],
     oauth: {} as Record<string, OAuthStatus | null>,
-    revealedSecret: "",
-    secretProvider: "anthropic",
-    secretValue: "",
-    secretType: "api_key",
     selectedAgentId: "",
     chatHistory: [] as ChatMessage[],
     chatMessage: "",
@@ -184,10 +182,6 @@ export default function App() {
 
   async function apiPatch<T>(path: string, body?: unknown): Promise<T> {
     return coreRequest<T>({ method: "PATCH", path, body, adminToken: adminToken() });
-  }
-
-  async function apiPut<T>(path: string, body?: unknown): Promise<T> {
-    return coreRequest<T>({ method: "PUT", path, body, adminToken: adminToken() });
   }
 
   async function apiDelete(path: string): Promise<void> {
@@ -267,14 +261,9 @@ export default function App() {
     setState("githubRepos", reposPayload.repos ?? []);
   }
 
-  async function refreshVault(): Promise<void> {
-    const payload = await apiGet<VaultStatus>("/api/vault/status");
-    setState("vaultStatus", payload);
-  }
-
-  async function refreshSecrets(): Promise<void> {
-    const payload = await apiGet<SecretMetadata[]>("/api/secrets");
-    setState("secrets", payload);
+  async function refreshProviderStatuses(): Promise<void> {
+    const payload = await apiGet<ProviderAuthStatus[]>("/api/providers/status");
+    setState("providerStatuses", payload);
   }
 
   async function refreshOauthStatuses(): Promise<void> {
@@ -290,7 +279,7 @@ export default function App() {
   }
 
   async function refreshAll(): Promise<void> {
-    await Promise.all([
+    await Promise.allSettled([
       refreshHealth(),
       refreshSettings(),
       refreshAgents(),
@@ -299,10 +288,25 @@ export default function App() {
       refreshChatHistory(),
       refreshCrystalHealth(),
       refreshGithub(),
-      refreshVault(),
-      refreshSecrets(),
+      refreshProviderStatuses(),
       refreshOauthStatuses()
     ]);
+  }
+
+  function scheduleOauthStatusRefresh(attempts = 12, delayMs = 2500): void {
+    const tick = (): void => {
+      if (attempts <= 0) {
+        return;
+      }
+      attempts -= 1;
+      void Promise.allSettled([refreshOauthStatuses(), refreshProviderStatuses()]).then(() => {
+        if (attempts > 0 && !state.oauth.gemini?.connected) {
+          window.setTimeout(tick, delayMs);
+        }
+      });
+    };
+
+    window.setTimeout(tick, delayMs);
   }
 
   function persistWorkspaceTiles(next: WorkspaceTile[]): void {
@@ -509,72 +513,10 @@ export default function App() {
     });
   }
 
-  async function saveSecret(): Promise<void> {
-    const provider = state.secretProvider.trim();
-    const value = state.secretValue.trim();
-    if (!provider || !value) {
-      pushNotice("warning", "Provider and secret value are required.");
-      return;
-    }
-
-    await runTask("saveSecret", async () => {
-      await apiPut<SecretMetadata>(`/api/secrets/${encodeURIComponent(provider)}`, {
-        value,
-        secret_type: state.secretType
-      });
-      setState("secretValue", "");
-      await refreshSecrets();
-      pushNotice("success", `${provider} secret stored.`);
-    });
-  }
-
-  async function testSecret(provider: string): Promise<void> {
-    await runTask(`test-secret-${provider}`, async () => {
-      const result = await apiPost<{ test_passed: boolean; error: string | null }>(
-        `/api/secrets/${encodeURIComponent(provider)}/test`
-      );
-      if (result.test_passed) {
-        pushNotice("success", `${provider} secret test passed.`);
-      } else {
-        pushNotice("warning", result.error || `${provider} secret test failed.`);
-      }
-    });
-  }
-
-  async function revealSecret(provider: string): Promise<void> {
-    const ok = window.confirm(
-      `Reveal decrypted secret for ${provider}? This displays it locally in this session.`
-    );
-    if (!ok) {
-      return;
-    }
-
-    await runTask(`reveal-secret-${provider}`, async () => {
-      const result = await apiGet<{ provider: string; key: string }>(
-        `/api/secrets/${encodeURIComponent(provider)}/use`
-      );
-      setState("revealedSecret", `${result.provider}: ${result.key}`);
-      pushNotice("warning", `Secret revealed for ${provider}.`);
-    });
-  }
-
-  async function revokeSecret(provider: string): Promise<void> {
-    const ok = window.confirm(`Revoke secret for ${provider}?`);
-    if (!ok) {
-      return;
-    }
-
-    await runTask(`revoke-secret-${provider}`, async () => {
-      await apiDelete(`/api/secrets/${encodeURIComponent(provider)}`);
-      await refreshSecrets();
-      pushNotice("warning", `${provider} secret revoked.`);
-    });
-  }
-
   async function disconnectOauth(provider: string): Promise<void> {
     await runTask(`oauth-disconnect-${provider}`, async () => {
       await apiDelete(`/api/oauth/${encodeURIComponent(provider)}`);
-      await refreshOauthStatuses();
+      await Promise.allSettled([refreshOauthStatuses(), refreshProviderStatuses()]);
       pushNotice("success", `${provider} OAuth disconnected.`);
     });
   }
@@ -587,9 +529,14 @@ export default function App() {
         `/api/oauth/${encodeURIComponent(provider)}/start`
       );
       if (response.redirect_url) {
-        window.open(response.redirect_url, "_blank", "noopener,noreferrer");
+        try {
+          await openExternalUrl(response.redirect_url);
+        } catch {
+          window.open(response.redirect_url, "_blank", "noopener,noreferrer");
+        }
       }
-      pushNotice("info", `${provider} OAuth start requested.`);
+      scheduleOauthStatusRefresh();
+      pushNotice("info", `${provider} OAuth opened in your browser.`);
     } catch (error) {
       const message = parseError(error);
       if (message.toLowerCase().includes("not implemented")) {
@@ -607,8 +554,8 @@ export default function App() {
     setBusy(key, true);
     try {
       await apiPost<unknown>(`/api/oauth/${encodeURIComponent(provider)}/refresh`);
-      await refreshOauthStatuses();
-      pushNotice("info", `${provider} OAuth refresh requested.`);
+      await Promise.allSettled([refreshOauthStatuses(), refreshProviderStatuses()]);
+      pushNotice("info", `${provider} OAuth refreshed.`);
     } catch (error) {
       const message = parseError(error);
       if (message.toLowerCase().includes("not implemented")) {
@@ -641,6 +588,14 @@ export default function App() {
     setState("settingsDraft", { ...state.settings });
     pushNotice("info", "Settings draft reset.");
   }
+
+  const geminiOauth = createMemo(() => state.oauth.gemini ?? null);
+  const geminiProviderStatus = createMemo(
+    () => state.providerStatuses.find((status) => status.provider === "gemini") ?? null
+  );
+  const zeroclawStatus = createMemo(
+    () => state.providerStatuses.find((status) => status.provider === "zeroclaw") ?? null
+  );
 
   const activeModes = createMemo(() => (state.selectedAgentId ? SUBAGENT_MODES : KAIZEN_MODES));
 
@@ -695,11 +650,24 @@ export default function App() {
   return (
     <div class="app-shell">
       <aside class="nav-rail">
-        <div class="brand">
-          <div class="brand-dot" />
-          <div>
+        <div class="brand brand-panel">
+          <div class="brand-mark">
+            <img src={brandEmblem} alt="Kaizen emblem" />
+          </div>
+          <div class="brand-copy">
+            <div class="brand-eyebrow">Kaizen Innovations</div>
             <div class="brand-title">Kaizen MAX</div>
             <div class="brand-subtitle">Mission Control</div>
+          </div>
+        </div>
+
+        <div class="brand-banner">
+          <img class="brand-banner-wordmark" src={kaizenText} alt="Kaizen Innovations" />
+          <div class="brand-banner-copy">
+            <div class="brand-banner-kicker">Native Command Surface</div>
+            <p>
+              Zeroclaw routing, Codex-first execution, and provider control without the old vault layer.
+            </p>
           </div>
         </div>
 
@@ -725,24 +693,44 @@ export default function App() {
 
       <section class="main-shell">
         <header class="top-bar">
-          <div class="status-strip">
-            <span class={`status-chip ${state.health?.status === "ok" ? "ok" : "warn"}`}>
-              {state.health ? `${state.health.engine} ${state.health.version}` : "Backend pending"}
-            </span>
-            <span class="status-chip neutral">Gate: {state.gates?.current_state || "unknown"}</span>
-            <span class="status-chip neutral">Agents: {state.agents.length}</span>
-            <span class="status-chip neutral">Events: {state.events.length}</span>
+          <div class="top-bar-main">
+            <div class="top-bar-kicker">Kaizen Innovations / Zeroclaw Control Plane</div>
+            <div class="top-bar-heading-row">
+              <div>
+                <h1 class="top-bar-heading">Mission Control</h1>
+                <p class="top-bar-blurb">
+                  Current route:{" "}
+                  {zeroclawStatus()?.resolved_provider ||
+                    state.settings?.inference_provider ||
+                    state.chatProvider ||
+                    "unresolved"}
+                  {" "} / Model: {state.settings?.inference_model || state.chatModel || "unset"}
+                </p>
+              </div>
+              <img class="top-bar-logo" src={headerLogo} alt="" aria-hidden="true" />
+            </div>
+
+            <div class="status-strip">
+              <span class={`status-chip ${state.health?.status === "ok" ? "ok" : "warn"}`}>
+                {state.health ? `${state.health.engine} ${state.health.version}` : "Backend pending"}
+              </span>
+              <span class="status-chip neutral">Gate: {state.gates?.current_state || "unknown"}</span>
+              <span class="status-chip neutral">Agents: {state.agents.length}</span>
+              <span class="status-chip neutral">Events: {state.events.length}</span>
+            </div>
           </div>
 
-          <div class="admin-token">
-            <label for="admin-token-input">Admin token</label>
-            <input
-              id="admin-token-input"
-              type="password"
-              value={adminToken()}
-              onInput={(event) => setAdminToken(event.currentTarget.value)}
-              placeholder="Optional unless ADMIN_API_TOKEN is enabled"
-            />
+          <div class="top-bar-side">
+            <div class="admin-token">
+              <label for="admin-token-input">Admin token</label>
+              <input
+                id="admin-token-input"
+                type="password"
+                value={adminToken()}
+                onInput={(event) => setAdminToken(event.currentTarget.value)}
+                placeholder="Optional unless ADMIN_API_TOKEN is enabled"
+              />
+            </div>
           </div>
         </header>
 
@@ -1109,131 +1097,120 @@ export default function App() {
           <Show when={activeTab() === "integrations"}>
             <section class="card single">
               <div class="card-head">
-                <h2>Providers & Secrets</h2>
+                <h2>Providers & Auth</h2>
                 <div class="inline-actions">
-                  <button class="btn ghost" onClick={() => void runTask("vault-refresh", refreshVault)}>
-                    Vault
-                  </button>
-                  <button class="btn ghost" onClick={() => void runTask("secrets-refresh", refreshSecrets)}>
-                    Secrets
-                  </button>
-                  <button class="btn ghost" onClick={() => void runTask("oauth-refresh", refreshOauthStatuses)}>
-                    OAuth
+                  <button
+                    class="btn ghost"
+                    onClick={() =>
+                      void runTask("providers-refresh", async () => {
+                        await Promise.allSettled([refreshProviderStatuses(), refreshOauthStatuses()]);
+                      })
+                    }
+                  >
+                    Refresh Auth Status
                   </button>
                 </div>
               </div>
 
               <div class="result-block compact">
-                <h3>Vault status</h3>
-                <pre>{JSON.stringify(state.vaultStatus, null, 2)}</pre>
+                <h3>Runtime auth model</h3>
+                <pre>
+                  {JSON.stringify(
+                    {
+                      runtime_engine: state.settings?.runtime_engine ?? null,
+                      inference_provider: state.settings?.inference_provider ?? null,
+                      zeroclaw_routes_to: zeroclawStatus()?.resolved_provider ?? null
+                    },
+                    null,
+                    2
+                  )}
+                </pre>
               </div>
 
-              <div class="grid-two">
+              <div class="result-block compact">
+                <h3>Zeroclaw control plane</h3>
+                <pre>
+                  {zeroclawStatus()?.message ??
+                    "Zeroclaw uses the configured inference provider and its local auth method."}
+                </pre>
+              </div>
+
+              <div class="secret-row">
                 <div>
-                  <h3>Store secret</h3>
-                  <div class="form-grid">
-                    <label>
-                      Provider
-                      <select
-                        value={state.secretProvider}
-                        onChange={(event) => setState("secretProvider", event.currentTarget.value)}
-                      >
-                        <For each={SECRET_PROVIDERS}>{(provider) => <option value={provider}>{provider}</option>}</For>
-                      </select>
-                    </label>
-                    <label>
-                      Secret type
-                      <input
-                        value={state.secretType}
-                        onInput={(event) => setState("secretType", event.currentTarget.value)}
-                      />
-                    </label>
-                    <label class="full">
-                      Secret value
-                      <input
-                        type="password"
-                        value={state.secretValue}
-                        onInput={(event) => setState("secretValue", event.currentTarget.value)}
-                        placeholder="Paste provider key"
-                      />
-                    </label>
-                    <button class="btn primary" onClick={() => void saveSecret()} disabled={!!busy.saveSecret}>
-                      Save Secret
-                    </button>
+                  <strong>Gemini OAuth</strong>
+                  <div class="agent-meta muted">
+                    supported {geminiOauth()?.supported ? "yes" : "no"} Â· connected{" "}
+                    {geminiOauth()?.connected ? "yes" : "no"}
+                  </div>
+                  <div class="agent-meta muted">
+                    access token {geminiOauth()?.access_token_configured ? "present" : "missing"} Â· refresh token{" "}
+                    {geminiOauth()?.refresh_token_configured ? "present" : "missing"}
+                  </div>
+                  <div class="agent-meta muted">
+                    Local Gemini OAuth needs `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_CLOUD_PROJECT`.
+                  </div>
+                  <div class="agent-meta muted">
+                    If `inference_provider` is `codex-cli`, zeroclaw will use Codex CLI ChatGPT OAuth instead.
                   </div>
                 </div>
-
-                <div>
-                  <h3>OAuth providers</h3>
-                  <For each={OAUTH_PROVIDERS}>
-                    {(provider) => (
-                      <div class="oauth-row">
-                        <div>
-                          <strong>{provider}</strong>
-                          <div class="agent-meta muted">
-                            {state.oauth[provider]
-                              ? state.oauth[provider]!.message
-                              : "No status (or endpoint unavailable)"}
-                          </div>
-                        </div>
-                        <div class="inline-actions">
-                          <button
-                            class="btn ghost"
-                            onClick={() => void tryStartOauth(provider)}
-                            disabled={!!busy[`oauth-start-${provider}`]}
-                          >
-                            Start
-                          </button>
-                          <button
-                            class="btn ghost"
-                            onClick={() => void tryRefreshOauth(provider)}
-                            disabled={!!busy[`oauth-refresh-${provider}`]}
-                          >
-                            Refresh
-                          </button>
-                          <button class="btn danger" onClick={() => void disconnectOauth(provider)}>
-                            Disconnect
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </For>
+                <div class="inline-actions wrap">
+                  <button
+                    class="btn primary"
+                    onClick={() => void tryStartOauth("gemini")}
+                    disabled={!!busy["oauth-start-gemini"]}
+                  >
+                    {busy["oauth-start-gemini"] ? "Starting..." : "Connect OAuth"}
+                  </button>
+                  <button
+                    class="btn ghost"
+                    onClick={() => void tryRefreshOauth("gemini")}
+                    disabled={!!busy["oauth-refresh-gemini"]}
+                  >
+                    {busy["oauth-refresh-gemini"] ? "Refreshing..." : "Refresh Token"}
+                  </button>
+                  <button
+                    class="btn danger"
+                    onClick={() => void disconnectOauth("gemini")}
+                    disabled={!!busy["oauth-disconnect-gemini"]}
+                  >
+                    {busy["oauth-disconnect-gemini"] ? "Disconnecting..." : "Disconnect"}
+                  </button>
                 </div>
               </div>
 
-              <h3>Secrets</h3>
+              <div class="result-block compact">
+                <h3>Gemini OAuth status</h3>
+                <pre>
+                  {JSON.stringify(
+                    {
+                      oauth: geminiOauth(),
+                      runtime_provider: geminiProviderStatus()
+                    },
+                    null,
+                    2
+                  )}
+                </pre>
+              </div>
+
               <div class="secret-list">
-                <For each={state.secrets}>
-                  {(secret) => (
+                <For each={state.providerStatuses}>
+                  {(status) => (
                     <div class="secret-row">
                       <div>
-                        <strong>{secret.provider}</strong>
+                        <strong>{status.provider}</strong>
                         <div class="agent-meta muted">
-                          key {secret.last4} · {secret.secret_type} · updated {secret.last_updated}
+                          method {status.auth_method} · configured {status.configured ? "yes" : "no"} · chat {status.can_chat ? "ready" : "blocked"}
                         </div>
+                        <div class="agent-meta muted">routes to {status.resolved_provider}</div>
+                        <div class="agent-meta muted">{status.env_hints.join(", ")}</div>
                       </div>
-                      <div class="inline-actions">
-                        <button class="btn ghost" onClick={() => void testSecret(secret.provider)}>
-                          Test
-                        </button>
-                        <button class="btn ghost" onClick={() => void revealSecret(secret.provider)}>
-                          Use
-                        </button>
-                        <button class="btn danger" onClick={() => void revokeSecret(secret.provider)}>
-                          Revoke
-                        </button>
+                      <div class="result-block compact">
+                        <pre>{status.message}</pre>
                       </div>
                     </div>
                   )}
                 </For>
               </div>
-
-              <Show when={state.revealedSecret}>
-                <div class="result-block">
-                  <h3>Revealed secret (current session)</h3>
-                  <pre>{state.revealedSecret}</pre>
-                </div>
-              </Show>
             </section>
           </Show>
 

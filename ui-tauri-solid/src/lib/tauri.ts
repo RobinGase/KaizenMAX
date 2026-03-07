@@ -43,3 +43,7 @@ export async function coreRequest<T>(input: CoreRequestInput): Promise<T> {
 
   return response.body as T;
 }
+
+export async function openExternalUrl(url: string): Promise<void> {
+  await invoke("open_external_url", { url });
+}

@@ -5,7 +5,7 @@ Kaizen MAX is a Windows-first operator cockpit for AI-assisted engineering.
 - Runtime: Rust (`Kaizen`)
 - Primary agent: `Kaizen`
 - Sub-agent policy: user-controlled only
-- Setup model: UI-first (no manual vault key generation required)
+- Setup model: UI-first
 
 ## Operator Quick Start
 
@@ -13,44 +13,45 @@ Kaizen MAX is a Windows-first operator cockpit for AI-assisted engineering.
    - `scripts/start-max.bat`
    - or `scripts/start-max.ps1`
 2. The native desktop Mission Control UI opens (`Tauri v2 + SolidJS`).
-3. Open `Settings -> Providers`
+3. Open `Settings -> Providers & Auth`
 4. Configure inference:
-    - choose provider/model
-    - store provider API key in `Provider Credentials`
+    - `zeroclaw` routes through the configured `inference_provider`
+    - default local path: `codex-cli` with ChatGPT OAuth (`codex login`)
+    - OpenAI / Anthropic / NVIDIA: `*_API_KEY`
+    - Gemini: `GEMINI_API_KEY` / `GOOGLE_API_KEY`, or set `GOOGLE_OAUTH_CLIENT_ID` + `GOOGLE_CLOUD_PROJECT` and click `Connect OAuth`
+    - Gemini CLI: install `gemini` and complete its local login once
+    - Codex CLI: install `codex` and complete `codex login` once
 5. Send a message in Kaizen chat
 
 ## Crystal Ball Bridge (Optional)
 
-All setup is in `Settings -> Providers`:
+All setup is in `Settings -> Providers & Auth`:
 
 1. Set Mattermost URL and Channel ID
-2. Store `Mattermost Bot` token in encrypted credentials
+2. Set `MATTERMOST_TOKEN` in the environment
 3. Toggle `Enable Crystal Ball Bridge`
 4. Run `Validate` and `Smoke`
 
 ## Security Notes
 
-- Secrets are encrypted at rest with AES-256-GCM
-- Plaintext secrets are not returned by API endpoints
-- Vault key is auto-bootstrapped if `ADMIN_VAULT_KEY` is not set
 - Crystal Ball events are redacted before archive and bridge publication
 - Optional `ADMIN_API_TOKEN` can enforce auth on sensitive settings/gates/secrets endpoints
 - Remote bind mode requires explicit security acknowledgement and edge TLS/mTLS/auth
 
-See `contexts/policies/secret_vault_contract.md` for the security implementation contract.
+## Local Auth (Current)
 
-## Docker Vault Daemon (Optional)
+Vault has been extracted to standalone repo: `D:\KaizenInnovations\Kai-Vault`
 
-If you want vault isolation for multiple local applications, run the standalone containerized vault service:
-
-- `docker compose -f docker-compose.vaultd.yml up -d --build`
-- Preferred with local token file: `docker compose --env-file .env.vaultd.local -f docker-compose.vaultd.yml up -d --build`
-- Service URL: `http://127.0.0.1:9210`
-- Auth: per-app token via `x-vault-app` + `Authorization: Bearer <token>`
-
-Full usage guide: `docs/vaultd.md`.
-
-Vault standalone alignment policy: `contexts/policies/vault_repo_sync_rule.md`.
+Current build runs without vault:
+- OpenAI / Anthropic / NVIDIA use env vars (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `NVIDIA_API_KEY`)
+- Gemini supports:
+  - API key env vars (`GEMINI_API_KEY` or `GOOGLE_API_KEY`)
+  - app-managed Google OAuth (`GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_CLOUD_PROJECT`, optional `GOOGLE_OAUTH_CLIENT_SECRET`)
+  - Google ADC OAuth fallback (`gcloud auth application-default login` + `GOOGLE_CLOUD_PROJECT`)
+- Codex CLI supports local login state, including ChatGPT OAuth (`codex login`, stored in `~/.codex/auth.json`)
+- App-managed Gemini OAuth stores tokens locally at `data/oauth/gemini_tokens.json` by default
+- `zeroclaw` is the provider/auth control plane and routes to the configured provider
+- Default zeroclaw route is `codex-cli` (`gpt-5.4`) so the local app works without vault or API keys on a logged-in Codex CLI setup
 
 ## Minimal Requirements
 

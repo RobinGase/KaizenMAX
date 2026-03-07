@@ -1,12 +1,13 @@
 //! LLM Provider Inference Module
 //!
 //! Supports Anthropic Messages API and OpenAI Chat Completions API.
-//! API keys are decrypted from the vault at request time - never cached in memory.
+//! Credentials are resolved at request time from the active local auth method.
 //! Streaming is supported via SSE (Server-Sent Events) for both providers.
 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 // ── Provider Enum ──────────────────────────────────────────────────────────
@@ -21,6 +22,8 @@ pub enum InferenceProvider {
     Nvidia,
     #[serde(rename = "gemini-cli")]
     GeminiCli,
+    #[serde(rename = "codex-cli")]
+    CodexCli,
 }
 
 impl InferenceProvider {
@@ -31,11 +34,12 @@ impl InferenceProvider {
             "gemini" | "google" | "googleai" => Some(Self::Gemini),
             "nvidia" | "nim" => Some(Self::Nvidia),
             "gemini-cli" | "geminicli" | "google-cli" => Some(Self::GeminiCli),
+            "codex-cli" | "codexcli" | "openai-cli" => Some(Self::CodexCli),
             _ => None,
         }
     }
 
-    /// The vault provider key to look up the API key.
+    /// The provider key stem used by the local auth resolver.
     pub fn vault_key(&self) -> Option<&'static str> {
         match self {
             Self::Anthropic => Some("anthropic"),
@@ -43,6 +47,7 @@ impl InferenceProvider {
             Self::Gemini => Some("gemini"),
             Self::Nvidia => Some("nvidia"),
             Self::GeminiCli => None,
+            Self::CodexCli => None,
         }
     }
 
@@ -54,8 +59,59 @@ impl InferenceProvider {
             Self::Gemini => "gemini-1.5-pro",
             Self::Nvidia => "nvidia/llama-3.3-nemotron-super-49b-v1",
             Self::GeminiCli => "gemini-2.5-flash",
+            Self::CodexCli => "gpt-5.4",
         }
     }
+}
+
+#[derive(Clone)]
+pub enum InferenceCredential {
+    None,
+    ApiKey(String),
+    BearerToken {
+        token: String,
+        user_project: Option<String>,
+    },
+}
+
+impl InferenceCredential {
+    fn secret(&self) -> Option<&str> {
+        match self {
+            Self::None => None,
+            Self::ApiKey(value) => Some(value.as_str()),
+            Self::BearerToken { token, .. } => Some(token.as_str()),
+        }
+    }
+
+    fn bearer(&self) -> Option<&str> {
+        match self {
+            Self::BearerToken { token, .. } => Some(token.as_str()),
+            _ => None,
+        }
+    }
+
+    fn user_project(&self) -> Option<&str> {
+        match self {
+            Self::BearerToken { user_project, .. } => user_project.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn wipe(&mut self) {
+        match self {
+            Self::None => {}
+            Self::ApiKey(value) => wipe_secret(value),
+            Self::BearerToken { token, .. } => wipe_secret(token),
+        }
+    }
+}
+
+fn wipe_secret(secret: &mut String) {
+    // Best-effort wipe for short-lived credential material.
+    unsafe {
+        secret.as_bytes_mut().fill(0);
+    }
+    secret.clear();
 }
 
 impl std::fmt::Display for InferenceProvider {
@@ -66,6 +122,7 @@ impl std::fmt::Display for InferenceProvider {
             Self::Gemini => write!(f, "gemini"),
             Self::Nvidia => write!(f, "nvidia"),
             Self::GeminiCli => write!(f, "gemini-cli"),
+            Self::CodexCli => write!(f, "codex-cli"),
         }
     }
 }
@@ -372,31 +429,32 @@ impl InferenceClient {
     /// Non-streaming completion. Returns the full response once done.
     pub async fn complete(
         &self,
-        api_key: &str,
+        credential: &InferenceCredential,
         request: &InferenceRequest,
     ) -> Result<InferenceResponse, String> {
         match request.provider {
-            InferenceProvider::Anthropic => self.complete_anthropic(api_key, request).await,
-            InferenceProvider::OpenAI => self.complete_openai(api_key, request).await,
-            InferenceProvider::Gemini => self.complete_gemini(api_key, request).await,
-            InferenceProvider::Nvidia => self.complete_nvidia(api_key, request).await,
+            InferenceProvider::Anthropic => self.complete_anthropic(credential, request).await,
+            InferenceProvider::OpenAI => self.complete_openai(credential, request).await,
+            InferenceProvider::Gemini => self.complete_gemini(credential, request).await,
+            InferenceProvider::Nvidia => self.complete_nvidia(credential, request).await,
             InferenceProvider::GeminiCli => self.complete_gemini_cli(request).await,
+            InferenceProvider::CodexCli => self.complete_codex_cli(request).await,
         }
     }
 
     /// Start a streaming request. Returns the raw reqwest::Response for SSE parsing.
     pub async fn stream_raw(
         &self,
-        api_key: &str,
+        credential: &InferenceCredential,
         request: &InferenceRequest,
     ) -> Result<reqwest::Response, String> {
         match request.provider {
-            InferenceProvider::Anthropic => self.stream_anthropic_raw(api_key, request).await,
-            InferenceProvider::OpenAI => self.stream_openai_raw(api_key, request).await,
-            InferenceProvider::Gemini => self.stream_gemini_raw(api_key, request).await,
-            InferenceProvider::Nvidia => self.stream_nvidia_raw(api_key, request).await,
-            InferenceProvider::GeminiCli => Err(
-                "Gemini CLI streaming is not supported by this endpoint yet. Use non-streaming chat or switch to Gemini API provider for SSE streaming.".to_string()
+            InferenceProvider::Anthropic => self.stream_anthropic_raw(credential, request).await,
+            InferenceProvider::OpenAI => self.stream_openai_raw(credential, request).await,
+            InferenceProvider::Gemini => self.stream_gemini_raw(credential, request).await,
+            InferenceProvider::Nvidia => self.stream_nvidia_raw(credential, request).await,
+            InferenceProvider::GeminiCli | InferenceProvider::CodexCli => Err(
+                "CLI-backed providers do not expose SSE streaming here yet. Use non-streaming chat or switch to an API-backed provider for SSE streaming.".to_string(),
             ),
         }
     }
@@ -405,9 +463,12 @@ impl InferenceClient {
 
     async fn complete_anthropic(
         &self,
-        api_key: &str,
+        credential: &InferenceCredential,
         request: &InferenceRequest,
     ) -> Result<InferenceResponse, String> {
+        let api_key = credential
+            .secret()
+            .ok_or("Anthropic requests need ANTHROPIC_API_KEY.".to_string())?;
         let body = AnthropicRequest {
             model: request.model.clone(),
             max_tokens: request.max_tokens,
@@ -485,9 +546,12 @@ impl InferenceClient {
 
     async fn stream_anthropic_raw(
         &self,
-        api_key: &str,
+        credential: &InferenceCredential,
         request: &InferenceRequest,
     ) -> Result<reqwest::Response, String> {
+        let api_key = credential
+            .secret()
+            .ok_or("Anthropic streaming needs ANTHROPIC_API_KEY.".to_string())?;
         let body = AnthropicRequest {
             model: request.model.clone(),
             max_tokens: request.max_tokens,
@@ -548,13 +612,13 @@ impl InferenceClient {
 
     async fn complete_openai(
         &self,
-        api_key: &str,
+        credential: &InferenceCredential,
         request: &InferenceRequest,
     ) -> Result<InferenceResponse, String> {
         self.complete_openai_compatible(
             "https://api.openai.com/v1/chat/completions",
             "openai",
-            api_key,
+            credential,
             request,
         )
         .await
@@ -562,13 +626,13 @@ impl InferenceClient {
 
     async fn complete_nvidia(
         &self,
-        api_key: &str,
+        credential: &InferenceCredential,
         request: &InferenceRequest,
     ) -> Result<InferenceResponse, String> {
         self.complete_openai_compatible(
             "https://integrate.api.nvidia.com/v1/chat/completions",
             "nvidia",
-            api_key,
+            credential,
             request,
         )
         .await
@@ -578,9 +642,12 @@ impl InferenceClient {
         &self,
         endpoint: &str,
         provider_label: &str,
-        api_key: &str,
+        credential: &InferenceCredential,
         request: &InferenceRequest,
     ) -> Result<InferenceResponse, String> {
+        let token = credential.secret().ok_or(format!(
+            "{provider_label} requests need a configured bearer credential."
+        ))?;
         let body = OpenAIRequest {
             model: request.model.clone(),
             messages: self.build_openai_messages(request),
@@ -596,7 +663,7 @@ impl InferenceClient {
         let resp = self
             .http
             .post(endpoint)
-            .header("Authorization", format!("Bearer {api_key}"))
+            .header("Authorization", format!("Bearer {token}"))
             .header("content-type", "application/json")
             .json(&body)
             .send()
@@ -649,13 +716,13 @@ impl InferenceClient {
 
     async fn stream_openai_raw(
         &self,
-        api_key: &str,
+        credential: &InferenceCredential,
         request: &InferenceRequest,
     ) -> Result<reqwest::Response, String> {
         self.stream_openai_compatible_raw(
             "https://api.openai.com/v1/chat/completions",
             "openai",
-            api_key,
+            credential,
             request,
         )
         .await
@@ -663,13 +730,13 @@ impl InferenceClient {
 
     async fn stream_nvidia_raw(
         &self,
-        api_key: &str,
+        credential: &InferenceCredential,
         request: &InferenceRequest,
     ) -> Result<reqwest::Response, String> {
         self.stream_openai_compatible_raw(
             "https://integrate.api.nvidia.com/v1/chat/completions",
             "nvidia",
-            api_key,
+            credential,
             request,
         )
         .await
@@ -679,9 +746,12 @@ impl InferenceClient {
         &self,
         endpoint: &str,
         provider_label: &str,
-        api_key: &str,
+        credential: &InferenceCredential,
         request: &InferenceRequest,
     ) -> Result<reqwest::Response, String> {
+        let token = credential.secret().ok_or(format!(
+            "{provider_label} streaming needs a configured bearer credential."
+        ))?;
         let body = OpenAIRequest {
             model: request.model.clone(),
             messages: self.build_openai_messages(request),
@@ -697,7 +767,7 @@ impl InferenceClient {
         let resp = self
             .http
             .post(endpoint)
-            .header("Authorization", format!("Bearer {api_key}"))
+            .header("Authorization", format!("Bearer {token}"))
             .header("content-type", "application/json")
             .json(&body)
             .send()
@@ -765,19 +835,44 @@ impl InferenceClient {
 
     async fn complete_gemini(
         &self,
-        api_key: &str,
+        credential: &InferenceCredential,
         request: &InferenceRequest,
     ) -> Result<InferenceResponse, String> {
-        let endpoint = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-            request.model, api_key
-        );
-
         let body = self.build_gemini_request(request);
-        let resp = self
+        let endpoint = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+            request.model
+        );
+        let mut request_builder = self
             .http
             .post(endpoint)
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+
+        match credential {
+            InferenceCredential::ApiKey(api_key) => {
+                request_builder = request_builder.query(&[("key", api_key.as_str())]);
+            }
+            InferenceCredential::BearerToken { .. } => {
+                let token = credential
+                    .bearer()
+                    .ok_or("Gemini OAuth requires a bearer token.".to_string())?;
+                let user_project = credential.user_project().ok_or(
+                    "Gemini OAuth requires GOOGLE_CLOUD_PROJECT (or GOOGLE_PROJECT_ID / GCLOUD_PROJECT)."
+                        .to_string(),
+                )?;
+                request_builder = request_builder
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("x-goog-user-project", user_project);
+            }
+            InferenceCredential::None => {
+                return Err(
+                    "Gemini requires GEMINI_API_KEY / GOOGLE_API_KEY, or Google ADC OAuth."
+                        .to_string(),
+                );
+            }
+        }
+
+        let resp = request_builder
             .json(&body)
             .send()
             .await
@@ -838,19 +933,44 @@ impl InferenceClient {
 
     async fn stream_gemini_raw(
         &self,
-        api_key: &str,
+        credential: &InferenceCredential,
         request: &InferenceRequest,
     ) -> Result<reqwest::Response, String> {
-        let endpoint = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
-            request.model, api_key
-        );
-
         let body = self.build_gemini_request(request);
-        let resp = self
+        let endpoint = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent?alt=sse",
+            request.model
+        );
+        let mut request_builder = self
             .http
             .post(endpoint)
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+
+        match credential {
+            InferenceCredential::ApiKey(api_key) => {
+                request_builder = request_builder.query(&[("key", api_key.as_str())]);
+            }
+            InferenceCredential::BearerToken { .. } => {
+                let token = credential
+                    .bearer()
+                    .ok_or("Gemini OAuth requires a bearer token.".to_string())?;
+                let user_project = credential.user_project().ok_or(
+                    "Gemini OAuth requires GOOGLE_CLOUD_PROJECT (or GOOGLE_PROJECT_ID / GCLOUD_PROJECT)."
+                        .to_string(),
+                )?;
+                request_builder = request_builder
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("x-goog-user-project", user_project);
+            }
+            InferenceCredential::None => {
+                return Err(
+                    "Gemini streaming requires GEMINI_API_KEY / GOOGLE_API_KEY, or Google ADC OAuth."
+                        .to_string(),
+                );
+            }
+        }
+
+        let resp = request_builder
             .json(&body)
             .send()
             .await
@@ -1040,6 +1160,195 @@ impl InferenceClient {
             stop_reason,
         })
     }
+
+    fn build_codex_cli_prompt(&self, request: &InferenceRequest) -> String {
+        let mut prompt = String::new();
+
+        if !request.system_prompt.trim().is_empty() {
+            prompt.push_str("System instructions:\n");
+            prompt.push_str(request.system_prompt.trim());
+            prompt.push_str("\n\n");
+        }
+
+        prompt.push_str("Conversation:\n");
+        for message in &request.messages {
+            let role = if message.role.eq_ignore_ascii_case("assistant") {
+                "assistant"
+            } else {
+                "user"
+            };
+            prompt.push_str(&format!("{role}: {}\n", message.content));
+        }
+
+        prompt.push_str(
+            "\nReturn the assistant response only. Keep the answer concise, complete, and directly responsive to the latest user message.",
+        );
+        prompt
+    }
+
+    fn parse_codex_cli_json(
+        &self,
+        stdout: &str,
+    ) -> Result<(String, Option<u32>, Option<u32>, Option<String>), String> {
+        let mut response_text: Option<String> = None;
+        let mut input_tokens: Option<u32> = None;
+        let mut output_tokens: Option<u32> = None;
+        let mut stop_reason: Option<String> = None;
+
+        for line in stdout.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+                continue;
+            };
+
+            match value.get("type").and_then(|v| v.as_str()) {
+                Some("item.completed") => {
+                    if let Some(item) = value.get("item") {
+                        if item.get("type").and_then(|v| v.as_str()) == Some("agent_message") {
+                            if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+                                let text = text.trim();
+                                if !text.is_empty() {
+                                    response_text = Some(text.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+                Some("turn.completed") => {
+                    if let Some(usage) = value.get("usage") {
+                        input_tokens = usage
+                            .get("input_tokens")
+                            .and_then(|v| v.as_u64())
+                            .and_then(|v| u32::try_from(v).ok());
+                        output_tokens = usage
+                            .get("output_tokens")
+                            .and_then(|v| v.as_u64())
+                            .and_then(|v| u32::try_from(v).ok());
+                    }
+                }
+                Some("error") => {
+                    let message = value
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| value.get("error").and_then(|v| v.as_str()))
+                        .unwrap_or("unknown Codex CLI error");
+                    return Err(format!("Codex CLI error: {message}"));
+                }
+                Some("turn.failed") => {
+                    let message = value
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Codex CLI turn failed");
+                    return Err(message.to_string());
+                }
+                Some("turn.cancelled") => {
+                    stop_reason = Some("cancelled".to_string());
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(text) = response_text {
+            return Ok((text, input_tokens, output_tokens, stop_reason));
+        }
+
+        let fallback = stdout.trim();
+        if fallback.is_empty() {
+            return Err("Codex CLI returned empty output".to_string());
+        }
+
+        Ok((
+            fallback.to_string(),
+            input_tokens,
+            output_tokens,
+            stop_reason,
+        ))
+    }
+
+    async fn complete_codex_cli(
+        &self,
+        request: &InferenceRequest,
+    ) -> Result<InferenceResponse, String> {
+        let prompt = self.build_codex_cli_prompt(request);
+        let mut command = codex_cli_command();
+        command
+            .arg("exec")
+            .arg("--json")
+            .arg("--color")
+            .arg("never")
+            .arg("--skip-git-repo-check")
+            .arg("--ephemeral");
+
+        if !request.model.trim().is_empty() {
+            command.arg("--model").arg(&request.model);
+        }
+
+        command
+            .arg("-")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+
+        let mut child = command.spawn().map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                "Codex CLI executable not found. Install Codex CLI and ensure `codex` is on PATH."
+                    .to_string()
+            } else {
+                format!("Failed to launch Codex CLI: {e}")
+            }
+        })?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(prompt.as_bytes())
+                .await
+                .map_err(|e| format!("Failed to send prompt to Codex CLI: {e}"))?;
+        }
+
+        let output = child
+            .wait_with_output()
+            .await
+            .map_err(|e| format!("Failed to wait for Codex CLI: {e}"))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        if !output.status.success() {
+            let code = output
+                .status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "terminated".to_string());
+
+            let detail = if !stderr.trim().is_empty() {
+                stderr.trim().to_string()
+            } else if !stdout.trim().is_empty() {
+                stdout.trim().to_string()
+            } else {
+                "unknown error".to_string()
+            };
+
+            return Err(format!(
+                "Codex CLI failed (exit code {code}): {detail}. Run `codex login` if OAuth is not configured."
+            ));
+        }
+
+        let (content, input_tokens, output_tokens, stop_reason) =
+            self.parse_codex_cli_json(&stdout)?;
+
+        Ok(InferenceResponse {
+            content,
+            model: request.model.clone(),
+            provider: "codex-cli".to_string(),
+            input_tokens,
+            output_tokens,
+            stop_reason,
+        })
+    }
 }
 
 /// Load the Kaizen system prompt from the template file.
@@ -1060,6 +1369,16 @@ pub fn load_system_prompt() -> String {
      You can orchestrate sub-agents only when the user explicitly asks. \
      Keep responses concise and actionable."
         .to_string()
+}
+
+fn codex_cli_command() -> Command {
+    if cfg!(windows) {
+        let mut command = Command::new("cmd");
+        command.arg("/C").arg("codex");
+        command
+    } else {
+        Command::new("codex")
+    }
 }
 
 #[cfg(test)]
@@ -1100,6 +1419,10 @@ mod tests {
             InferenceProvider::from_str_loose("gemini-cli"),
             Some(InferenceProvider::GeminiCli)
         );
+        assert_eq!(
+            InferenceProvider::from_str_loose("codex-cli"),
+            Some(InferenceProvider::CodexCli)
+        );
         assert_eq!(InferenceProvider::from_str_loose("unknown"), None);
     }
 
@@ -1110,6 +1433,7 @@ mod tests {
         assert_eq!(InferenceProvider::Gemini.vault_key(), Some("gemini"));
         assert_eq!(InferenceProvider::Nvidia.vault_key(), Some("nvidia"));
         assert_eq!(InferenceProvider::GeminiCli.vault_key(), None);
+        assert_eq!(InferenceProvider::CodexCli.vault_key(), None);
     }
 
     #[test]
@@ -1127,6 +1451,7 @@ mod tests {
                 .default_model()
                 .contains("gemini")
         );
+        assert!(InferenceProvider::CodexCli.default_model().contains("gpt"));
     }
 
     #[test]

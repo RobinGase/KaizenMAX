@@ -12,25 +12,26 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Uri},
     middleware::{self, Next},
-    response::Response,
     response::sse::{Event, KeepAlive, Sse},
-    routing::{delete, get, patch, post, put},
+    response::{Html, IntoResponse, Response},
+    routing::{delete, get, patch, post},
 };
 use futures_util::Stream;
 use kaizen_gateway::{
     agents::{AgentRegistry, AgentStatus, Branch, Mission, SubAgent},
     crystal_ball::{
-        CrystalBallClient, CrystalBallConfig, CrystalBallEvent, MattermostSmokeResult,
-        MattermostValidation, redact_sensitive,
+        CrystalBallClient, CrystalBallEvent, MattermostSmokeResult, MattermostValidation,
+        redact_sensitive,
     },
     event_archive::{ArchiveIntegrityReport, EventArchive},
     gate_engine::{GateConditionPatch, GateRuntime, GateState, TransitionResult},
     inference::{
         self, AnthropicStreamEvent, ChatMessage as InferenceChatMessage, InferenceClient,
-        InferenceProvider, InferenceRequest, OpenAIStreamChunk,
+        InferenceCredential, InferenceProvider, InferenceRequest, OpenAIStreamChunk,
     },
+    oauth_store,
+    provider_auth::{self, ProviderAuthStatus},
     settings::{KaizenSettings, SettingsPatch},
-    vault::{SecretMetadata, SecretVault, VaultStatus},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -60,8 +61,6 @@ struct AppState {
     events: Arc<RwLock<Vec<CrystalBallEvent>>>,
     crystal_ball: Arc<RwLock<Option<CrystalBallClient>>>,
     event_archive: Arc<EventArchive>,
-    vault: Arc<Option<SecretVault>>,
-    vault_status: Arc<RwLock<VaultStatus>>,
     inference: InferenceClient,
     system_prompt: Arc<String>,
     /// Per-session conversation history (keyed by "kaizen" or agent_id).
@@ -71,6 +70,7 @@ struct AppState {
     /// Any clear/remove operation bumps the generation so stale in-flight
     /// inference responses cannot repopulate cleared histories.
     conversation_versions: Arc<RwLock<HashMap<String, u64>>>,
+    pending_gemini_oauth: Arc<RwLock<Option<oauth_store::PendingGeminiOAuth>>>,
     next_id: Arc<AtomicU64>,
 }
 
@@ -378,53 +378,18 @@ async fn push_event(state: &AppState, mut event: CrystalBallEvent) {
     }
 }
 
-async fn build_crystal_ball_client(
-    settings: &KaizenSettings,
-    vault: Option<&SecretVault>,
-) -> Option<CrystalBallClient> {
+async fn build_crystal_ball_client(settings: &KaizenSettings) -> Option<CrystalBallClient> {
     if !settings.crystal_ball_enabled {
         return None;
     }
 
-    let base_url = settings.mattermost_url.trim();
-    let channel_id = settings.mattermost_channel_id.trim();
-
-    if !base_url.is_empty() && !channel_id.is_empty() {
-        if let Some(vault) = vault {
-            match vault.decrypt("mattermost").await {
-                Ok(token) => {
-                    let config = CrystalBallConfig {
-                        base_url: base_url.to_string(),
-                        token,
-                        channel_id: channel_id.to_string(),
-                    };
-                    if let Some(client) = CrystalBallClient::from_config(config) {
-                        return Some(client);
-                    }
-                    tracing::warn!(
-                        "Mattermost settings are present but Crystal Ball config is invalid."
-                    );
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        "Mattermost settings are present but no token is stored in vault provider 'mattermost': {}",
-                        err
-                    );
-                }
-            }
-        } else {
-            tracing::warn!(
-                "Mattermost settings are present but vault is unavailable for token decryption."
-            );
-        }
-    }
-
+    // Vault disconnected - Crystal Ball uses env-only config until vault reconnects.
     CrystalBallClient::from_env()
 }
 
 async fn refresh_crystal_ball_client(state: &AppState) {
     let settings = state.settings.read().await.clone();
-    let new_client = build_crystal_ball_client(&settings, state.vault.as_ref().as_ref()).await;
+    let new_client = build_crystal_ball_client(&settings).await;
     let client_available = new_client.is_some();
 
     {
@@ -509,14 +474,6 @@ fn sanitize_uri_for_log(uri: &Uri) -> String {
     }
 
     redact_sensitive(format!("{}?{}", path, query).as_str())
-}
-
-fn wipe_string(secret: &mut String) {
-    // Best-effort in-memory wipe for short-lived plaintext material.
-    unsafe {
-        secret.as_bytes_mut().fill(0);
-    }
-    secret.clear();
 }
 
 fn is_loopback_host(host: &str) -> bool {
@@ -845,65 +802,63 @@ fn apply_mode_prompt(base: &str, mode: Option<&str>) -> String {
     )
 }
 
-/// Resolve inference settings into provider + model + API key from vault.
+/// Resolve inference settings into provider + model + local credential material.
 async fn resolve_inference(
     state: &AppState,
     provider_override: Option<&str>,
     model_override: Option<&str>,
-) -> Result<(InferenceProvider, String, String), (StatusCode, String)> {
+) -> Result<(InferenceProvider, String, InferenceCredential), (StatusCode, String)> {
     let settings = state.settings.read().await;
+    let configured_provider = settings.inference_provider.clone();
+    let configured_model = settings.inference_model.clone();
     let requested_provider = provider_override
         .map(str::trim)
         .filter(|v| !v.is_empty())
-        .unwrap_or(&settings.inference_provider);
+        .unwrap_or(configured_provider.as_str());
 
     let (provider_name, kaizen_native) =
-        resolve_provider_override_alias(requested_provider, &settings.inference_provider);
+        resolve_provider_override_alias(requested_provider, configured_provider.as_str());
 
     let provider = InferenceProvider::from_str_loose(provider_name).ok_or((
         StatusCode::BAD_REQUEST,
-        format!(
-            "Unknown inference provider '{}'. Use 'kaizen' (legacy alias: 'zeroclaw'), 'anthropic', 'openai', 'gemini', 'gemini-cli', or 'nvidia'.",
-            requested_provider
-        ),
+        if kaizen_native {
+            format!(
+                "Zeroclaw is mapped to '{}', but that is not a supported concrete provider. Use openai, anthropic, gemini, gemini-cli, codex-cli, or nvidia in settings.",
+                configured_provider
+            )
+        } else {
+            format!(
+                "Unknown inference provider '{}'. Use 'kaizen' (legacy alias: 'zeroclaw'), 'anthropic', 'openai', 'gemini', 'gemini-cli', 'codex-cli', or 'nvidia'.",
+                requested_provider
+            )
+        },
     ))?;
 
     let model = if kaizen_native {
-        if settings.inference_model.is_empty() {
+        if configured_model.is_empty() {
             provider.default_model().to_string()
         } else {
-            settings.inference_model.clone()
+            configured_model.clone()
         }
     } else if let Some(m) = model_override.map(str::trim).filter(|v| !v.is_empty()) {
         m.to_string()
-    } else if settings.inference_model.is_empty() {
+    } else if configured_model.is_empty() {
         provider.default_model().to_string()
     } else {
-        settings.inference_model.clone()
+        configured_model
     };
+    drop(settings);
 
-    let api_key = if let Some(vault_key) = provider.vault_key() {
-        let vault = state.vault.as_ref().as_ref().ok_or((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Secret vault is not available. Open Settings -> Providers to check vault status."
-                .to_string(),
-        ))?;
-
-        vault.decrypt(vault_key).await.map_err(|e| {
+    let credential = provider_auth::resolve_credential(provider)
+        .await
+        .map_err(|reason| {
             (
                 StatusCode::SERVICE_UNAVAILABLE,
-                format!(
-                    "No API key configured for '{}'. Store one via PUT /api/secrets/{}. Error: {}",
-                    provider, vault_key, e
-                ),
+                format!("Provider '{provider}' is not ready. {reason}"),
             )
-        })?
-    } else {
-        // CLI-managed auth (Gemini CLI OAuth) does not use vault API keys.
-        String::new()
-    };
+        })?;
 
-    Ok((provider, model, api_key))
+    Ok((provider, model, credential))
 }
 
 /// Get or create conversation history for a conversation key.
@@ -1131,7 +1086,7 @@ async fn chat(
 
         for (provider_override, model_override) in requested_targets {
             match resolve_inference(&state, Some(&provider_override), Some(&model_override)).await {
-                Ok((provider, resolved_model, mut api_key)) => {
+                Ok((provider, resolved_model, mut credential)) => {
                     let mut messages = history.clone();
                     messages.push(InferenceChatMessage {
                         role: "user".to_string(),
@@ -1147,8 +1102,8 @@ async fn chat(
                         temperature,
                     };
 
-                    let inference_result = state.inference.complete(&api_key, &req).await;
-                    wipe_string(&mut api_key);
+                    let inference_result = state.inference.complete(&credential, &req).await;
+                    credential.wipe();
 
                     match inference_result {
                         Ok(resp) => {
@@ -1220,7 +1175,7 @@ async fn chat(
         )
         .await
         {
-            Ok((provider, model, mut api_key)) => {
+            Ok((provider, model, mut credential)) => {
                 let settings = state.settings.read().await;
                 let max_tokens = settings.inference_max_tokens;
                 let temperature = settings.inference_temperature;
@@ -1246,8 +1201,8 @@ async fn chat(
                     temperature,
                 };
 
-                let inference_result = state.inference.complete(&api_key, &req).await;
-                wipe_string(&mut api_key);
+                let inference_result = state.inference.complete(&credential, &req).await;
+                credential.wipe();
 
                 match inference_result {
                     Ok(resp) => {
@@ -1282,12 +1237,12 @@ async fn chat(
                 }
             }
             Err((_status, reason)) => {
-                // Fallback: no vault or no API key configured - return helpful message
+                // Fallback: provider auth is not configured - return helpful message
                 tracing::warn!("Inference not available: {}", reason);
                 (
                     format!(
-                        "Kaizen is in offline mode. Open Settings -> Providers and add an API key \
-                         for Anthropic, OpenAI, Gemini, or NVIDIA (or select Gemini CLI with local OAuth). Reason: {reason}"
+                        "Kaizen is in offline mode. Open Settings -> Providers & Auth and configure \
+                         OpenAI/Anthropic/NVIDIA API keys, Gemini API key or Google OAuth, or Gemini CLI local OAuth. Reason: {reason}"
                     ),
                     None,
                     None,
@@ -1407,7 +1362,7 @@ async fn chat_stream(
 
     let expected_conversation_version = conversation_version(&state, &conversation_key).await;
 
-    let (provider, model, mut api_key) = resolve_inference(
+    let (provider, model, mut credential) = resolve_inference(
         &state,
         request.provider.as_deref(),
         request.model.as_deref(),
@@ -1437,10 +1392,10 @@ async fn chat_stream(
 
     let raw_response = state
         .inference
-        .stream_raw(&api_key, &req)
+        .stream_raw(&credential, &req)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, e));
-    wipe_string(&mut api_key);
+    credential.wipe();
     let raw_response = raw_response?;
 
     // Build SSE stream that parses provider-specific SSE and re-emits normalized tokens
@@ -1571,9 +1526,9 @@ async fn chat_stream(
                             yield Ok(token_event);
                         }
                     }
-                    InferenceProvider::GeminiCli => {
-                        // stream_raw currently rejects Gemini CLI, so this branch is
-                        // effectively unreachable for now.
+                    InferenceProvider::GeminiCli | InferenceProvider::CodexCli => {
+                        // stream_raw currently rejects CLI-backed providers, so this
+                        // branch is effectively unreachable for now.
                     }
                 }
             }
@@ -1685,7 +1640,10 @@ async fn create_branch(
 ) -> Result<Json<Branch>, (StatusCode, String)> {
     let id = normalize_scope_id(&request.id);
     if id.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "Branch id cannot be empty".to_string()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Branch id cannot be empty".to_string(),
+        ));
     }
 
     let name = request
@@ -1740,7 +1698,9 @@ async fn create_mission(
     }
 
     let name = request.name.unwrap_or_else(|| id.clone());
-    let objective = request.objective.unwrap_or_else(|| "Mission objective pending".to_string());
+    let objective = request
+        .objective
+        .unwrap_or_else(|| "Mission objective pending".to_string());
 
     let mission = {
         let mut registry = state.agents.write().await;
@@ -1809,10 +1769,13 @@ async fn spawn_agent(
     Json(request): Json<SpawnAgentRequest>,
 ) -> Result<Json<SubAgent>, (StatusCode, String)> {
     let settings = state.settings.read().await.clone();
-    if !request.user_requested && !(settings.auto_spawn_subagents || settings.orchestrator_full_control) {
+    if !request.user_requested
+        && !(settings.auto_spawn_subagents || settings.orchestrator_full_control)
+    {
         return Err((
             StatusCode::FORBIDDEN,
-            "Sub-agent spawn denied: explicit user request required or enable orchestrator control".to_string(),
+            "Sub-agent spawn denied: explicit user request required or enable orchestrator control"
+                .to_string(),
         ));
     }
 
@@ -2454,224 +2417,17 @@ async fn github_repos(
     }))
 }
 
-// ---- Secret Vault Endpoints ----
+// ---- Provider Auth Endpoints ----
 
-async fn get_vault_status(
+async fn list_provider_statuses(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<VaultStatus>, (StatusCode, String)> {
-    require_admin_access(&state, &headers, "GET /api/vault/status")?;
-    Ok(Json(state.vault_status.read().await.clone()))
-}
-
-fn require_vault(state: &AppState) -> Result<&SecretVault, (StatusCode, String)> {
-    state.vault.as_ref().as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Secret vault is not available. Check /api/vault/status for diagnostics.".to_string(),
+) -> Result<Json<Vec<ProviderAuthStatus>>, (StatusCode, String)> {
+    require_admin_access(&state, &headers, "GET /api/providers/status")?;
+    let settings = state.settings.read().await.clone();
+    Ok(Json(
+        provider_auth::collect_provider_auth_statuses(&settings).await,
     ))
-}
-
-async fn list_secrets(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<SecretMetadata>>, (StatusCode, String)> {
-    require_admin_access(&state, &headers, "GET /api/secrets")?;
-    let vault = require_vault(&state)?;
-    Ok(Json(vault.list().await))
-}
-
-fn canonical_secret_provider(provider: &str) -> String {
-    let normalized = provider.trim().to_ascii_lowercase();
-    match normalized.as_str() {
-        "kaizen" | "zeroclaw" | "kai-zen" => "kaizen".to_string(),
-        _ => normalized,
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct StoreSecretRequest {
-    value: String,
-    #[serde(default = "default_api_key_type")]
-    secret_type: String,
-}
-
-fn default_api_key_type() -> String {
-    "api_key".to_string()
-}
-
-async fn store_secret(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(provider): Path<String>,
-    Json(request): Json<StoreSecretRequest>,
-) -> Result<Json<SecretMetadata>, (StatusCode, String)> {
-    require_admin_access(&state, &headers, "PUT /api/secrets/{provider}")?;
-    let provider = canonical_secret_provider(&provider);
-    let vault = require_vault(&state)?;
-    let meta = vault
-        .store(&provider, &request.value, &request.secret_type)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-    push_event(
-        &state,
-        CrystalBallEvent {
-            event_id: next_id(&state, "event"),
-            timestamp: now_timestamp(),
-            event_type: "orchestration.started".to_string(),
-            source_actor: "operator".to_string(),
-            source_agent_id: "human".to_string(),
-            target_actor: "vault".to_string(),
-            target_agent_id: "system".to_string(),
-            task_id: "credentials".to_string(),
-            message: format!("Credential stored for provider '{}'", provider),
-            visibility: "admin".to_string(),
-        },
-    )
-    .await;
-
-    if provider.eq_ignore_ascii_case("mattermost") {
-        refresh_crystal_ball_client(&state).await;
-    }
-
-    Ok(Json(meta))
-}
-
-async fn revoke_secret(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(provider): Path<String>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    require_admin_access(&state, &headers, "DELETE /api/secrets/{provider}")?;
-    let provider = canonical_secret_provider(&provider);
-    let vault = require_vault(&state)?;
-    vault
-        .revoke(&provider)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-    push_event(
-        &state,
-        CrystalBallEvent {
-            event_id: next_id(&state, "event"),
-            timestamp: now_timestamp(),
-            event_type: "orchestration.started".to_string(),
-            source_actor: "operator".to_string(),
-            source_agent_id: "human".to_string(),
-            target_actor: "vault".to_string(),
-            target_agent_id: "system".to_string(),
-            task_id: "credentials".to_string(),
-            message: format!("Credential revoked for provider '{}'", provider),
-            visibility: "admin".to_string(),
-        },
-    )
-    .await;
-
-    if provider.eq_ignore_ascii_case("mattermost") {
-        refresh_crystal_ball_client(&state).await;
-    }
-
-    Ok(StatusCode::NO_CONTENT)
-}
-
-#[derive(Serialize)]
-struct SecretTestResult {
-    provider: String,
-    configured: bool,
-    test_passed: bool,
-    error: Option<String>,
-}
-
-async fn test_secret(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(provider): Path<String>,
-) -> Result<Json<SecretTestResult>, (StatusCode, String)> {
-    require_admin_access(&state, &headers, "POST /api/secrets/{provider}/test")?;
-    let provider = canonical_secret_provider(&provider);
-    let vault = require_vault(&state)?;
-
-    if !vault.has(&provider).await {
-        return Ok(Json(SecretTestResult {
-            provider,
-            configured: false,
-            test_passed: false,
-            error: Some("No credential stored for this provider".to_string()),
-        }));
-    }
-
-    // Decrypt to verify the key is valid ciphertext (integrity check).
-    // Actual provider API validation would go here in production.
-    match vault.decrypt(&provider).await {
-        Ok(_) => Ok(Json(SecretTestResult {
-            provider,
-            configured: true,
-            test_passed: true,
-            error: None,
-        })),
-        Err(e) => Ok(Json(SecretTestResult {
-            provider,
-            configured: true,
-            test_passed: false,
-            error: Some(e),
-        })),
-    }
-}
-
-/// Response for the secure key-use endpoint.
-/// Returns the decrypted key for internal localhost-only use.
-#[derive(Serialize)]
-struct SecretUseResponse {
-    provider: String,
-    key: String,
-}
-
-/// Secure endpoint to retrieve decrypted key for internal use.
-/// Requires admin token and localhost origin for security.
-async fn use_secret(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(provider): Path<String>,
-) -> Result<Json<SecretUseResponse>, (StatusCode, String)> {
-    require_admin_access(&state, &headers, "GET /api/secrets/{provider}/use")?;
-    let provider = canonical_secret_provider(&provider);
-    let vault = require_vault(&state)?;
-
-    if !vault.has(&provider).await {
-        return Err((
-            StatusCode::NOT_FOUND,
-            format!("No credential stored for provider: {}", provider),
-        ));
-    }
-
-    // Decrypt the key
-    let key = vault
-        .decrypt(&provider)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-    // Log access to Crystal Ball audit trail
-    push_event(
-        &state,
-        CrystalBallEvent {
-            event_id: next_id(&state, "event"),
-            timestamp: now_timestamp(),
-            event_type: "vault.key_used".to_string(),
-            source_actor: "operator".to_string(),
-            source_agent_id: "human".to_string(),
-            target_actor: "vault".to_string(),
-            target_agent_id: "system".to_string(),
-            task_id: "credentials".to_string(),
-            message: format!(
-                "Decrypted key retrieved for provider '{}' via /use endpoint",
-                provider
-            ),
-            visibility: "admin".to_string(),
-        },
-    )
-    .await;
-
-    Ok(Json(SecretUseResponse { provider, key }))
 }
 
 // ---- OAuth Framework Endpoints ----
@@ -2693,19 +2449,26 @@ struct OAuthStatusResponse {
     message: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct OAuthCallbackQuery {
+    code: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+    error_description: Option<String>,
+}
+
 fn canonical_oauth_provider(provider: &str) -> String {
     match provider.trim().to_lowercase().as_str() {
         "openai" | "gpt" | "codex" => "openai".to_string(),
         "anthropic" | "claude" => "anthropic".to_string(),
         "gemini" | "google" | "googleai" => "gemini".to_string(),
         "nvidia" | "nim" => "nvidia".to_string(),
-        "opencode" => "opencode".to_string(),
         other => other.to_string(),
     }
 }
 
 fn oauth_supported(provider: &str) -> bool {
-    matches!(provider, "openai" | "anthropic")
+    matches!(provider, "gemini")
 }
 
 async fn oauth_status(
@@ -2716,21 +2479,92 @@ async fn oauth_status(
     require_admin_access(&state, &headers, "GET /api/oauth/{provider}/status")?;
 
     let provider = canonical_oauth_provider(&provider);
-    let supported = oauth_supported(&provider);
-    let vault = require_vault(&state)?;
+    if provider == "gemini" {
+        match oauth_store::stored_gemini_oauth_status() {
+            Ok(stored) if stored.present => {
+                return Ok(Json(OAuthStatusResponse {
+                    provider,
+                    supported: true,
+                    connected: stored.connected(),
+                    access_token_configured: stored.access_token_present,
+                    refresh_token_configured: stored.refresh_token_present,
+                    message: stored.message,
+                }));
+            }
+            Ok(_) => {}
+            Err(error) => {
+                return Ok(Json(OAuthStatusResponse {
+                    provider,
+                    supported: true,
+                    connected: false,
+                    access_token_configured: false,
+                    refresh_token_configured: false,
+                    message: format!(
+                        "Stored Gemini OAuth session could not be read. Disconnect and reconnect Gemini OAuth. Details: {error}"
+                    ),
+                }));
+            }
+        }
+    }
 
-    let access_key = format!("{provider}_oauth_access");
-    let refresh_key = format!("{provider}_oauth_refresh");
-    let access_token_configured = vault.has(&access_key).await;
-    let refresh_token_configured = vault.has(&refresh_key).await;
-    let connected = access_token_configured || refresh_token_configured;
-
-    let message = if connected {
-        "OAuth tokens are stored in encrypted vault".to_string()
-    } else if supported {
-        "Provider supports OAuth but no tokens are connected".to_string()
+    let settings = state.settings.read().await.clone();
+    let provider_status = provider_auth::provider_auth_status(&provider, &settings).await;
+    let supported = oauth_supported(&provider)
+        || provider_status.auth_method == "oauth_access_token_env"
+        || provider_status.auth_method == "oauth_adc";
+    let (connected, access_token_configured, refresh_token_configured, message) = if provider
+        == "gemini"
+    {
+        match provider_status.auth_method.as_str() {
+            "oauth_access_token_env" => (
+                provider_status.can_chat,
+                true,
+                false,
+                format!(
+                    "{} This OAuth session is managed from the environment, not by the app.",
+                    provider_status.message
+                ),
+            ),
+            "oauth_adc" => (
+                provider_status.can_chat,
+                true,
+                true,
+                format!(
+                    "{} This OAuth session is managed by Google ADC, not by the app.",
+                    provider_status.message
+                ),
+            ),
+            "api_key_env" => (
+                false,
+                false,
+                false,
+                format!(
+                    "{} Gemini is currently using API key auth. Disconnect local OAuth or remove the API key env var if you want app-managed OAuth to take over.",
+                    provider_status.message
+                ),
+            ),
+            _ => (
+                false,
+                false,
+                false,
+                "Gemini OAuth is available. Set GOOGLE_OAUTH_CLIENT_ID (or KAIZEN_GEMINI_OAUTH_CLIENT_ID) and GOOGLE_CLOUD_PROJECT, then click Connect OAuth.".to_string(),
+            ),
+        }
     } else {
-        "OAuth is not supported for this provider in current release".to_string()
+        (
+            supported && provider_status.can_chat,
+            provider_status.auth_method == "oauth_access_token_env"
+                || provider_status.auth_method == "oauth_adc",
+            provider_status.auth_method == "oauth_adc",
+            if supported {
+                provider_status.message
+            } else {
+                format!(
+                    "Provider '{}' does not expose app-managed OAuth here. {}",
+                    provider, provider_status.message
+                )
+            },
+        )
     };
 
     Ok(Json(OAuthStatusResponse {
@@ -2755,42 +2589,180 @@ async fn oauth_start(
         return Err((
             StatusCode::BAD_REQUEST,
             format!(
-                "OAuth is not available for provider '{}'. Use API key credentials in Settings.",
+                "OAuth is not available for provider '{}'. Use the provider's supported local auth method in Settings -> Providers & Auth.",
                 provider
             ),
         ));
     }
 
-    Err((
-        StatusCode::NOT_IMPLEMENTED,
-        format!(
-            "OAuth start for '{}' is scaffolded but not configured. Set provider OAuth client env vars before enabling.",
-            provider
-        ),
-    ))
+    let (pending, redirect_url) =
+        oauth_store::start_gemini_oauth(default_gemini_oauth_redirect_uri())
+            .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    let state_token = pending.state_token.clone();
+    *state.pending_gemini_oauth.write().await = Some(pending);
+
+    Ok(Json(OAuthStartResponse {
+        provider,
+        redirect_url,
+        state_token,
+    }))
 }
 
 async fn oauth_callback(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Path(provider): Path<String>,
-    Query(_params): Query<HashMap<String, String>>,
-) -> Result<StatusCode, (StatusCode, String)> {
+    Query(params): Query<OAuthCallbackQuery>,
+) -> impl IntoResponse {
     let provider = canonical_oauth_provider(&provider);
 
     if !oauth_supported(&provider) {
-        return Err((
+        return (
             StatusCode::BAD_REQUEST,
-            format!(
-                "OAuth callback is not supported for provider '{}'.",
-                provider
-            ),
-        ));
+            Html(oauth_callback_page(
+                "Gemini OAuth not available",
+                &format!(
+                    "OAuth callback is not supported for provider '{}'.",
+                    provider
+                ),
+                false,
+            )),
+        )
+            .into_response();
     }
 
-    Err((
-        StatusCode::NOT_IMPLEMENTED,
-        format!("OAuth callback for '{}' is not yet configured.", provider),
-    ))
+    if let Some(error_code) = params.error.as_deref() {
+        let description = params
+            .error_description
+            .as_deref()
+            .unwrap_or("Google did not provide an error description.");
+        return (
+            StatusCode::BAD_REQUEST,
+            Html(oauth_callback_page(
+                "Gemini OAuth failed",
+                &format!("Google returned '{}': {}.", error_code, description),
+                false,
+            )),
+        )
+            .into_response();
+    }
+
+    let state_token = match params
+        .state
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => value.to_string(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Html(oauth_callback_page(
+                    "Gemini OAuth failed",
+                    "Google callback did not include the OAuth state token.",
+                    false,
+                )),
+            )
+                .into_response();
+        }
+    };
+
+    let code = match params
+        .code
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => value.to_string(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Html(oauth_callback_page(
+                    "Gemini OAuth failed",
+                    "Google callback did not include an authorization code.",
+                    false,
+                )),
+            )
+                .into_response();
+        }
+    };
+
+    let pending = {
+        let mut slot = state.pending_gemini_oauth.write().await;
+        let Some(existing) = slot.as_ref() else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Html(oauth_callback_page(
+                    "Gemini OAuth expired",
+                    "No pending Gemini OAuth login was found. Start the login flow again from Mission Control.",
+                    false,
+                )),
+            )
+                .into_response();
+        };
+
+        if existing.is_stale() {
+            *slot = None;
+            return (
+                StatusCode::BAD_REQUEST,
+                Html(oauth_callback_page(
+                    "Gemini OAuth expired",
+                    "The pending Gemini OAuth state expired. Start the login flow again from Mission Control.",
+                    false,
+                )),
+            )
+                .into_response();
+        }
+
+        if existing.state_token != state_token {
+            return (
+                StatusCode::BAD_REQUEST,
+                Html(oauth_callback_page(
+                    "Gemini OAuth rejected",
+                    "The Gemini OAuth state token did not match the pending login request.",
+                    false,
+                )),
+            )
+                .into_response();
+        }
+
+        slot.take().expect("pending Gemini OAuth state disappeared")
+    };
+
+    match oauth_store::exchange_gemini_code(&pending, code.as_str()).await {
+        Ok(tokens) => match oauth_store::save_gemini_tokens(&tokens) {
+            Ok(path) => (
+                StatusCode::OK,
+                Html(oauth_callback_page(
+                    "Gemini OAuth connected",
+                    &format!(
+                        "Gemini OAuth completed successfully for Google project '{}'. Tokens were stored at '{}'. You can close this window and return to Mission Control.",
+                        tokens.project_id,
+                        path.display()
+                    ),
+                    true,
+                )),
+            )
+                .into_response(),
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Html(oauth_callback_page(
+                    "Gemini OAuth save failed",
+                    &format!("Token exchange succeeded, but storing the Gemini OAuth tokens failed: {}.", error),
+                    false,
+                )),
+            )
+                .into_response(),
+        },
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Html(oauth_callback_page(
+                "Gemini OAuth exchange failed",
+                &format!("Google authorization completed, but exchanging the code failed: {}.", error),
+                false,
+            )),
+        )
+            .into_response(),
+    }
 }
 
 async fn oauth_refresh(
@@ -2811,10 +2783,13 @@ async fn oauth_refresh(
         ));
     }
 
-    Err((
-        StatusCode::NOT_IMPLEMENTED,
-        format!("OAuth refresh for '{}' is not yet configured.", provider),
-    ))
+    let tokens = oauth_store::refresh_stored_gemini_tokens()
+        .await
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    oauth_store::save_gemini_tokens(&tokens)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn oauth_disconnect(
@@ -2825,30 +2800,53 @@ async fn oauth_disconnect(
     require_admin_access(&state, &headers, "DELETE /api/oauth/{provider}")?;
     let provider = canonical_oauth_provider(&provider);
 
-    let vault = require_vault(&state)?;
-    let access_key = format!("{provider}_oauth_access");
-    let refresh_key = format!("{provider}_oauth_refresh");
-    vault.revoke(&access_key).await.ok();
-    vault.revoke(&refresh_key).await.ok();
+    if !oauth_supported(&provider) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "OAuth disconnect is not supported for provider '{}'.",
+                provider
+            ),
+        ));
+    }
 
-    push_event(
-        &state,
-        CrystalBallEvent {
-            event_id: next_id(&state, "event"),
-            timestamp: now_timestamp(),
-            event_type: "orchestration.started".to_string(),
-            source_actor: "operator".to_string(),
-            source_agent_id: "human".to_string(),
-            target_actor: "vault".to_string(),
-            target_agent_id: "system".to_string(),
-            task_id: "credentials".to_string(),
-            message: format!("OAuth disconnected for provider '{}'", provider),
-            visibility: "admin".to_string(),
-        },
-    )
-    .await;
+    *state.pending_gemini_oauth.write().await = None;
+    oauth_store::clear_gemini_tokens()
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn default_gemini_oauth_redirect_uri() -> String {
+    format!(
+        "http://127.0.0.1:{}/api/oauth/gemini/callback",
+        resolve_bind_port()
+    )
+}
+
+fn oauth_callback_page(title: &str, body: &str, success: bool) -> String {
+    let accent = if success { "#2d7f5e" } else { "#a43b31" };
+    format!(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{}</title><style>body{{margin:0;font-family:Segoe UI,Arial,sans-serif;background:#f4f1ea;color:#1f2523;display:flex;min-height:100vh;align-items:center;justify-content:center;padding:24px;}}main{{max-width:680px;background:#fffaf0;border:1px solid #d8d0c4;border-radius:16px;padding:28px;box-shadow:0 18px 42px rgba(31,37,35,0.12);}}h1{{margin:0 0 12px;font-size:28px;line-height:1.1;}}p{{margin:0 0 16px;font-size:16px;line-height:1.6;}}.status{{display:inline-block;margin-bottom:16px;padding:6px 12px;border-radius:999px;background:{};color:#fff;font-weight:600;letter-spacing:0.02em;}}</style></head><body><main><div class=\"status\">{}</div><h1>{}</h1><p>{}</p><p>You can close this window.</p><script>window.setTimeout(function(){{window.close();}}, 2500);</script></main></body></html>",
+        html_escape(title),
+        accent,
+        if success {
+            "Connected"
+        } else {
+            "Action needed"
+        },
+        html_escape(title),
+        html_escape(body),
+    )
+}
+
+fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 // ---- Events ----
@@ -2941,45 +2939,11 @@ async fn main() {
             }
         };
 
-    let (vault, vault_status) = match SecretVault::from_env_or_bootstrap() {
-        Ok((v, status)) => {
-            tracing::info!(
-                "Secret vault initialized (source={}, path={})",
-                status.key_source,
-                status.vault_path
-            );
-            if status.bootstrap_created {
-                tracing::info!(
-                    "Generated new managed vault key at {}",
-                    status.key_path.as_deref().unwrap_or("<unknown key path>")
-                );
-            }
-            (Some(v), status)
-        }
-        Err(e) => {
-            tracing::warn!(
-                "Secret vault initialization failed: {}. Credential endpoints will be unavailable.",
-                e
-            );
-            (
-                None,
-                VaultStatus {
-                    available: false,
-                    key_source: "unavailable".to_string(),
-                    vault_path: std::env::var("KAIZEN_VAULT_PATH")
-                        .unwrap_or_else(|_| "../data/vault.json".to_string()),
-                    key_path: Some(
-                        std::env::var("KAIZEN_VAULT_KEY_PATH")
-                            .unwrap_or_else(|_| "../data/vault.key".to_string()),
-                    ),
-                    bootstrap_created: false,
-                    error: Some(e),
-                },
-            )
-        }
-    };
+    // Vault disconnected - now lives in standalone Kai-Vault repo.
+    // API keys are temporarily sourced from env vars.
+    tracing::info!("Vault integration disconnected. API keys sourced from env vars.");
 
-    let initial_crystal_ball = build_crystal_ball_client(&settings, vault.as_ref()).await;
+    let initial_crystal_ball = build_crystal_ball_client(&settings).await;
     if settings.crystal_ball_enabled && initial_crystal_ball.is_none() {
         tracing::warn!(
             "Crystal Ball enabled but Mattermost client is not configured. Running local feed only."
@@ -3010,12 +2974,11 @@ async fn main() {
         events: Arc::new(RwLock::new(archived_events)),
         crystal_ball: Arc::new(RwLock::new(initial_crystal_ball)),
         event_archive: Arc::new(event_archive),
-        vault: Arc::new(vault),
-        vault_status: Arc::new(RwLock::new(vault_status)),
         inference: InferenceClient::new(),
         system_prompt: Arc::new(system_prompt),
         conversations: Arc::new(RwLock::new(HashMap::new())),
         conversation_versions: Arc::new(RwLock::new(HashMap::new())),
+        pending_gemini_oauth: Arc::new(RwLock::new(None)),
         next_id: Arc::new(AtomicU64::new(1)),
     };
 
@@ -3100,15 +3063,8 @@ async fn main() {
         // GitHub integration endpoints
         .route("/api/github/status", get(github_status))
         .route("/api/github/repos", get(github_repos))
-        // Secret vault endpoints
-        .route("/api/vault/status", get(get_vault_status))
-        .route("/api/secrets", get(list_secrets))
-        .route(
-            "/api/secrets/{provider}",
-            put(store_secret).delete(revoke_secret),
-        )
-        .route("/api/secrets/{provider}/test", post(test_secret))
-        .route("/api/secrets/{provider}/use", get(use_secret))
+        // No-vault provider auth endpoints
+        .route("/api/providers/status", get(list_provider_statuses))
         // OAuth endpoints
         .route("/api/oauth/{provider}/start", get(oauth_start))
         .route("/api/oauth/{provider}/status", get(oauth_status))

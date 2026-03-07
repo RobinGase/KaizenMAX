@@ -21,7 +21,6 @@
 - Active implementation branch: `v2-mission-control`.
 - Legacy archive branch: `legacy/ui-dioxus-v1-20260221`.
 - Legacy archive tag: `legacy-ui-dioxus-v1-20260221`.
-- Deprecated rewrite branch removed: `Kaizen-OpenCode-Rust-rewrite`.
 
 ## Artifact Hygiene
 - Build outputs and logs are ignored via `.gitignore`.
