@@ -16,7 +16,6 @@ use axum::{
     response::{Html, IntoResponse, Response},
     routing::{delete, get, patch, post},
 };
-use futures_util::Stream;
 use kaizen_gateway::{
     agents::{AgentRegistry, AgentStatus, Branch, Mission, SubAgent},
     crystal_ball::{
@@ -27,7 +26,8 @@ use kaizen_gateway::{
     gate_engine::{GateConditionPatch, GateRuntime, GateState, TransitionResult},
     inference::{
         self, AnthropicStreamEvent, ChatMessage as InferenceChatMessage, InferenceClient,
-        InferenceCredential, InferenceProvider, InferenceRequest, OpenAIStreamChunk,
+        InferenceCredential, InferenceProvider, InferenceRequest, LiveInferenceEvent,
+        OpenAIStreamChunk,
     },
     oauth_store,
     provider_auth::{self, ProviderAuthStatus},
@@ -1315,7 +1315,7 @@ struct ChatStreamRequest {
 async fn chat_stream(
     State(state): State<AppState>,
     Json(request): Json<ChatStreamRequest>,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, String)> {
+) -> Result<Response, (StatusCode, String)> {
     let message = request.message.trim().to_string();
     if message.is_empty() {
         return Err((
@@ -1390,6 +1390,88 @@ async fn chat_stream(
         temperature,
     };
 
+    if matches!(provider, InferenceProvider::CodexCli) {
+        let mut live_events = state
+            .inference
+            .stream_codex_cli_live(&req)
+            .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+        credential.wipe();
+
+        let state_clone = state.clone();
+        let conv_key = conversation_key.clone();
+        let user_msg = message.clone();
+        let provider_name = provider.to_string();
+
+        let stream = async_stream::stream! {
+            let mut final_response = String::new();
+            let mut done_emitted = false;
+
+            while let Some(event) = live_events.recv().await {
+                match event {
+                    Ok(LiveInferenceEvent::Token(text)) => {
+                        final_response.push_str(&text);
+                        let token_event = Event::default()
+                            .event("token")
+                            .data(serde_json::json!({ "text": text }).to_string());
+                        yield Result::<Event, Infallible>::Ok(token_event);
+                    }
+                    Ok(LiveInferenceEvent::Done { full_response, .. }) => {
+                        if !full_response.trim().is_empty() {
+                            final_response = full_response;
+                        }
+
+                        append_to_conversation(
+                            &state_clone,
+                            &conv_key,
+                            &user_msg,
+                            &final_response,
+                            expected_conversation_version,
+                        ).await;
+
+                        let done_event = Event::default()
+                            .event("done")
+                            .data(serde_json::json!({
+                                "full_response": final_response,
+                                "model": model,
+                                "provider": provider_name,
+                            }).to_string());
+                        yield Result::<Event, Infallible>::Ok(done_event);
+                        done_emitted = true;
+                        break;
+                    }
+                    Err(error) => {
+                        let err_event = Event::default()
+                            .event("error")
+                            .data(error);
+                        yield Result::<Event, Infallible>::Ok(err_event);
+                        break;
+                    }
+                }
+            }
+
+            if !done_emitted && !final_response.trim().is_empty() {
+                append_to_conversation(
+                    &state_clone,
+                    &conv_key,
+                    &user_msg,
+                    &final_response,
+                    expected_conversation_version,
+                ).await;
+
+                let done_event = Event::default()
+                    .event("done")
+                    .data(serde_json::json!({
+                        "full_response": final_response,
+                        "model": model,
+                        "provider": provider_name,
+                    }).to_string());
+                yield Result::<Event, Infallible>::Ok(done_event);
+            }
+        };
+
+        return Ok(Sse::new(stream).keep_alive(KeepAlive::default()).into_response());
+    }
+
     let raw_response = state
         .inference
         .stream_raw(&credential, &req)
@@ -1418,7 +1500,7 @@ async fn chat_stream(
                     let err_event = Event::default()
                         .event("error")
                         .data(format!("Stream error: {e}"));
-                    yield Ok(err_event);
+                    yield Result::<Event, Infallible>::Ok(err_event);
                     break;
                 }
             };
@@ -1457,7 +1539,7 @@ async fn chat_stream(
                             "model": model,
                             "provider": provider.to_string(),
                         }).to_string());
-                    yield Ok(done_event);
+                    yield Result::<Event, Infallible>::Ok(done_event);
                     done_emitted = true;
                     break;
                 }
@@ -1474,7 +1556,7 @@ async fn chat_stream(
                                         let token_event = Event::default()
                                             .event("token")
                                             .data(serde_json::json!({ "text": text }).to_string());
-                                        yield Ok(token_event);
+                                        yield Result::<Event, Infallible>::Ok(token_event);
                                     }
                                 }
                                 AnthropicStreamEvent::MessageStop {} => {
@@ -1494,7 +1576,7 @@ async fn chat_stream(
                                             "model": model,
                                             "provider": "anthropic",
                                         }).to_string());
-                                    yield Ok(done_event);
+                                    yield Result::<Event, Infallible>::Ok(done_event);
                                     done_emitted = true;
                                 }
                                 _ => {}
@@ -1510,7 +1592,7 @@ async fn chat_stream(
                                     let token_event = Event::default()
                                         .event("token")
                                         .data(serde_json::json!({ "text": text }).to_string());
-                                    yield Ok(token_event);
+                                    yield Result::<Event, Infallible>::Ok(token_event);
                                 }
                             }
                         }
@@ -1523,7 +1605,7 @@ async fn chat_stream(
                             let token_event = Event::default()
                                 .event("token")
                                 .data(serde_json::json!({ "text": text }).to_string());
-                            yield Ok(token_event);
+                            yield Result::<Event, Infallible>::Ok(token_event);
                         }
                     }
                     InferenceProvider::GeminiCli | InferenceProvider::CodexCli => {
@@ -1551,11 +1633,11 @@ async fn chat_stream(
                     "model": model,
                     "provider": provider.to_string(),
                 }).to_string());
-            yield Ok(done_event);
+            yield Result::<Event, Infallible>::Ok(done_event);
         }
     };
 
-    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()).into_response())
 }
 
 #[derive(Debug, Deserialize)]

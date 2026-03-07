@@ -7,8 +7,9 @@
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::mpsc;
 
 // ── Provider Enum ──────────────────────────────────────────────────────────
 
@@ -156,6 +157,17 @@ pub struct InferenceResponse {
     pub input_tokens: Option<u32>,
     pub output_tokens: Option<u32>,
     pub stop_reason: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum LiveInferenceEvent {
+    Token(String),
+    Done {
+        full_response: String,
+        input_tokens: Option<u32>,
+        output_tokens: Option<u32>,
+        stop_reason: Option<String>,
+    },
 }
 
 // ── Anthropic API Types ────────────────────────────────────────────────────
@@ -457,6 +469,223 @@ impl InferenceClient {
                 "CLI-backed providers do not expose SSE streaming here yet. Use non-streaming chat or switch to an API-backed provider for SSE streaming.".to_string(),
             ),
         }
+    }
+
+    pub fn stream_codex_cli_live(
+        &self,
+        request: &InferenceRequest,
+    ) -> Result<mpsc::Receiver<Result<LiveInferenceEvent, String>>, String> {
+        let prompt = self.build_codex_cli_prompt(request);
+        let model = request.model.clone();
+        let mut command = codex_cli_command();
+        command
+            .arg("exec")
+            .arg("--json")
+            .arg("--color")
+            .arg("never")
+            .arg("--skip-git-repo-check")
+            .arg("--ephemeral");
+
+        if !model.trim().is_empty() {
+            command.arg("--model").arg(&model);
+        }
+
+        command
+            .arg("-")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+
+        let mut child = command.spawn().map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                "Codex CLI executable not found. Install Codex CLI and ensure `codex` is on PATH."
+                    .to_string()
+            } else {
+                format!("Failed to launch Codex CLI: {e}")
+            }
+        })?;
+
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "Codex CLI stdin was unavailable".to_string())?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "Codex CLI stdout was unavailable".to_string())?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "Codex CLI stderr was unavailable".to_string())?;
+
+        let (tx, rx) = mpsc::channel(64);
+
+        tokio::spawn(async move {
+            if let Err(error) = stdin.write_all(prompt.as_bytes()).await {
+                let _ = tx
+                    .send(Err(format!("Failed to send prompt to Codex CLI: {error}")))
+                    .await;
+                return;
+            }
+            drop(stdin);
+
+            let stderr_task = tokio::spawn(async move {
+                let mut stderr_lines = BufReader::new(stderr).lines();
+                let mut lines = Vec::new();
+                loop {
+                    match stderr_lines.next_line().await {
+                        Ok(Some(line)) => {
+                            let trimmed = line.trim();
+                            if !trimmed.is_empty() {
+                                lines.push(trimmed.to_string());
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(error) => {
+                            lines.push(format!("stderr read failed: {error}"));
+                            break;
+                        }
+                    }
+                }
+                lines.join("\n")
+            });
+
+            let mut stdout_lines = BufReader::new(stdout).lines();
+            let mut full_response = String::new();
+            let mut input_tokens: Option<u32> = None;
+            let mut output_tokens: Option<u32> = None;
+            let mut stop_reason: Option<String> = None;
+
+            loop {
+                let line = match stdout_lines.next_line().await {
+                    Ok(Some(line)) => line,
+                    Ok(None) => break,
+                    Err(error) => {
+                        let _ = tx
+                            .send(Err(format!("Failed to read Codex CLI output: {error}")))
+                            .await;
+                        return;
+                    }
+                };
+
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+                    continue;
+                };
+
+                match value.get("type").and_then(|v| v.as_str()) {
+                    Some("item.completed") => {
+                        if let Some(item) = value.get("item") {
+                            if item.get("type").and_then(|v| v.as_str()) == Some("agent_message") {
+                                if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+                                    let text = text.trim();
+                                    if !text.is_empty() {
+                                        full_response = text.to_string();
+                                        for chunk in chunk_text_for_live_stream(text) {
+                                            if tx.send(Ok(LiveInferenceEvent::Token(chunk))).await.is_err() {
+                                                return;
+                                            }
+                                            tokio::time::sleep(Duration::from_millis(8)).await;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Some("turn.completed") => {
+                        if let Some(usage) = value.get("usage") {
+                            input_tokens = usage
+                                .get("input_tokens")
+                                .and_then(|v| v.as_u64())
+                                .and_then(|v| u32::try_from(v).ok());
+                            output_tokens = usage
+                                .get("output_tokens")
+                                .and_then(|v| v.as_u64())
+                                .and_then(|v| u32::try_from(v).ok());
+                        }
+                    }
+                    Some("turn.cancelled") => {
+                        stop_reason = Some("cancelled".to_string());
+                    }
+                    Some("error") => {
+                        let message = value
+                            .get("message")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| value.get("error").and_then(|v| v.as_str()))
+                            .unwrap_or("unknown Codex CLI error");
+                        let _ = tx.send(Err(format!("Codex CLI error: {message}"))).await;
+                        return;
+                    }
+                    Some("turn.failed") => {
+                        let message = value
+                            .get("message")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("Codex CLI turn failed");
+                        let _ = tx.send(Err(message.to_string())).await;
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+
+            let status = match child.wait().await {
+                Ok(status) => status,
+                Err(error) => {
+                    let _ = tx
+                        .send(Err(format!("Failed to wait for Codex CLI: {error}")))
+                        .await;
+                    return;
+                }
+            };
+
+            let stderr_text = match stderr_task.await {
+                Ok(value) => value,
+                Err(error) => format!("Failed to join Codex CLI stderr reader: {error}"),
+            };
+
+            if !status.success() {
+                let code = status
+                    .code()
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "terminated".to_string());
+                let detail = if stderr_text.trim().is_empty() {
+                    "unknown error".to_string()
+                } else {
+                    stderr_text.trim().to_string()
+                };
+                let _ = tx
+                    .send(Err(format!(
+                        "Codex CLI failed (exit code {code}): {detail}. Run `codex login` if OAuth is not configured."
+                    )))
+                    .await;
+                return;
+            }
+
+            if full_response.trim().is_empty() {
+                let detail = if stderr_text.trim().is_empty() {
+                    "Codex CLI returned empty output".to_string()
+                } else {
+                    stderr_text.trim().to_string()
+                };
+                let _ = tx.send(Err(detail)).await;
+                return;
+            }
+
+            let _ = tx
+                .send(Ok(LiveInferenceEvent::Done {
+                    full_response,
+                    input_tokens,
+                    output_tokens,
+                    stop_reason,
+                }))
+                .await;
+        });
+
+        Ok(rx)
     }
 
     // ── Anthropic ──────────────────────────────────────────────────────────
@@ -1379,6 +1608,28 @@ fn codex_cli_command() -> Command {
     } else {
         Command::new("codex")
     }
+}
+
+fn chunk_text_for_live_stream(text: &str) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+
+    for ch in text.chars() {
+        current.push(ch);
+        let should_flush = current.len() >= 28
+            || ch == '\n'
+            || (ch.is_whitespace() && current.len() >= 14);
+        if should_flush {
+            chunks.push(current.clone());
+            current.clear();
+        }
+    }
+
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+
+    chunks
 }
 
 #[cfg(test)]

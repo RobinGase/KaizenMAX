@@ -610,7 +610,6 @@ fn MissionTabView(app_state: AppState) -> impl IntoView {
     let (chat_notice, set_chat_notice) = create_signal(String::new());
 
     let chat_log_ref = create_node_ref::<html::Div>();
-    let telemetry_log_ref = create_node_ref::<html::Div>();
 
     let refresh_main_history: Rc<dyn Fn()> = Rc::new(move || {
         if is_sending.get_untracked() || is_streaming_reply.get_untracked() {
@@ -649,15 +648,6 @@ fn MissionTabView(app_state: AppState) -> impl IntoView {
         create_effect(move |_| {
             let _ = messages.get().len();
             if let Some(log) = chat_log_ref.get() {
-                log.set_scroll_top(log.scroll_height());
-            }
-        });
-    }
-
-    {
-        create_effect(move |_| {
-            let _ = app_state.events.get().len();
-            if let Some(log) = telemetry_log_ref.get() {
                 log.set_scroll_top(log.scroll_height());
             }
         });
@@ -856,41 +846,6 @@ fn MissionTabView(app_state: AppState) -> impl IntoView {
                     }}
                 </div>
 
-                <section class="telemetry-panel">
-                    <div class="telemetry-head">"Live Telemetry"</div>
-                    <div class="telemetry-feed" node_ref=telemetry_log_ref>
-                        {move || {
-                            if app_state.events.get().is_empty() {
-                                view! { <div class="telemetry-empty">"Waiting for crystal-ball events..."</div> }
-                                    .into_view()
-                            } else {
-                                view! {
-                                    <For
-                                        each=move || {
-                                            let mut rows = app_state.events.get();
-                                            if rows.len() > 160 {
-                                                rows.split_off(rows.len() - 160)
-                                            } else {
-                                                rows
-                                            }
-                                        }
-                                        key=|event| event.event_id.clone()
-                                        children=move |event| {
-                                            view! {
-                                                <div class="event-row">
-                                                    <span class="event-time">{compact_time(&event.timestamp)}</span>
-                                                    <span class="event-type">{event.event_type}</span>
-                                                    <span class="event-msg">{event.message}</span>
-                                                </div>
-                                            }
-                                        }
-                                    />
-                                }
-                                    .into_view()
-                            }
-                        }}
-                    </div>
-                </section>
             </div>
         </div>
     }
@@ -3327,7 +3282,7 @@ pub fn MainMissionView() -> impl IntoView {
             >
                 <nav class="nav-rail">
                     <div class="brand">
-                        <div class="brand-title">"Kaizen MAX"</div>
+                        <img class="brand-lockup-image" src="/headerlogo.png" alt="Kaizen Innovations" />
                         <div class="brand-subtitle">"Mission Control"</div>
                     </div>
 
@@ -3448,7 +3403,6 @@ pub fn MainMissionView() -> impl IntoView {
                         </div>
                     </div>
 
-                    <div class="nav-note">"Rust-native Tauri + Leptos"</div>
                 </nav>
 
                 <div
