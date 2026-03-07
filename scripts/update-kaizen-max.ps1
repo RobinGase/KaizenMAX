@@ -59,19 +59,19 @@ try {
     $gitPath = Get-ToolPath -CommandName "git"
     $launcherPath = Join-Path $repoRoot "scripts\launch-kaizen-max.ps1"
 
-    $branch = (& $gitPath -C $repoRoot rev-parse --abbrev-ref HEAD).Trim()
+    $branch = ((& $gitPath -C $repoRoot rev-parse --abbrev-ref HEAD) | Out-String).Trim()
     if ($branch -ne "main") {
         throw "Updater requires the repo checkout to be on 'main'. Current branch: $branch"
     }
 
-    $status = (& $gitPath -C $repoRoot status --porcelain).Trim()
+    $status = ((& $gitPath -C $repoRoot status --porcelain) | Out-String).Trim()
     if (-not [string]::IsNullOrWhiteSpace($status)) {
         throw "Updater requires a clean worktree. Current git status:`n$status"
     }
 
     Invoke-CheckedCommand -WorkingDirectory $repoRoot -FilePath $gitPath -Arguments @("fetch", "origin", "main")
 
-    $behind = (& $gitPath -C $repoRoot rev-list --count HEAD..origin/main).Trim()
+    $behind = ((& $gitPath -C $repoRoot rev-list --count HEAD..origin/main) | Out-String).Trim()
     if ([int]$behind -le 0) {
         & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $launcherPath | Out-Null
         exit 0
