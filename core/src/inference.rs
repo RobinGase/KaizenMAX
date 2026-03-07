@@ -135,6 +135,18 @@ impl std::fmt::Display for InferenceProvider {
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+    #[serde(default)]
+    pub attachments: Vec<ChatAttachment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatAttachment {
+    pub name: String,
+    pub media_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_base64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_url: Option<String>,
 }
 
 /// Request to the inference engine.
@@ -187,7 +199,31 @@ struct AnthropicRequest {
 #[derive(Debug, Serialize, Deserialize)]
 struct AnthropicMessage {
     role: String,
-    content: String,
+    content: AnthropicMessageContent,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum AnthropicMessageContent {
+    Text(String),
+    Blocks(Vec<AnthropicMessageBlock>),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type")]
+enum AnthropicMessageBlock {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "image")]
+    Image { source: AnthropicImageSource },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AnthropicImageSource {
+    #[serde(rename = "type")]
+    source_type: String,
+    media_type: String,
+    data: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -228,7 +264,28 @@ struct OpenAIRequest {
 #[derive(Debug, Serialize, Deserialize)]
 struct OpenAIMessage {
     role: String,
-    content: String,
+    content: OpenAIMessageContent,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum OpenAIMessageContent {
+    Text(String),
+    Parts(Vec<OpenAIContentPart>),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type")]
+enum OpenAIContentPart {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: OpenAIImageUrl },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct OpenAIImageUrl {
+    url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -240,8 +297,13 @@ struct OpenAIResponse {
 
 #[derive(Debug, Deserialize)]
 struct OpenAIChoice {
-    message: OpenAIMessage,
+    message: OpenAIResponseMessage,
     finish_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIResponseMessage {
+    content: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -274,7 +336,17 @@ struct GeminiContent {
 
 #[derive(Debug, Serialize)]
 struct GeminiPart {
-    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    #[serde(rename = "inlineData", skip_serializing_if = "Option::is_none")]
+    inline_data: Option<GeminiInlineData>,
+}
+
+#[derive(Debug, Serialize)]
+struct GeminiInlineData {
+    #[serde(rename = "mimeType")]
+    mime_type: String,
+    data: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -688,6 +760,112 @@ impl InferenceClient {
         Ok(rx)
     }
 
+    fn message_text_with_attachment_note(message: &ChatMessage) -> String {
+        if message.attachments.is_empty() {
+            return message.content.clone();
+        }
+
+        let mut text = message.content.clone();
+        if !text.trim().is_empty() {
+            text.push_str("\n\n");
+        }
+        text.push_str("Attached image context:\n");
+        for attachment in &message.attachments {
+            text.push_str("- ");
+            text.push_str(&attachment.name);
+            if !attachment.media_type.trim().is_empty() {
+                text.push_str(" (");
+                text.push_str(&attachment.media_type);
+                text.push(')');
+            }
+            if attachment.data_base64.is_none() {
+                text.push_str(" [metadata only]");
+            }
+            text.push('\n');
+        }
+        text.trim_end().to_string()
+    }
+
+    fn build_anthropic_message(&self, message: &ChatMessage) -> AnthropicMessage {
+        let inline_images: Vec<&ChatAttachment> = message
+            .attachments
+            .iter()
+            .filter(|attachment| attachment.data_base64.is_some())
+            .collect();
+
+        if inline_images.is_empty() || !message.role.eq_ignore_ascii_case("user") {
+            return AnthropicMessage {
+                role: message.role.clone(),
+                content: AnthropicMessageContent::Text(Self::message_text_with_attachment_note(
+                    message,
+                )),
+            };
+        }
+
+        let mut blocks = Vec::new();
+        let text = if message.content.trim().is_empty() {
+            "Review the attached image context and respond to the operator.".to_string()
+        } else {
+            message.content.clone()
+        };
+        blocks.push(AnthropicMessageBlock::Text { text });
+        for attachment in inline_images {
+            if let Some(data) = attachment.data_base64.clone() {
+                blocks.push(AnthropicMessageBlock::Image {
+                    source: AnthropicImageSource {
+                        source_type: "base64".to_string(),
+                        media_type: attachment.media_type.clone(),
+                        data,
+                    },
+                });
+            }
+        }
+
+        AnthropicMessage {
+            role: message.role.clone(),
+            content: AnthropicMessageContent::Blocks(blocks),
+        }
+    }
+
+    fn build_openai_message(&self, message: &ChatMessage) -> OpenAIMessage {
+        let inline_images: Vec<&ChatAttachment> = message
+            .attachments
+            .iter()
+            .filter(|attachment| attachment.data_base64.is_some())
+            .collect();
+
+        if inline_images.is_empty() || !message.role.eq_ignore_ascii_case("user") {
+            return OpenAIMessage {
+                role: message.role.clone(),
+                content: OpenAIMessageContent::Text(Self::message_text_with_attachment_note(
+                    message,
+                )),
+            };
+        }
+
+        let mut parts = Vec::new();
+        let text = if message.content.trim().is_empty() {
+            "Review the attached image context and respond to the operator.".to_string()
+        } else {
+            message.content.clone()
+        };
+        parts.push(OpenAIContentPart::Text { text });
+        for attachment in inline_images {
+            if let Some(data) = attachment.data_base64.clone() {
+                parts.push(OpenAIContentPart::ImageUrl {
+                    image_url: OpenAIImageUrl {
+                        url: format!("data:{};base64,{}", attachment.media_type, data),
+                    },
+                });
+            }
+        }
+
+        OpenAIMessage {
+            role: message.role.clone(),
+            content: OpenAIMessageContent::Parts(parts),
+        }
+    }
+
     // ── Anthropic ──────────────────────────────────────────────────────────
 
     async fn complete_anthropic(
@@ -710,10 +888,7 @@ impl InferenceClient {
             messages: request
                 .messages
                 .iter()
-                .map(|m| AnthropicMessage {
-                    role: m.role.clone(),
-                    content: m.content.clone(),
-                })
+                .map(|m| self.build_anthropic_message(m))
                 .collect(),
             stream: None,
         };
@@ -793,10 +968,7 @@ impl InferenceClient {
             messages: request
                 .messages
                 .iter()
-                .map(|m| AnthropicMessage {
-                    role: m.role.clone(),
-                    content: m.content.clone(),
-                })
+                .map(|m| self.build_anthropic_message(m))
                 .collect(),
             stream: Some(true),
         };
@@ -826,14 +998,11 @@ impl InferenceClient {
     fn build_openai_messages(&self, request: &InferenceRequest) -> Vec<OpenAIMessage> {
         let mut messages = vec![OpenAIMessage {
             role: "system".to_string(),
-            content: request.system_prompt.clone(),
+            content: OpenAIMessageContent::Text(request.system_prompt.clone()),
         }];
 
         for m in &request.messages {
-            messages.push(OpenAIMessage {
-                role: m.role.clone(),
-                content: m.content.clone(),
-            });
+            messages.push(self.build_openai_message(m));
         }
 
         messages
@@ -1023,7 +1192,8 @@ impl InferenceClient {
         } else {
             Some(GeminiInstruction {
                 parts: vec![GeminiPart {
-                    text: request.system_prompt.clone(),
+                    text: Some(request.system_prompt.clone()),
+                    inline_data: None,
                 }],
             })
         };
@@ -1037,9 +1207,40 @@ impl InferenceClient {
                 } else {
                     "user".to_string()
                 },
-                parts: vec![GeminiPart {
-                    text: m.content.clone(),
-                }],
+                parts: {
+                    let inline_images: Vec<_> = m
+                        .attachments
+                        .iter()
+                        .filter_map(|attachment| {
+                            attachment.data_base64.as_ref().map(|data| GeminiPart {
+                                text: None,
+                                inline_data: Some(GeminiInlineData {
+                                    mime_type: attachment.media_type.clone(),
+                                    data: data.clone(),
+                                }),
+                            })
+                        })
+                        .collect();
+
+                    if inline_images.is_empty() || !m.role.eq_ignore_ascii_case("user") {
+                        vec![GeminiPart {
+                            text: Some(Self::message_text_with_attachment_note(m)),
+                            inline_data: None,
+                        }]
+                    } else {
+                        let mut parts = vec![GeminiPart {
+                            text: Some(if m.content.trim().is_empty() {
+                                "Review the attached image context and respond to the operator."
+                                    .to_string()
+                            } else {
+                                m.content.clone()
+                            }),
+                            inline_data: None,
+                        }];
+                        parts.extend(inline_images);
+                        parts
+                    }
+                },
             })
             .collect();
 
@@ -1047,7 +1248,8 @@ impl InferenceClient {
             contents.push(GeminiContent {
                 role: "user".to_string(),
                 parts: vec![GeminiPart {
-                    text: String::new(),
+                    text: Some(String::new()),
+                    inline_data: None,
                 }],
             });
         }
@@ -1232,7 +1434,10 @@ impl InferenceClient {
             } else {
                 "user"
             };
-            prompt.push_str(&format!("{role}: {}\n", message.content));
+            prompt.push_str(&format!(
+                "{role}: {}\n",
+                Self::message_text_with_attachment_note(message)
+            ));
         }
 
         prompt.push_str("\nRespond as assistant only. Keep the answer concise and complete.");
@@ -1406,7 +1611,10 @@ impl InferenceClient {
             } else {
                 "user"
             };
-            prompt.push_str(&format!("{role}: {}\n", message.content));
+            prompt.push_str(&format!(
+                "{role}: {}\n",
+                Self::message_text_with_attachment_note(message)
+            ));
         }
 
         prompt.push_str(

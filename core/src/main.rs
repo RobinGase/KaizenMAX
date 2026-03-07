@@ -25,8 +25,9 @@ use kaizen_gateway::{
     event_archive::{ArchiveIntegrityReport, EventArchive},
     gate_engine::{GateConditionPatch, GateRuntime, GateState, TransitionResult},
     inference::{
-        self, AnthropicStreamEvent, ChatMessage as InferenceChatMessage, InferenceClient,
-        InferenceCredential, InferenceProvider, InferenceRequest, LiveInferenceEvent,
+        self, AnthropicStreamEvent, ChatAttachment as InferenceChatAttachment,
+        ChatMessage as InferenceChatMessage, InferenceClient, InferenceCredential,
+        InferenceProvider, InferenceRequest, LiveInferenceEvent,
         OpenAIStreamChunk,
     },
     openclaw_bridge,
@@ -40,6 +41,7 @@ use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
     convert::Infallible,
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering as AtomicOrdering},
@@ -63,10 +65,12 @@ struct AppState {
     events: Arc<RwLock<Vec<CrystalBallEvent>>>,
     crystal_ball: Arc<RwLock<Option<CrystalBallClient>>>,
     event_archive: Arc<EventArchive>,
+    agent_state_path: Arc<PathBuf>,
     inference: InferenceClient,
     system_prompt: Arc<String>,
     /// Per-session conversation history (keyed by "kaizen" or agent_id).
     conversations: Arc<RwLock<HashMap<String, Vec<InferenceChatMessage>>>>,
+    conversation_state_path: Arc<PathBuf>,
     /// Monotonic generation counters for conversation keys.
     ///
     /// Any clear/remove operation bumps the generation so stale in-flight
@@ -385,8 +389,27 @@ async fn build_crystal_ball_client(settings: &KaizenSettings) -> Option<CrystalB
         return None;
     }
 
-    // Vault disconnected - Crystal Ball uses env-only config until vault reconnects.
-    CrystalBallClient::from_env()
+    let config = kaizen_gateway::crystal_ball::CrystalBallConfig {
+        base_url: if settings.mattermost_url.trim().is_empty() {
+            std::env::var("MATTERMOST_URL").unwrap_or_default()
+        } else {
+            settings.mattermost_url.clone()
+        },
+        token: if settings.mattermost_token.trim().is_empty() {
+            std::env::var("MATTERMOST_TOKEN").unwrap_or_default()
+        } else {
+            settings.mattermost_token.clone()
+        },
+        channel_id: if settings.mattermost_channel_id.trim().is_empty() {
+            std::env::var("MATTERMOST_CHANNEL_ID")
+                .or_else(|_| std::env::var("CRYSTAL_BALL_CHANNEL"))
+                .unwrap_or_default()
+        } else {
+            settings.mattermost_channel_id.clone()
+        },
+    };
+
+    CrystalBallClient::from_config(config).or_else(CrystalBallClient::from_env)
 }
 
 async fn refresh_crystal_ball_client(state: &AppState) {
@@ -665,6 +688,8 @@ struct ChatModelTarget {
 struct ChatRequest {
     message: String,
     agent_id: Option<String>,
+    #[serde(default)]
+    attachments: Vec<ChatImageAttachment>,
     /// If true, clear conversation history before this message.
     #[serde(default)]
     clear_history: bool,
@@ -880,7 +905,18 @@ async fn clear_conversation(state: &AppState, key: &str) {
         conversations.remove(key);
     }
 
+    if let Err(err) = persist_conversations(state).await {
+        tracing::warn!("Failed to persist cleared conversation '{}': {}", key, err);
+    }
+
     bump_conversation_version(state, key).await;
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ChatImageAttachment {
+    name: String,
+    media_type: String,
+    data_base64: String,
 }
 
 async fn bump_conversation_version(state: &AppState, key: &str) {
@@ -894,6 +930,7 @@ async fn append_to_conversation(
     state: &AppState,
     key: &str,
     user_msg: &str,
+    user_attachments: &[InferenceChatAttachment],
     assistant_msg: &str,
     expected_version: u64,
 ) {
@@ -917,10 +954,20 @@ async fn append_to_conversation(
     history.push(InferenceChatMessage {
         role: "user".to_string(),
         content: user_msg.to_string(),
+        attachments: user_attachments
+            .iter()
+            .map(|attachment| InferenceChatAttachment {
+                name: attachment.name.clone(),
+                media_type: attachment.media_type.clone(),
+                data_base64: None,
+                preview_url: None,
+            })
+            .collect(),
     });
     history.push(InferenceChatMessage {
         role: "assistant".to_string(),
         content: assistant_msg.to_string(),
+        attachments: vec![],
     });
 
     // Keep conversation history bounded (last 50 turns = 100 messages)
@@ -928,6 +975,297 @@ async fn append_to_conversation(
         let drain = history.len() - 100;
         history.drain(0..drain);
     }
+    drop(conversations);
+
+    if let Err(err) = persist_conversations(state).await {
+        tracing::warn!("Failed to persist conversation '{}': {}", key, err);
+    }
+}
+
+async fn persist_agent_registry(state: &AppState) -> Result<(), String> {
+    let registry = state.agents.read().await;
+    registry.persist_to_path(state.agent_state_path.as_ref())
+}
+
+async fn persist_conversations(state: &AppState) -> Result<(), String> {
+    let conversations = state.conversations.read().await;
+    persist_conversations_snapshot(state.conversation_state_path.as_ref(), &conversations)
+}
+
+fn persist_conversations_snapshot(
+    path: &std::path::Path,
+    conversations: &HashMap<String, Vec<InferenceChatMessage>>,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent).map_err(|err| {
+                format!(
+                    "Failed to create conversation directory {}: {err}",
+                    parent.display()
+                )
+            })?;
+        }
+    }
+
+    let json = serde_json::to_string_pretty(conversations)
+        .map_err(|err| format!("Failed to serialize conversations: {err}"))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json).map_err(|err| {
+        format!(
+            "Failed to write conversation tmp file {}: {err}",
+            tmp.display()
+        )
+    })?;
+    std::fs::rename(&tmp, path)
+        .map_err(|err| format!("Failed to persist conversations {}: {err}", path.display()))?;
+    Ok(())
+}
+
+fn load_conversations(path: &std::path::Path) -> HashMap<String, Vec<InferenceChatMessage>> {
+    if !path.exists() {
+        return HashMap::new();
+    }
+
+    match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text).unwrap_or_else(|err| {
+            tracing::warn!(
+                "Failed to parse persisted conversations at {}: {}",
+                path.display(),
+                err
+            );
+            HashMap::new()
+        }),
+        Err(err) => {
+            tracing::warn!(
+                "Failed to read persisted conversations at {}: {}",
+                path.display(),
+                err
+            );
+            HashMap::new()
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct OrchestratorTarget {
+    id: String,
+}
+
+fn looks_like_staff_dispatch(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    [
+        "tell ",
+        "ask ",
+        "assign ",
+        "start ",
+        "work on",
+        "handle ",
+        "route ",
+        "delegate ",
+        "have ",
+        "can you get ",
+        "put ",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn collect_orchestrator_targets(message: &str, registry: &AgentRegistry) -> Vec<OrchestratorTarget> {
+    let lower = message.to_ascii_lowercase();
+    let normalized = normalize_scope_id(message);
+    let mut targets = Vec::new();
+    let mut seen = HashSet::new();
+
+    for agent in registry.list() {
+        let direct_name = lower.contains(&agent.name.to_ascii_lowercase());
+        let scoped_name = normalized.contains(&normalize_scope_id(&agent.name));
+        if direct_name || scoped_name {
+            if seen.insert(agent.id.clone()) {
+                targets.push(OrchestratorTarget {
+                    id: agent.id.clone(),
+                });
+            }
+        }
+    }
+
+    for mission in registry.list_missions() {
+        let mission_name = mission.name.to_ascii_lowercase();
+        let mission_id = mission.id.to_ascii_lowercase();
+        if !lower.contains(&mission_name) && !lower.contains(&mission_id) {
+            continue;
+        }
+
+        for agent in registry
+            .list()
+            .iter()
+            .filter(|agent| agent.branch_id == mission.branch_id && agent.mission_id == mission.id)
+        {
+            if seen.insert(agent.id.clone()) {
+                targets.push(OrchestratorTarget {
+                    id: agent.id.clone(),
+                });
+            }
+        }
+    }
+
+    for branch in registry.list_branches() {
+        let branch_name = branch.name.to_ascii_lowercase();
+        let branch_id = branch.id.to_ascii_lowercase();
+        if !lower.contains(&branch_name) && !lower.contains(&branch_id) {
+            continue;
+        }
+
+        for agent in registry
+            .list()
+            .iter()
+            .filter(|agent| agent.branch_id == branch.id)
+        {
+            if seen.insert(agent.id.clone()) {
+                targets.push(OrchestratorTarget {
+                    id: agent.id.clone(),
+                });
+            }
+        }
+    }
+
+    targets
+}
+
+async fn try_staff_dispatch_reply(
+    state: &AppState,
+    conversation_key: &str,
+    user_message: &str,
+    expected_version: u64,
+) -> Result<Option<(String, Option<String>, Option<String>)>, (StatusCode, String)> {
+    if conversation_key != "kaizen" || !looks_like_staff_dispatch(user_message) {
+        return Ok(None);
+    }
+
+    let targets = {
+        let registry = state.agents.read().await;
+        collect_orchestrator_targets(user_message, &registry)
+    };
+
+    if targets.is_empty() {
+        return Ok(None);
+    }
+
+    let mut dispatched = Vec::new();
+    let mut blocked = Vec::new();
+    {
+        let mut registry = state.agents.write().await;
+        for target in &targets {
+            let Some(agent) = registry.get(&target.id).cloned() else {
+                continue;
+            };
+
+            let status_result = match agent.status {
+                AgentStatus::Idle | AgentStatus::Blocked | AgentStatus::ReviewPending => {
+                    registry.set_status(&target.id, AgentStatus::Active, false)
+                }
+                AgentStatus::Active => Ok(()),
+                AgentStatus::Done => Err(format!("{} is already done", agent.name)),
+            };
+
+            match status_result {
+                Ok(_) => {
+                    if let Some(updated) = registry.get(&target.id).cloned() {
+                        dispatched.push(updated);
+                    }
+                }
+                Err(err) => blocked.push(format!("{} ({})", agent.name, err)),
+            }
+        }
+    }
+
+    if !dispatched.is_empty() {
+        persist_agent_registry(state)
+            .await
+            .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err))?;
+    }
+
+    for agent in &dispatched {
+        let ack = format!(
+            "Kaizen briefed {} on the work in {}/{} and asked them to move now.",
+            agent.name, agent.branch_id, agent.mission_id
+        );
+        let agent_version = conversation_version(state, &agent.id).await;
+        append_to_conversation(state, &agent.id, user_message, &[], &ack, agent_version).await;
+
+        push_event(
+            state,
+            CrystalBallEvent {
+                event_id: next_id(state, "event"),
+                timestamp: now_timestamp(),
+                event_type: "orchestration.delegated".to_string(),
+                source_actor: "Kaizen".to_string(),
+                source_agent_id: "kaizen".to_string(),
+                target_actor: agent.name.clone(),
+                target_agent_id: agent.id.clone(),
+                task_id: agent.task_id.clone(),
+                message: user_message.to_string(),
+                visibility: "operator".to_string(),
+            },
+        )
+        .await;
+    }
+
+    let mut reply = String::new();
+    if !dispatched.is_empty() {
+        reply.push_str("I briefed the team and set the work in motion.\n\n");
+        for agent in &dispatched {
+            reply.push_str("- ");
+            reply.push_str(&format!(
+                "{} is now on point for {}/{}.",
+                agent.name, agent.branch_id, agent.mission_id
+            ));
+            reply.push('\n');
+        }
+    }
+
+    if !blocked.is_empty() {
+        if !reply.is_empty() {
+            reply.push('\n');
+        }
+        reply.push_str("Still blocked:\n");
+        for item in blocked {
+            reply.push_str("- ");
+            reply.push_str(&item);
+            reply.push('\n');
+        }
+    }
+
+    if reply.trim().is_empty() {
+        return Ok(None);
+    }
+
+    append_to_conversation(state, "kaizen", user_message, &[], &reply, expected_version).await;
+    Ok(Some((
+        reply,
+        Some("orchestrator".to_string()),
+        Some("zeroclaw".to_string()),
+    )))
+}
+
+fn agent_registry_path() -> PathBuf {
+    if let Ok(path) = std::env::var("KAIZEN_AGENT_STATE_PATH") {
+        return PathBuf::from(path);
+    }
+
+    let workspace_path = PathBuf::from("../data/agents_registry.json");
+    if workspace_path.parent().is_some() {
+        return workspace_path;
+    }
+
+    PathBuf::from("data/agents_registry.json")
+}
+
+fn conversation_store_path() -> PathBuf {
+    if let Ok(path) = std::env::var("KAIZEN_CONVERSATION_STATE_PATH") {
+        return PathBuf::from(path);
+    }
+
+    PathBuf::from("../data/conversations.json")
 }
 
 async fn try_openclaw_fallback_reply(
@@ -942,6 +1280,7 @@ async fn try_openclaw_fallback_reply(
                 state,
                 conversation_key,
                 user_message,
+                &[],
                 &result.reply,
                 expected_version,
             )
@@ -1022,14 +1361,30 @@ async fn chat(
     Json(request): Json<ChatRequest>,
 ) -> Result<Json<ChatResponse>, (StatusCode, String)> {
     let message = request.message.trim();
-    if message.is_empty() {
+    if message.is_empty() && request.attachments.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            "message cannot be empty".to_string(),
+            "message cannot be empty unless an image is attached".to_string(),
         ));
     }
+    let message = if message.is_empty() {
+        "Review the attached image context."
+    } else {
+        message
+    };
 
     let selected_mode = normalize_chat_mode(request.mode.as_deref())?;
+    let request_attachments: Vec<InferenceChatAttachment> = request
+        .attachments
+        .iter()
+        .filter(|attachment| !attachment.data_base64.trim().is_empty())
+        .map(|attachment| InferenceChatAttachment {
+            name: attachment.name.clone(),
+            media_type: attachment.media_type.clone(),
+            data_base64: Some(attachment.data_base64.clone()),
+            preview_url: None,
+        })
+        .collect();
 
     let source = "user".to_string();
     let conversation_key: String;
@@ -1100,6 +1455,52 @@ async fn chat(
     let use_wrap_mode = wrap_mode_requested && requested_targets.len() > 1;
 
     if !use_wrap_mode {
+        if let Some((reply, model, provider_name)) = try_staff_dispatch_reply(
+            &state,
+            &conversation_key,
+            message,
+            expected_conversation_version,
+        )
+        .await?
+        {
+            let active_agents = state.agents.read().await.active_count();
+            let gate_state = state.gates.read().await.current_state;
+
+            push_event(
+                &state,
+                CrystalBallEvent {
+                    event_id: next_id(&state, "event"),
+                    timestamp: now_timestamp(),
+                    event_type: "orchestration.response".to_string(),
+                    source_actor: target.clone(),
+                    source_agent_id: target.to_lowercase(),
+                    target_actor: source.clone(),
+                    target_agent_id: "human".to_string(),
+                    task_id: "chat".to_string(),
+                    message: if reply.len() > 200 {
+                        format!("{}...", &reply[..200])
+                    } else {
+                        reply.clone()
+                    },
+                    visibility: "operator".to_string(),
+                },
+            )
+            .await;
+
+            return Ok(Json(ChatResponse {
+                reply,
+                source,
+                target,
+                active_agents,
+                gate_state,
+                model,
+                provider: provider_name,
+                mode: selected_mode,
+                input_tokens: None,
+                output_tokens: None,
+            }));
+        }
+
         if let Some((reply, model, provider_name)) = try_openclaw_fallback_reply(
             &state,
             &conversation_key,
@@ -1168,6 +1569,7 @@ async fn chat(
                     messages.push(InferenceChatMessage {
                         role: "user".to_string(),
                         content: message.to_string(),
+                        attachments: request_attachments.clone(),
                     });
 
                     let req = InferenceRequest {
@@ -1238,6 +1640,7 @@ async fn chat(
             &state,
             &conversation_key,
             message,
+            &request_attachments,
             &combined,
             expected_conversation_version,
         )
@@ -1264,6 +1667,7 @@ async fn chat(
                 messages.push(InferenceChatMessage {
                     role: "user".to_string(),
                     content: message.to_string(),
+                    attachments: request_attachments.clone(),
                 });
 
                 let req = InferenceRequest {
@@ -1288,6 +1692,7 @@ async fn chat(
                             &state,
                             &conversation_key,
                             message,
+                            &request_attachments,
                             &resp.content,
                             expected_conversation_version,
                         )
@@ -1376,6 +1781,8 @@ struct ChatStreamRequest {
     message: String,
     agent_id: Option<String>,
     #[serde(default)]
+    attachments: Vec<ChatImageAttachment>,
+    #[serde(default)]
     clear_history: bool,
     #[serde(default)]
     provider: Option<String>,
@@ -1394,14 +1801,30 @@ async fn chat_stream(
     Json(request): Json<ChatStreamRequest>,
 ) -> Result<Response, (StatusCode, String)> {
     let message = request.message.trim().to_string();
-    if message.is_empty() {
+    if message.is_empty() && request.attachments.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            "message cannot be empty".to_string(),
+            "message cannot be empty unless an image is attached".to_string(),
         ));
     }
+    let message = if message.is_empty() {
+        "Review the attached image context.".to_string()
+    } else {
+        message
+    };
 
     let selected_mode = normalize_chat_mode(request.mode.as_deref())?;
+    let request_attachments: Vec<InferenceChatAttachment> = request
+        .attachments
+        .iter()
+        .filter(|attachment| !attachment.data_base64.trim().is_empty())
+        .map(|attachment| InferenceChatAttachment {
+            name: attachment.name.clone(),
+            media_type: attachment.media_type.clone(),
+            data_base64: Some(attachment.data_base64.clone()),
+            preview_url: None,
+        })
+        .collect();
 
     let selected_targets = normalize_chat_targets(request.selected_models.as_deref());
     if request.wrap_mode.unwrap_or(false) || selected_targets.len() > 1 {
@@ -1438,6 +1861,35 @@ async fn chat_stream(
     }
 
     let expected_conversation_version = conversation_version(&state, &conversation_key).await;
+
+    if let Some((reply, model, provider_name)) = try_staff_dispatch_reply(
+        &state,
+        &conversation_key,
+        &message,
+        expected_conversation_version,
+    )
+    .await?
+    {
+        let stream = async_stream::stream! {
+            let token_event = Event::default()
+                .event("token")
+                .data(serde_json::json!({ "text": reply.clone() }).to_string());
+            yield Result::<Event, Infallible>::Ok(token_event);
+
+            let done_event = Event::default().event("done").data(
+                serde_json::json!({
+                    "full_response": reply,
+                    "model": model,
+                    "provider": provider_name,
+                })
+                .to_string(),
+            );
+            yield Result::<Event, Infallible>::Ok(done_event);
+        };
+
+        let sse = Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)));
+        return Ok(sse.into_response());
+    }
 
     if let Some((reply, model, provider_name)) = try_openclaw_fallback_reply(
         &state,
@@ -1485,6 +1937,7 @@ async fn chat_stream(
     messages.push(InferenceChatMessage {
         role: "user".to_string(),
         content: message.clone(),
+        attachments: request_attachments.clone(),
     });
 
     let req = InferenceRequest {
@@ -1530,6 +1983,7 @@ async fn chat_stream(
                             &state_clone,
                             &conv_key,
                             &user_msg,
+                            &request_attachments,
                             &final_response,
                             expected_conversation_version,
                         ).await;
@@ -1560,6 +2014,7 @@ async fn chat_stream(
                     &state_clone,
                     &conv_key,
                     &user_msg,
+                    &request_attachments,
                     &final_response,
                     expected_conversation_version,
                 ).await;
@@ -1634,6 +2089,7 @@ async fn chat_stream(
                         &state_clone,
                         &conv_key,
                         &user_msg,
+                        &request_attachments,
                         &full_response,
                         expected_conversation_version,
                     ).await;
@@ -1671,6 +2127,7 @@ async fn chat_stream(
                                         &state_clone,
                                         &conv_key,
                                         &user_msg,
+                                        &request_attachments,
                                         &full_response,
                                         expected_conversation_version,
                                     ).await;
@@ -1728,6 +2185,7 @@ async fn chat_stream(
                 &state_clone,
                 &conv_key,
                 &user_msg,
+                &request_attachments,
                 &full_response,
                 expected_conversation_version,
             ).await;
@@ -1853,6 +2311,10 @@ async fn create_branch(
             .map_err(|err| (StatusCode::BAD_REQUEST, err))?
     };
 
+    persist_agent_registry(&state)
+        .await
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err))?;
+
     Ok(Json(branch))
 }
 
@@ -1896,6 +2358,10 @@ async fn create_mission(
             .create_mission(id, branch_id, name, objective)
             .map_err(|err| (StatusCode::BAD_REQUEST, err))?
     };
+
+    persist_agent_registry(&state)
+        .await
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err))?;
 
     Ok(Json(mission))
 }
@@ -2013,6 +2479,10 @@ async fn spawn_agent(
         created.clone()
     };
 
+    persist_agent_registry(&state)
+        .await
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err))?;
+
     push_event(
         &state,
         CrystalBallEvent {
@@ -2068,6 +2538,10 @@ async fn update_agent_status(
             .ok_or((StatusCode::NOT_FOUND, "agent not found".to_string()))?
             .clone()
     };
+
+    persist_agent_registry(&state)
+        .await
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err))?;
 
     push_event(
         &state,
@@ -2218,6 +2692,10 @@ async fn rename_agent(
             .map_err(|err| (StatusCode::BAD_REQUEST, err))?;
     }
 
+    persist_agent_registry(&state)
+        .await
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err))?;
+
     let updated = {
         let registry = state.agents.read().await;
         registry
@@ -2258,6 +2736,10 @@ async fn remove_agent(
             .remove(&agent_id)
             .map_err(|err| (StatusCode::NOT_FOUND, err))?
     };
+
+    persist_agent_registry(&state)
+        .await
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err))?;
 
     // Clear conversation history for this agent
     clear_conversation(&state, &agent_id).await;
@@ -2341,6 +2823,10 @@ async fn stop_agent(
 
         (agent.name, agent.task_id, updated)
     };
+
+    persist_agent_registry(&state)
+        .await
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err))?;
 
     bump_conversation_version(&state, &agent_id).await;
 
@@ -3181,19 +3667,36 @@ async fn main() {
         tracing::info!("Admin token protection enabled for sensitive API endpoints.");
     }
 
+    let agent_state_path = agent_registry_path();
+    let conversation_state_path = conversation_store_path();
+    let initial_agents =
+        match AgentRegistry::load_from_path(agent_state_path.as_path(), settings.max_subagents as usize)
+        {
+            Ok(registry) => registry,
+            Err(err) => {
+                tracing::warn!(
+                    "Failed to load persisted agent registry from {}: {}",
+                    agent_state_path.display(),
+                    err
+                );
+                AgentRegistry::new(settings.max_subagents as usize)
+            }
+        };
+    let initial_conversations = load_conversations(conversation_state_path.as_path());
+
     let state = AppState {
         settings: Arc::new(RwLock::new(settings.clone())),
         admin_api_token: Arc::new(admin_api_token),
-        agents: Arc::new(RwLock::new(AgentRegistry::new(
-            settings.max_subagents as usize,
-        ))),
+        agents: Arc::new(RwLock::new(initial_agents)),
         gates: Arc::new(RwLock::new(GateRuntime::default())),
         events: Arc::new(RwLock::new(archived_events)),
         crystal_ball: Arc::new(RwLock::new(initial_crystal_ball)),
         event_archive: Arc::new(event_archive),
+        agent_state_path: Arc::new(agent_state_path),
         inference: InferenceClient::new(),
         system_prompt: Arc::new(system_prompt),
-        conversations: Arc::new(RwLock::new(HashMap::new())),
+        conversations: Arc::new(RwLock::new(initial_conversations)),
+        conversation_state_path: Arc::new(conversation_state_path),
         conversation_versions: Arc::new(RwLock::new(HashMap::new())),
         pending_gemini_oauth: Arc::new(RwLock::new(None)),
         next_id: Arc::new(AtomicU64::new(1)),

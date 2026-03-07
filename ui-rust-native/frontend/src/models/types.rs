@@ -121,6 +121,16 @@ pub struct CrystalBallEvent {
 pub struct InferenceChatMessage {
     pub role: String,
     pub content: String,
+    #[serde(default)]
+    pub attachments: Vec<ChatAttachment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatAttachment {
+    pub name: String,
+    pub media_type: String,
+    #[serde(default)]
+    pub preview_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +144,13 @@ pub struct ChatResponse {
     pub reply: String,
     pub source: String,
     pub target: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetachedWindowStatus {
+    pub agent_ids: Vec<String>,
+    pub office_open: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -194,6 +211,7 @@ pub struct KaizenSettings {
     pub write_plaintext_secrets_to_env: bool,
     pub show_only_masked_secrets_in_ui: bool,
     pub mattermost_url: String,
+    pub mattermost_token: String,
     pub mattermost_channel_id: String,
     pub selected_github_repo: String,
     pub inference_provider: String,

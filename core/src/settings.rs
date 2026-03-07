@@ -46,6 +46,8 @@ pub struct KaizenSettings {
     #[serde(default)]
     pub mattermost_url: String,
     #[serde(default)]
+    pub mattermost_token: String,
+    #[serde(default)]
     pub mattermost_channel_id: String,
     #[serde(default)]
     pub selected_github_repo: String,
@@ -97,6 +99,7 @@ impl Default for KaizenSettings {
             write_plaintext_secrets_to_env: false,
             show_only_masked_secrets_in_ui: true,
             mattermost_url: String::new(),
+            mattermost_token: String::new(),
             mattermost_channel_id: String::new(),
             selected_github_repo: String::new(),
             inference_provider: "codex-cli".to_string(),
@@ -128,6 +131,7 @@ pub struct SettingsPatch {
     pub write_plaintext_secrets_to_env: Option<bool>,
     pub show_only_masked_secrets_in_ui: Option<bool>,
     pub mattermost_url: Option<String>,
+    pub mattermost_token: Option<String>,
     pub mattermost_channel_id: Option<String>,
     pub selected_github_repo: Option<String>,
     pub inference_provider: Option<String>,
@@ -232,6 +236,9 @@ impl KaizenSettings {
         if let Ok(val) = std::env::var("MATTERMOST_URL") {
             self.mattermost_url = val;
         }
+        if let Ok(val) = std::env::var("MATTERMOST_TOKEN") {
+            self.mattermost_token = val;
+        }
         if let Ok(val) = std::env::var("MATTERMOST_CHANNEL_ID") {
             self.mattermost_channel_id = val;
         } else if let Ok(val) = std::env::var("CRYSTAL_BALL_CHANNEL") {
@@ -299,6 +306,9 @@ impl KaizenSettings {
         }
         if let Some(value) = patch.mattermost_url {
             self.mattermost_url = value;
+        }
+        if let Some(value) = patch.mattermost_token {
+            self.mattermost_token = value;
         }
         if let Some(value) = patch.mattermost_channel_id {
             self.mattermost_channel_id = value;
@@ -437,6 +447,7 @@ mod tests {
             write_plaintext_secrets_to_env: None,
             show_only_masked_secrets_in_ui: None,
             mattermost_url: None,
+            mattermost_token: None,
             mattermost_channel_id: None,
             selected_github_repo: None,
             inference_provider: None,

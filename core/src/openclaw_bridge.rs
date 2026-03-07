@@ -1,7 +1,27 @@
 use serde::Serialize;
 use serde_json::Value;
-use std::{collections::HashSet, env};
+use std::{
+    collections::HashSet,
+    env,
+    path::Path,
+    sync::{LazyLock, Mutex},
+    time::{Duration, Instant},
+};
+use tokio::time::timeout;
 use tokio::process::Command;
+
+static BRIDGE_STATUS_CACHE: LazyLock<Mutex<Option<CachedBridgeStatus>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+const BRIDGE_STATUS_TTL: Duration = Duration::from_secs(15);
+const COMMAND_TIMEOUT: Duration = Duration::from_millis(1500);
+
+#[derive(Debug, Clone)]
+struct CachedBridgeStatus {
+    recorded_at: Instant,
+    cli_available: bool,
+    gateway_reachable: bool,
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -20,6 +40,7 @@ pub struct OpenClawToolResult {
 
 #[derive(Debug, Clone)]
 enum OpenClawInvocation {
+    Tools,
     Sessions,
     Health,
     BrowserStatus,
@@ -32,6 +53,7 @@ enum OpenClawInvocation {
 impl OpenClawInvocation {
     fn tool_id(&self) -> &'static str {
         match self {
+            Self::Tools => "tools",
             Self::Sessions => "sessions",
             Self::Health => "health",
             Self::BrowserStatus | Self::BrowserTabs | Self::BrowserOpen { .. } => "browser",
@@ -41,6 +63,7 @@ impl OpenClawInvocation {
 
     fn args(&self) -> Vec<String> {
         match self {
+            Self::Tools => vec!["health".into(), "--json".into()],
             Self::Sessions => vec!["sessions".into(), "--json".into()],
             Self::Health => vec!["health".into(), "--json".into()],
             Self::BrowserStatus => vec!["browser".into(), "status".into(), "--json".into()],
@@ -59,12 +82,7 @@ impl OpenClawInvocation {
 
 pub async fn status() -> OpenClawBridgeStatus {
     let config = BridgeConfig::load();
-    let cli_available = openclaw_cli_available(&config).await;
-    let gateway_reachable = if cli_available {
-        command_succeeds(&config, &["health", "--json"]).await
-    } else {
-        false
-    };
+    let (cli_available, gateway_reachable) = resolve_bridge_health(&config).await;
 
     OpenClawBridgeStatus {
         enabled: config.enabled,
@@ -84,11 +102,11 @@ pub async fn maybe_execute_from_prompt(message: &str) -> Result<Option<OpenClawT
         return Ok(None);
     };
 
-    if !config.allowed_tools.contains(invocation.tool_id()) {
+    if !config.allowed_tools.contains(invocation.tool_id()) && invocation.tool_id() != "tools" {
         return Ok(None);
     }
 
-    let cli_available = openclaw_cli_available(&config).await;
+    let (cli_available, _) = resolve_bridge_health(&config).await;
     if !cli_available {
         return Ok(Some(OpenClawToolResult {
             tool_id: invocation.tool_id().to_string(),
@@ -96,10 +114,14 @@ pub async fn maybe_execute_from_prompt(message: &str) -> Result<Option<OpenClawT
         }));
     }
 
-    let output = run_invocation(&config, &invocation).await?;
+    let output = if matches!(invocation, OpenClawInvocation::Tools) {
+        String::new()
+    } else {
+        run_invocation(&config, &invocation).await?
+    };
     Ok(Some(OpenClawToolResult {
         tool_id: invocation.tool_id().to_string(),
-        reply: format_output(&invocation, &output),
+        reply: format_output(&config, &invocation, &output),
     }))
 }
 
@@ -127,7 +149,7 @@ impl BridgeConfig {
 
         let allowed_tools = env::var("ZEROCLAW_OPENCLAW_ALLOWED_TOOLS")
             .ok()
-            .unwrap_or_else(|| "sessions,browser,scheduler,health".to_string())
+            .unwrap_or_else(|| "sessions,browser,scheduler,health,tools".to_string())
             .split(',')
             .map(|item| item.trim().to_ascii_lowercase())
             .filter(|item| !item.is_empty())
@@ -142,21 +164,31 @@ impl BridgeConfig {
 }
 
 async fn openclaw_cli_available(config: &BridgeConfig) -> bool {
+    if looks_like_resolved_path(&config.cli_path) && Path::new(&config.cli_path).exists() {
+        return true;
+    }
+
     command_succeeds(config, &["--version"]).await
 }
 
 async fn command_succeeds(config: &BridgeConfig, args: &[&str]) -> bool {
-    Command::new(&config.cli_path)
-        .args(args)
-        .output()
-        .await
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    timeout(
+        COMMAND_TIMEOUT,
+        spawn_openclaw_command(config, args).output(),
+    )
+    .await
+    .ok()
+    .and_then(|result| result.ok())
+    .map(|output| output.status.success())
+    .unwrap_or(false)
 }
 
 async fn run_invocation(config: &BridgeConfig, invocation: &OpenClawInvocation) -> Result<String, String> {
-    let output = Command::new(&config.cli_path)
-        .args(invocation.args())
+    let args = invocation.args();
+    let output = spawn_openclaw_command(
+        config,
+        &args.iter().map(String::as_str).collect::<Vec<_>>(),
+    )
         .output()
         .await
         .map_err(|error| format!("Failed to start OpenClaw: {error}"))?;
@@ -178,6 +210,54 @@ async fn run_invocation(config: &BridgeConfig, invocation: &OpenClawInvocation) 
     }
 }
 
+fn spawn_openclaw_command(config: &BridgeConfig, args: &[&str]) -> Command {
+    if cfg!(windows)
+        && (config.cli_path.to_ascii_lowercase().ends_with(".cmd")
+            || config.cli_path.to_ascii_lowercase().ends_with(".bat"))
+    {
+        let mut command = Command::new("cmd");
+        command.arg("/C").arg(&config.cli_path);
+        command.args(args);
+        command
+    } else {
+        let mut command = Command::new(&config.cli_path);
+        command.args(args);
+        command
+    }
+}
+
+fn looks_like_resolved_path(cli_path: &str) -> bool {
+    cli_path.contains('\\') || cli_path.contains('/') || cli_path.contains(':')
+}
+
+async fn resolve_bridge_health(config: &BridgeConfig) -> (bool, bool) {
+    if let Some(cached) = BRIDGE_STATUS_CACHE
+        .lock()
+        .ok()
+        .and_then(|state| state.clone())
+        .filter(|entry| entry.recorded_at.elapsed() < BRIDGE_STATUS_TTL)
+    {
+        return (cached.cli_available, cached.gateway_reachable);
+    }
+
+    let cli_available = openclaw_cli_available(config).await;
+    let gateway_reachable = if cli_available {
+        command_succeeds(config, &["health", "--json"]).await
+    } else {
+        false
+    };
+
+    if let Ok(mut state) = BRIDGE_STATUS_CACHE.lock() {
+        *state = Some(CachedBridgeStatus {
+            recorded_at: Instant::now(),
+            cli_available,
+            gateway_reachable,
+        });
+    }
+
+    (cli_available, gateway_reachable)
+}
+
 fn detect_invocation(message: &str) -> Option<OpenClawInvocation> {
     let trimmed = message.trim();
     if trimmed.is_empty() {
@@ -189,6 +269,13 @@ fn detect_invocation(message: &str) -> Option<OpenClawInvocation> {
     }
 
     let lower = trimmed.to_ascii_lowercase();
+    if lower.contains("openclaw tools")
+        || lower.contains("use openclaw tools")
+        || lower.contains("what openclaw tools")
+        || lower.contains("openclaw fallback")
+    {
+        return Some(OpenClawInvocation::Tools);
+    }
     if lower.contains("openclaw sessions") || lower.contains("show openclaw sessions") {
         return Some(OpenClawInvocation::Sessions);
     }
@@ -227,6 +314,7 @@ fn parse_explicit_command(message: &str) -> Option<OpenClawInvocation> {
 
     let tokens: Vec<&str> = raw.split_whitespace().collect();
     match tokens.as_slice() {
+        ["tools"] => Some(OpenClawInvocation::Tools),
         ["sessions"] => Some(OpenClawInvocation::Sessions),
         ["health"] | ["status"] => Some(OpenClawInvocation::Health),
         ["browser", "status"] => Some(OpenClawInvocation::BrowserStatus),
@@ -248,8 +336,9 @@ fn first_url(message: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn format_output(invocation: &OpenClawInvocation, output: &str) -> String {
+fn format_output(config: &BridgeConfig, invocation: &OpenClawInvocation, output: &str) -> String {
     match invocation {
+        OpenClawInvocation::Tools => summarize_tools(config),
         OpenClawInvocation::Sessions => summarize_sessions(output),
         OpenClawInvocation::Health => summarize_health(output),
         OpenClawInvocation::BrowserStatus => summarize_browser_status(output),
@@ -258,6 +347,15 @@ fn format_output(invocation: &OpenClawInvocation, output: &str) -> String {
         OpenClawInvocation::CronStatus => summarize_cron_status(output),
         OpenClawInvocation::CronList => summarize_cron_list(output),
     }
+}
+
+fn summarize_tools(config: &BridgeConfig) -> String {
+    let mut tools = config.allowed_tools.iter().cloned().collect::<Vec<_>>();
+    tools.sort();
+    format!(
+        "OpenClaw fallback is enabled.\nAvailable fallback tools on this machine: {}.",
+        tools.join(", ")
+    )
 }
 
 fn summarize_sessions(output: &str) -> String {
@@ -350,6 +448,12 @@ mod tests {
     fn detects_explicit_sessions_command() {
         let invocation = detect_invocation("/openclaw sessions").expect("should detect");
         assert_eq!(invocation.tool_id(), "sessions");
+    }
+
+    #[test]
+    fn detects_openclaw_tools_prompt() {
+        let invocation = detect_invocation("can you use openclaw tools").expect("should detect");
+        assert_eq!(invocation.tool_id(), "tools");
     }
 
     #[test]

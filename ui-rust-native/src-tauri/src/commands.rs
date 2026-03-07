@@ -30,6 +30,8 @@ fn agent_window_label(agent_id: &str) -> String {
     format!("agent-{}", safe_id)
 }
 
+const OFFICE_WINDOW_LABEL: &str = "office-board";
+
 pub struct CoreClientState {
     pub core_base_url: String,
     pub client: reqwest::Client,
@@ -55,6 +57,13 @@ pub struct ReleaseUpdateStatus {
 pub struct ReleaseUpdateAction {
     pub started: bool,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetachedWindowStatus {
+    pub agent_ids: Vec<String>,
+    pub office_open: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -471,4 +480,51 @@ pub async fn close_agent_window(app: AppHandle, agent_id: String) -> Result<(), 
         info!(label = %label, "agent window closed");
     }
     Ok(())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn open_office_window(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(OFFICE_WINDOW_LABEL) {
+        window.set_focus().map_err(|e| e.to_string())?;
+        info!("office window already existed; focused");
+        return Ok(());
+    }
+
+    WindowBuilder::new(
+        &app,
+        OFFICE_WINDOW_LABEL,
+        WebviewUrl::App("/office".into()),
+    )
+    .title("Kaizen Office")
+    .inner_size(1400.0, 920.0)
+    .build()
+    .map_err(|e| e.to_string())?;
+
+    info!("office window created");
+    Ok(())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn focus_office_window(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(OFFICE_WINDOW_LABEL) {
+        window.set_focus().map_err(|e| e.to_string())?;
+        info!("office window focused");
+    }
+    Ok(())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn list_detached_windows(app: AppHandle) -> Result<DetachedWindowStatus, String> {
+    let mut agent_ids = Vec::new();
+    for label in app.webview_windows().keys() {
+        if let Some(agent_id) = label.strip_prefix("agent-") {
+            agent_ids.push(agent_id.to_string());
+        }
+    }
+    agent_ids.sort();
+
+    Ok(DetachedWindowStatus {
+        agent_ids,
+        office_open: app.get_webview_window(OFFICE_WINDOW_LABEL).is_some(),
+    })
 }

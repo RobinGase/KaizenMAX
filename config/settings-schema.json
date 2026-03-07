@@ -63,6 +63,11 @@
       "default": "",
       "description": "Mattermost server base URL for Crystal Ball bridge (set in UI Providers tab)."
     },
+    "mattermost_token": {
+      "type": "string",
+      "default": "",
+      "description": "Mattermost token used for Crystal Ball bridge publishing."
+    },
     "mattermost_channel_id": {
       "type": "string",
       "default": "",

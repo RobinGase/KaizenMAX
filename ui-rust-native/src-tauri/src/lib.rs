@@ -2,8 +2,8 @@ pub mod commands;
 
 use commands::{
     apply_release_update, check_release_update, close_agent_window, core_request,
-    focus_agent_window, open_agent_window, open_external_url, start_local_auth_flow,
-    CoreClientState,
+    focus_agent_window, focus_office_window, list_detached_windows, open_agent_window,
+    open_external_url, open_office_window, start_local_auth_flow, CoreClientState,
 };
 use std::sync::Once;
 
@@ -52,7 +52,10 @@ pub fn run() {
             open_external_url,
             open_agent_window,
             focus_agent_window,
-            close_agent_window
+            close_agent_window,
+            open_office_window,
+            focus_office_window,
+            list_detached_windows
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

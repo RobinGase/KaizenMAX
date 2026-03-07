@@ -204,6 +204,15 @@ function Ensure-OpenClawGateway {
 Load-EnvironmentFile -Path $envFile
 New-Item -ItemType Directory -Force $logsDir | Out-Null
 
+if ([string]::IsNullOrWhiteSpace($env:OPENCLAW_CLI_PATH)) {
+    $preferredOpenClaw = Join-Path $env:APPDATA "npm\openclaw.cmd"
+    try {
+        $resolvedOpenClaw = Get-ToolPath -PreferredPath $preferredOpenClaw -CommandName "openclaw"
+        [System.Environment]::SetEnvironmentVariable("OPENCLAW_CLI_PATH", $resolvedOpenClaw, "Process")
+    } catch {
+    }
+}
+
 $cargoPath = Get-ToolPath -PreferredPath (Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe") -CommandName "cargo"
 
 $coreSources = @(

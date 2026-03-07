@@ -1,3 +1,4 @@
+use base64::Engine as _;
 use gloo_timers::future::TimeoutFuture;
 use leptos::ev;
 use leptos::html;
@@ -165,14 +166,6 @@ fn compact_time(raw: &str) -> String {
     }
 }
 
-fn sender_label(role: &str) -> &'static str {
-    match role {
-        "assistant" | "agent" => "Kaizen",
-        "user" => "Operator",
-        _ => "System",
-    }
-}
-
 fn branch_label(value: &str) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -264,6 +257,16 @@ fn normalize_scope_key(value: &str) -> String {
         .collect::<String>()
         .trim_matches('-')
         .to_string()
+}
+
+fn prompt_text(message: &str, default_value: &str) -> Option<String> {
+    let window = web_sys::window()?;
+    window
+        .prompt_with_message_and_default(message, default_value)
+        .ok()
+        .flatten()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn event_timestamp_seconds(raw: &str) -> Option<f64> {
@@ -513,6 +516,42 @@ async fn core_request<T: for<'de> serde::Deserialize<'de>>(
     }
 }
 
+#[derive(Clone, PartialEq)]
+struct PendingChatImage {
+    name: String,
+    media_type: String,
+    data_base64: String,
+    preview_url: String,
+}
+
+fn message_sender_label(role: &str, assistant_label: &str) -> String {
+    match role {
+        "assistant" | "agent" => assistant_label.to_string(),
+        "user" => "Operator".to_string(),
+        _ => "System".to_string(),
+    }
+}
+
+async fn file_to_pending_image(file: web_sys::File) -> Result<PendingChatImage, String> {
+    let media_type = if file.type_().trim().is_empty() {
+        "image/png".to_string()
+    } else {
+        file.type_()
+    };
+    let buffer = JsFuture::from(file.array_buffer()).await.map_err(js_error)?;
+    let bytes = js_sys::Uint8Array::new(&buffer);
+    let mut raw = vec![0; bytes.length() as usize];
+    bytes.copy_to(&mut raw);
+    let data_base64 = base64::engine::general_purpose::STANDARD.encode(raw);
+    let preview_url = format!("data:{};base64,{}", media_type, data_base64);
+    Ok(PendingChatImage {
+        name: file.name(),
+        media_type,
+        data_base64,
+        preview_url,
+    })
+}
+
 async fn invoke_tauri_command<T: for<'de> serde::Deserialize<'de>>(cmd: &str) -> Result<T, String> {
     let args = serde_wasm_bindgen::to_value(&json!({})).map_err(|e| e.to_string())?;
     let response = tauri_invoke(cmd, args).await.map_err(js_error)?;
@@ -544,13 +583,32 @@ async fn start_local_auth_flow(provider: &str) -> Result<LocalAuthAction, String
     .await
 }
 
+async fn open_office_window() -> Result<(), String> {
+    let _: Value = invoke_tauri_command("open_office_window").await?;
+    Ok(())
+}
+
+async fn focus_office_window() -> Result<(), String> {
+    let _: Value = invoke_tauri_command("focus_office_window").await?;
+    Ok(())
+}
+
+async fn list_detached_windows() -> Result<DetachedWindowStatus, String> {
+    invoke_tauri_command("list_detached_windows").await
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub active_tab: RwSignal<TabId>,
+    pub active_chat_id: RwSignal<String>,
+    pub open_agent_tabs: RwSignal<Vec<String>>,
     pub health: RwSignal<Option<HealthResponse>>,
     pub agents: RwSignal<Vec<SubAgent>>,
+    pub topology: RwSignal<Vec<BranchTopologyNode>>,
     pub events: RwSignal<Vec<CrystalBallEvent>>,
     pub admin_token: RwSignal<String>,
+    pub detached_windows: RwSignal<HashSet<String>>,
+    pub office_window_open: RwSignal<bool>,
     pub release_update: RwSignal<Option<ReleaseUpdateStatus>>,
     pub update_busy: RwSignal<bool>,
     pub update_notice: RwSignal<String>,
@@ -560,10 +618,15 @@ impl AppState {
     fn new() -> Self {
         Self {
             active_tab: create_rw_signal(TabId::Mission),
+            active_chat_id: create_rw_signal("kaizen".to_string()),
+            open_agent_tabs: create_rw_signal(vec![]),
             health: create_rw_signal(None),
             agents: create_rw_signal(vec![]),
+            topology: create_rw_signal(vec![]),
             events: create_rw_signal(vec![]),
             admin_token: create_rw_signal(load_admin_token()),
+            detached_windows: create_rw_signal(HashSet::new()),
+            office_window_open: create_rw_signal(false),
             release_update: create_rw_signal(None),
             update_busy: create_rw_signal(false),
             update_notice: create_rw_signal(String::new()),
@@ -574,6 +637,33 @@ impl AppState {
         token_opt(&self.admin_token.get_untracked())
     }
 
+    fn open_agent_chat(&self, agent_id: &str) {
+        let trimmed = agent_id.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let target = trimmed.to_string();
+        self.open_agent_tabs.update(|tabs| {
+            if !tabs.iter().any(|existing| existing == &target) {
+                tabs.push(target.clone());
+            }
+        });
+        self.active_chat_id.set(target);
+        self.active_tab.set(TabId::Mission);
+    }
+
+    fn close_agent_chat(&self, agent_id: &str) {
+        let trimmed = agent_id.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        self.open_agent_tabs
+            .update(|tabs| tabs.retain(|existing| existing != trimmed));
+        if self.active_chat_id.get_untracked() == trimmed {
+            self.active_chat_id.set("kaizen".to_string());
+        }
+    }
+
     fn start_polling(&self) {
         let state = self.clone();
 
@@ -581,7 +671,9 @@ impl AppState {
         wasm_bindgen_futures::spawn_local(async move {
             let _ = state_init.refresh_health().await;
             let _ = state_init.refresh_agents().await;
+            let _ = state_init.refresh_topology().await;
             let _ = state_init.refresh_events().await;
+            let _ = state_init.refresh_detached_windows().await;
             let _ = state_init.refresh_release_update().await;
         });
 
@@ -591,10 +683,26 @@ impl AppState {
                 wasm_bindgen_futures::spawn_local(async move {
                     let _ = state_clone.refresh_health().await;
                     let _ = state_clone.refresh_agents().await;
+                    let _ = state_clone.refresh_topology().await;
                     let _ = state_clone.refresh_events().await;
                 });
             },
             Duration::from_secs(5),
+        ) {
+            on_cleanup(move || {
+                handle.clear();
+            });
+        }
+
+        let window_state = self.clone();
+        if let Ok(handle) = set_interval_with_handle(
+            move || {
+                let state_clone = window_state.clone();
+                wasm_bindgen_futures::spawn_local(async move {
+                    let _ = state_clone.refresh_detached_windows().await;
+                });
+            },
+            Duration::from_secs(2),
         ) {
             on_cleanup(move || {
                 handle.clear();
@@ -653,6 +761,26 @@ impl AppState {
         Ok(())
     }
 
+    async fn refresh_topology(&self) -> Result<(), String> {
+        let payload = core_request::<Vec<BranchTopologyNode>>(CoreRequestInput {
+            method: "GET".to_string(),
+            path: "/api/topology".to_string(),
+            body: None,
+            admin_token: None,
+        })
+        .await?;
+        self.topology.set(payload);
+        Ok(())
+    }
+
+    async fn refresh_detached_windows(&self) -> Result<(), String> {
+        let payload = list_detached_windows().await?;
+        self.detached_windows
+            .set(payload.agent_ids.into_iter().collect::<HashSet<_>>());
+        self.office_window_open.set(payload.office_open);
+        Ok(())
+    }
+
     async fn refresh_release_update(&self) -> Result<(), String> {
         let payload = check_release_update().await?;
         self.release_update.set(Some(payload));
@@ -667,17 +795,55 @@ fn MissionTabView(app_state: AppState) -> impl IntoView {
     let (is_sending, set_is_sending) = create_signal(false);
     let (is_streaming_reply, set_is_streaming_reply) = create_signal(false);
     let (chat_notice, set_chat_notice) = create_signal(String::new());
+    let (pending_images, set_pending_images) = create_signal(Vec::<PendingChatImage>::new());
 
     let chat_log_ref = create_node_ref::<html::Div>();
+    let image_input_ref = create_node_ref::<html::Input>();
+    let active_chat_key = create_memo(move |_| app_state.active_chat_id.get());
+    let active_agent = create_memo({
+        let app_state = app_state.clone();
+        move |_| {
+            let target_id = app_state.active_chat_id.get();
+            if target_id == "kaizen" {
+                None
+            } else {
+                app_state
+                    .agents
+                    .get()
+                    .into_iter()
+                    .find(|agent| agent.id == target_id)
+            }
+        }
+    });
+    let assistant_label = create_memo(move |_| {
+        active_agent
+            .get()
+            .map(|agent| agent.name)
+            .unwrap_or_else(|| "Kaizen".to_string())
+    });
+    let composer_placeholder = create_memo(move |_| {
+        active_agent
+            .get()
+            .map(|agent| format!("Message {}...", agent.name))
+            .unwrap_or_else(|| {
+                "Talk with Kaizen about priorities, staff, execution, or decisions...".to_string()
+            })
+    });
 
     let refresh_main_history: Rc<dyn Fn()> = Rc::new(move || {
         if is_sending.get_untracked() || is_streaming_reply.get_untracked() {
             return;
         }
+        let conversation_key = active_chat_key.get_untracked();
+        let path = if conversation_key == "kaizen" {
+            "/api/chat/history?limit=120".to_string()
+        } else {
+            format!("/api/chat/history?agent_id={}&limit=120", conversation_key)
+        };
         wasm_bindgen_futures::spawn_local(async move {
             if let Ok(res) = core_request::<ChatHistoryResponse>(CoreRequestInput {
                 method: "GET".to_string(),
-                path: "/api/chat/history?limit=120".to_string(),
+                path,
                 body: None,
                 admin_token: None,
             })
@@ -691,7 +857,14 @@ fn MissionTabView(app_state: AppState) -> impl IntoView {
     {
         let refresh_main_history = Rc::clone(&refresh_main_history);
         create_effect(move |_| {
+            let _ = active_chat_key.get();
             (refresh_main_history)();
+        });
+    }
+
+    {
+        let refresh_main_history = Rc::clone(&refresh_main_history);
+        create_effect(move |_| {
             let refresh_main_history = Rc::clone(&refresh_main_history);
             if let Ok(handle) =
                 set_interval_with_handle(move || (refresh_main_history)(), Duration::from_secs(3))
@@ -712,17 +885,74 @@ fn MissionTabView(app_state: AppState) -> impl IntoView {
         });
     }
 
+    let trigger_image_picker = {
+        let image_input_ref = image_input_ref.clone();
+        move |_| {
+            if let Some(input) = image_input_ref.get() {
+                input.click();
+            }
+        }
+    };
+
+    let add_images = {
+        move |ev: web_sys::Event| {
+            let Some(target) = ev.target() else {
+                return;
+            };
+            let Ok(input) = target.dyn_into::<web_sys::HtmlInputElement>() else {
+                return;
+            };
+            let Some(files) = input.files() else {
+                return;
+            };
+
+            let mut selected = Vec::new();
+            for idx in 0..files.length() {
+                if let Some(file) = files.get(idx) {
+                    selected.push(file);
+                }
+            }
+            input.set_value("");
+            if selected.is_empty() {
+                return;
+            }
+
+            wasm_bindgen_futures::spawn_local(async move {
+                let mut loaded = Vec::new();
+                for file in selected {
+                    match file_to_pending_image(file).await {
+                        Ok(image) => loaded.push(image),
+                        Err(error) => {
+                            set_chat_notice
+                                .set(format!("Failed to load selected image: {}", error));
+                            return;
+                        }
+                    }
+                }
+                set_pending_images.update(|images| images.extend(loaded));
+            });
+        }
+    };
+
     let send_main_message: Rc<dyn Fn()> = Rc::new({
         let app_state = app_state.clone();
         let refresh_main_history = Rc::clone(&refresh_main_history);
 
         move || {
             let text = input.get().trim().to_string();
-            if text.is_empty() || is_sending.get() {
+            let attachments = pending_images.get();
+            if (text.is_empty() && attachments.is_empty()) || is_sending.get() {
                 return;
             }
+            let active_chat = app_state.active_chat_id.get_untracked();
+            let agent_id = if active_chat == "kaizen" {
+                None
+            } else {
+                Some(active_chat)
+            };
 
             set_input.set(String::new());
+            set_pending_images.set(Vec::new());
             set_is_sending.set(true);
             set_is_streaming_reply.set(true);
             set_chat_notice.set(String::new());
@@ -731,10 +961,19 @@ fn MissionTabView(app_state: AppState) -> impl IntoView {
                 rows.push(InferenceChatMessage {
                     role: "user".to_string(),
                     content: text.clone(),
+                    attachments: attachments
+                        .iter()
+                        .map(|attachment| ChatAttachment {
+                            name: attachment.name.clone(),
+                            media_type: attachment.media_type.clone(),
+                            preview_url: Some(attachment.preview_url.clone()),
+                        })
+                        .collect(),
                 });
                 rows.push(InferenceChatMessage {
                     role: "assistant".to_string(),
                     content: String::new(),
+                    attachments: vec![],
                 });
             });
 
@@ -742,7 +981,11 @@ fn MissionTabView(app_state: AppState) -> impl IntoView {
             let refresh_main_history = Rc::clone(&refresh_main_history);
             wasm_bindgen_futures::spawn_local(async move {
                 let mut streamed_text = String::new();
-                let stream_result = stream_chat_reply(text.clone(), None, |token| {
+                let stream_result = stream_chat_reply(
+                    text.clone(),
+                    agent_id.clone(),
+                    attachments.clone(),
+                    |token| {
                     streamed_text.push_str(&token);
                     let partial = streamed_text.clone();
                     set_messages.update(|rows| {
@@ -750,7 +993,8 @@ fn MissionTabView(app_state: AppState) -> impl IntoView {
                             last.content = partial.clone();
                         }
                     });
-                })
+                },
+                )
                 .await;
 
                 match stream_result {
@@ -772,7 +1016,17 @@ fn MissionTabView(app_state: AppState) -> impl IntoView {
                             match core_request::<ChatResponse>(CoreRequestInput {
                                 method: "POST".to_string(),
                                 path: "/api/chat".to_string(),
-                                body: Some(json!({ "message": text })),
+                                body: Some(json!({
+                                    "message": text,
+                                    "agent_id": agent_id,
+                                    "attachments": attachments.iter().map(|attachment| {
+                                        json!({
+                                            "name": attachment.name,
+                                            "media_type": attachment.media_type,
+                                            "data_base64": attachment.data_base64,
+                                        })
+                                    }).collect::<Vec<_>>(),
+                                })),
                                 admin_token: None,
                             })
                             .await
@@ -812,7 +1066,86 @@ fn MissionTabView(app_state: AppState) -> impl IntoView {
 
     view! {
         <div class="main-mission">
+            <div class="mission-chat-tabs">
+                <button
+                    class=move || {
+                        if app_state.active_chat_id.get() == "kaizen" {
+                            "mission-chat-tab active"
+                        } else {
+                            "mission-chat-tab"
+                        }
+                    }
+                    on:click=move |_| app_state.active_chat_id.set("kaizen".to_string())
+                >
+                    "Kaizen"
+                </button>
+
+                <For
+                    each=move || app_state.open_agent_tabs.get()
+                    key=|agent_id| agent_id.clone()
+                    children=move |agent_id| {
+                        let app_state = app_state.clone();
+                        let tab_id = agent_id.clone();
+                        let tab_id_for_class = tab_id.clone();
+                        let tab_id_for_click = tab_id.clone();
+                        let tab_id_for_close = agent_id.clone();
+                        let tab_label = app_state
+                            .agents
+                            .get_untracked()
+                            .into_iter()
+                            .find(|agent| agent.id == agent_id)
+                            .map(|agent| agent.name)
+                            .unwrap_or_else(|| tab_id.clone());
+
+                        view! {
+                            <button
+                                class=move || {
+                                    if app_state.active_chat_id.get() == tab_id_for_class {
+                                        "mission-chat-tab active"
+                                    } else {
+                                        "mission-chat-tab"
+                                    }
+                                }
+                                on:click=move |_| app_state.active_chat_id.set(tab_id_for_click.clone())
+                            >
+                                <span>{tab_label}</span>
+                                <span
+                                    class="mission-chat-tab-close"
+                                    on:click=move |ev| {
+                                        ev.stop_propagation();
+                                        app_state.close_agent_chat(&tab_id_for_close);
+                                    }
+                                >
+                                    "×"
+                                </span>
+                            </button>
+                        }
+                    }
+                />
+            </div>
+
             <div class="chat-panel">
+                <div class="chat-context-head">
+                    <div class="chat-context-title">{move || assistant_label.get()}</div>
+                    <div class="chat-context-copy">
+                        {move || {
+                            active_agent
+                                .get()
+                                .map(|agent| {
+                                    format!(
+                                        "{} / {}",
+                                        branch_label(&agent.branch_id),
+                                        mission_label(&agent)
+                                    )
+                                })
+                                .unwrap_or_else(|| {
+                                    "CEO orchestration chat for company priorities, staffing, and execution."
+                                        .to_string()
+                                })
+                        }}
+                    </div>
+                </div>
+
                 <div
                     class="chat-log"
                     node_ref=chat_log_ref
@@ -822,8 +1155,26 @@ fn MissionTabView(app_state: AppState) -> impl IntoView {
                         if messages.get().is_empty() {
                             view! {
                                 <div class="chat-empty">
-                                    <div class="empty-title">"Mission console is live."</div>
-                                    <div class="empty-copy">"Send an instruction to Kaizen to begin execution."</div>
+                                    <div class="empty-title">
+                                        {move || {
+                                            if active_chat_key.get() == "kaizen" {
+                                                "Kaizen is ready to run the company.".to_string()
+                                            } else {
+                                                format!("{} is ready for direction.", assistant_label.get())
+                                            }
+                                        }}
+                                    </div>
+                                    <div class="empty-copy">
+                                        {move || {
+                                            if active_chat_key.get() == "kaizen" {
+                                                "Use plain language. Kaizen will reason with you, set direction, and coordinate staff when needed."
+                                                    .to_string()
+                                            } else {
+                                                "Use this tab to brief the worker directly, review progress, or attach context."
+                                                    .to_string()
+                                            }
+                                        }}
+                                    </div>
                                 </div>
                             }
                                 .into_view()
@@ -845,15 +1196,60 @@ fn MissionTabView(app_state: AppState) -> impl IntoView {
                                         } else {
                                             "message assistant"
                                         };
-                                        let sender = sender_label(&msg.role);
-                                        let content_view = if msg.role == "assistant" {
+                                        let sender = message_sender_label(&msg.role, &assistant_label.get());
+                                        let content_view = if msg.role == "assistant" && msg.content.trim().is_empty() {
+                                            view! {
+                                                <div class="message-body thinking-indicator">
+                                                    <span>"Kaizen is thinking"</span>
+                                                    <span class="thinking-dots">
+                                                        <span></span>
+                                                        <span></span>
+                                                        <span></span>
+                                                    </span>
+                                                </div>
+                                            }.into_view()
+                                        } else if msg.role == "assistant" {
                                             let rendered = render_markdown(&msg.content);
                                             view! {
                                                 <div class="message-body markdown-body" inner_html=rendered></div>
                                             }
                                                 .into_view()
                                         } else {
-                                            view! { <div class="message-body plain-message">{msg.content.clone()}</div> }
+                                            view! {
+                                                <div class="message-body plain-message">
+                                                    {msg.content.clone()}
+                                                    {if msg.attachments.is_empty() {
+                                                        ().into_view()
+                                                    } else {
+                                                        view! {
+                                                            <div class="message-attachments">
+                                                                {msg.attachments
+                                                                    .iter()
+                                                                    .map(|attachment| {
+                                                                        if let Some(preview_url) = attachment.preview_url.clone() {
+                                                                            view! {
+                                                                                <div class="message-attachment-card">
+                                                                                    <img class="message-attachment-preview" src=preview_url alt=attachment.name.clone() />
+                                                                                    <div class="message-attachment-label">{attachment.name.clone()}</div>
+                                                                                </div>
+                                                                            }
+                                                                                .into_view()
+                                                                        } else {
+                                                                            view! {
+                                                                                <div class="message-attachment-chip">
+                                                                                    {attachment.name.clone()}
+                                                                                </div>
+                                                                            }
+                                                                                .into_view()
+                                                                        }
+                                                                    })
+                                                                    .collect_view()}
+                                                            </div>
+                                                        }
+                                                            .into_view()
+                                                    }}
+                                                </div>
+                                            }
                                                 .into_view()
                                         };
                                         view! {
@@ -871,11 +1267,69 @@ fn MissionTabView(app_state: AppState) -> impl IntoView {
                 </div>
 
                 <div class="composer-container">
+                    {move || {
+                        if pending_images.get().is_empty() {
+                            ().into_view()
+                        } else {
+                            view! {
+                                <div class="pending-attachments">
+                                    {pending_images
+                                        .get()
+                                        .into_iter()
+                                        .enumerate()
+                                        .map(|(index, attachment)| {
+                                            let remove_index = index;
+                                            view! {
+                                                <div class="pending-attachment">
+                                                    <img class="pending-attachment-preview" src=attachment.preview_url.clone() alt=attachment.name.clone() />
+                                                    <div class="pending-attachment-meta">
+                                                        <div>{attachment.name.clone()}</div>
+                                                        <div>{attachment.media_type.clone()}</div>
+                                                    </div>
+                                                    <button
+                                                        class="tiny-icon-btn"
+                                                        on:click=move |_| {
+                                                            set_pending_images.update(|images| {
+                                                                if remove_index < images.len() {
+                                                                    images.remove(remove_index);
+                                                                }
+                                                            });
+                                                        }
+                                                    >
+                                                        "×"
+                                                    </button>
+                                                </div>
+                                            }
+                                        })
+                                        .collect_view()}
+                                </div>
+                            }
+                                .into_view()
+                        }
+                    }}
+
                     <div class="composer-row">
+                        <input
+                            node_ref=image_input_ref
+                            type="file"
+                            accept="image/*"
+                            multiple=true
+                            class="hidden-file-input"
+                            on:change=add_images
+                        />
+
+                        <button
+                            class="attach-btn"
+                            prop:disabled=move || is_sending.get()
+                            on:click=trigger_image_picker
+                        >
+                            "+"
+                        </button>
+
                         <textarea
                             class="composer"
                             rows="3"
-                            placeholder="Direct Kaizen..."
+                            placeholder=move || composer_placeholder.get()
                             prop:value=move || input.get()
                             prop:disabled=move || is_sending.get()
                             on:input=move |ev| set_input.set(event_target_value(&ev))
@@ -892,9 +1346,24 @@ fn MissionTabView(app_state: AppState) -> impl IntoView {
                             prop:disabled=move || is_sending.get()
                             on:click=move |_| (send_on_click)()
                         >
-                            {move || if is_sending.get() { "Sending..." } else { "Send" }}
+                            {move || if is_sending.get() { "Working..." } else { "Send" }}
                         </button>
                     </div>
+
+                    {move || {
+                        if is_streaming_reply.get() {
+                            view! { <div class="composer-hint">"Kaizen is reviewing the context and drafting a response."</div> }.into_view()
+                        } else if !pending_images.get().is_empty() {
+                            view! {
+                                <div class="composer-hint">
+                                    {format!("{} image attachment(s) ready to send.", pending_images.get().len())}
+                                </div>
+                            }
+                                .into_view()
+                        } else {
+                            ().into_view()
+                        }
+                    }}
 
                     {move || {
                         if chat_notice.get().is_empty() {
@@ -911,21 +1380,167 @@ fn MissionTabView(app_state: AppState) -> impl IntoView {
 }
 
 #[component]
-fn BranchesTabView(app_state: AppState) -> impl IntoView {
-    let branches = create_memo(move |_| grouped_branches(&app_state.agents.get()));
-    let branch_rows = create_memo(move |_| {
-        branches
-            .get()
-            .into_iter()
-            .collect::<Vec<(String, BTreeMap<String, Vec<SubAgent>>)>>()
+fn BranchesTabView(
+    app_state: AppState,
+    #[prop(default = false)] force_desk_view: bool,
+    #[prop(default = false)] detached_mode: bool,
+) -> impl IntoView {
+    let branch_rows = create_memo(move |_| app_state.topology.get());
+    let (show_desk_view, set_show_desk_view) = create_signal(force_desk_view);
+    let (branch_busy, set_branch_busy) = create_signal(false);
+    let (branch_notice, set_branch_notice) = create_signal(String::new());
+
+    let create_branch_quick: Rc<dyn Fn()> = Rc::new({
+        let app_state = app_state.clone();
+        move || {
+            if branch_busy.get() {
+                return;
+            }
+
+            let Some(branch_name) = prompt_text("Branch name", "Operations") else {
+                return;
+            };
+            let branch_id = normalize_scope_key(&branch_name);
+            if branch_id.is_empty() {
+                set_branch_notice.set("Branch name cannot be empty.".to_string());
+                return;
+            }
+
+            set_branch_busy.set(true);
+            let app_state = app_state.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                match core_request::<crate::models::types::Branch>(CoreRequestInput {
+                    method: "POST".to_string(),
+                    path: "/api/branches".to_string(),
+                    body: Some(json!({
+                        "id": branch_id,
+                        "name": branch_name,
+                    })),
+                    admin_token: None,
+                })
+                .await
+                {
+                    Ok(branch) => set_branch_notice.set(format!("Created branch '{}'.", branch.name)),
+                    Err(err) => set_branch_notice.set(err),
+                }
+                let _ = app_state.refresh_topology().await;
+                set_branch_busy.set(false);
+            });
+        }
     });
-    let (show_desk_view, set_show_desk_view) = create_signal(false);
+
+    let create_mission_quick: Rc<dyn Fn(String)> = Rc::new({
+        let app_state = app_state.clone();
+        move |branch_id: String| {
+            if branch_busy.get() {
+                return;
+            }
+
+            let Some(mission_name) = prompt_text("Mission name", "General") else {
+                return;
+            };
+            let mission_id = normalize_scope_key(&mission_name);
+            if mission_id.is_empty() {
+                set_branch_notice.set("Mission name cannot be empty.".to_string());
+                return;
+            }
+            let objective = prompt_text("Mission objective", "Mission objective pending")
+                .unwrap_or_else(|| "Mission objective pending".to_string());
+
+            set_branch_busy.set(true);
+            let app_state = app_state.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                match core_request::<Mission>(CoreRequestInput {
+                    method: "POST".to_string(),
+                    path: "/api/missions".to_string(),
+                    body: Some(json!({
+                        "id": mission_id,
+                        "branch_id": branch_id,
+                        "name": mission_name,
+                        "objective": objective,
+                    })),
+                    admin_token: None,
+                })
+                .await
+                {
+                    Ok(mission) => set_branch_notice.set(format!("Created mission '{}'.", mission.name)),
+                    Err(err) => set_branch_notice.set(err),
+                }
+                let _ = app_state.refresh_topology().await;
+                set_branch_busy.set(false);
+            });
+        }
+    });
+
+    let spawn_worker_quick: Rc<dyn Fn(String, String)> = Rc::new({
+        let app_state = app_state.clone();
+        move |branch_id: String, mission_id: String| {
+            if branch_busy.get() {
+                return;
+            }
+
+            let Some(worker_name) = prompt_text("Worker name", "New Worker") else {
+                return;
+            };
+            let objective = prompt_text("Worker objective", "Handle this mission")
+                .unwrap_or_else(|| "Handle this mission".to_string());
+
+            set_branch_busy.set(true);
+            let app_state = app_state.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                match core_request::<SubAgent>(CoreRequestInput {
+                    method: "POST".to_string(),
+                    path: "/api/agents".to_string(),
+                    body: Some(json!({
+                        "agent_name": worker_name,
+                        "branch_id": branch_id,
+                        "mission_id": mission_id,
+                        "task_id": mission_id,
+                        "objective": objective,
+                        "user_requested": true,
+                    })),
+                    admin_token: None,
+                })
+                .await
+                {
+                    Ok(agent) => set_branch_notice.set(format!("Added worker '{}'.", agent.name)),
+                    Err(err) => set_branch_notice.set(err),
+                }
+                let _ = app_state.refresh_agents().await;
+                let _ = app_state.refresh_topology().await;
+                let _ = app_state.refresh_events().await;
+                set_branch_busy.set(false);
+            });
+        }
+    });
+
+    let create_branch_button = Rc::clone(&create_branch_quick);
+    let create_mission_card = Rc::clone(&create_mission_quick);
+    let spawn_worker_card = Rc::clone(&spawn_worker_quick);
+    let office_window_open = app_state.office_window_open;
+    let app_state_for_office_toggle = app_state.clone();
+
+    let toggle_office_window: Rc<dyn Fn()> = Rc::new(move || {
+        let app_state = app_state_for_office_toggle.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let result = if app_state.office_window_open.get_untracked() {
+                focus_office_window().await
+            } else {
+                open_office_window().await
+            };
+
+            if let Err(error) = result {
+                set_branch_notice.set(format!("Office window failed: {}", error));
+            }
+            let _ = app_state.refresh_detached_windows().await;
+        });
+    });
 
     view! {
         <section class="tab-view">
             <div class="tab-head">
                 <h2>"Branches"</h2>
-                <p>"Company hierarchy with org chart and spatial office views."</p>
+                <p>"Shape the company structure and add workers where you need them."</p>
             </div>
 
             <div class="card toolbar-card">
@@ -935,11 +1550,7 @@ fn BranchesTabView(app_state: AppState) -> impl IntoView {
                         "Branches "
                         {move || {
                             let rows = branch_rows.get();
-                            if rows.is_empty() {
-                                0usize
-                            } else {
-                                rows.len()
-                            }
+                            rows.len()
                         }}
                     </span>
                     <span class="tiny-pill">
@@ -948,71 +1559,111 @@ fn BranchesTabView(app_state: AppState) -> impl IntoView {
                             branch_rows
                                 .get()
                                 .into_iter()
-                                .map(|(_, missions)| missions.len())
+                                .map(|branch| branch.missions.len())
                                 .sum::<usize>()
                         }}
                     </span>
+                    <button
+                        class="tiny-btn"
+                        prop:disabled=move || branch_busy.get()
+                        on:click=move |_| (create_branch_button)()
+                    >
+                        "+ Branch"
+                    </button>
 
-                    <div class="view-toggle">
-                        <button
-                            class=move || {
-                                if !show_desk_view.get() {
-                                    "tiny-btn active"
-                                } else {
-                                    "tiny-btn"
-                                }
-                            }
-                            on:click=move |_| set_show_desk_view.set(false)
-                        >
-                            "Org Chart"
-                        </button>
-                        <button
-                            class=move || {
-                                if show_desk_view.get() {
-                                    "tiny-btn active"
-                                } else {
-                                    "tiny-btn"
-                                }
-                            }
-                            on:click=move |_| set_show_desk_view.set(true)
-                        >
-                            "Office 2D"
-                        </button>
-                    </div>
+                    {if detached_mode {
+                        ().into_view()
+                    } else {
+                        let toggle_office_window = Rc::clone(&toggle_office_window);
+                        view! {
+                            <div class="view-toggle">
+                                <button
+                                    class=move || {
+                                        if !show_desk_view.get() {
+                                            "tiny-btn active"
+                                        } else {
+                                            "tiny-btn"
+                                        }
+                                    }
+                                    prop:disabled=force_desk_view
+                                    on:click=move |_| {
+                                        if !force_desk_view {
+                                            set_show_desk_view.set(false);
+                                        }
+                                    }
+                                >
+                                    "Org Chart"
+                                </button>
+                                <button
+                                    class=move || {
+                                        if show_desk_view.get() {
+                                            "tiny-btn active"
+                                        } else {
+                                            "tiny-btn"
+                                        }
+                                    }
+                                    on:click=move |_| set_show_desk_view.set(true)
+                                >
+                                    "Office 2D"
+                                </button>
+                                <button class="tiny-btn" on:click=move |_| (toggle_office_window)()>
+                                    {move || if office_window_open.get() { "Focus Office" } else { "Detach Office" }}
+                                </button>
+                            </div>
+                        }
+                            .into_view()
+                    }}
                 </div>
             </div>
 
             {move || {
+                if branch_notice.get().is_empty() {
+                    ().into_view()
+                } else {
+                    view! { <div class="notice neutral">{branch_notice.get()}</div> }.into_view()
+                }
+            }}
+
+            {{
+                let create_mission_card_source = Rc::clone(&create_mission_card);
+                let spawn_worker_card_source = Rc::clone(&spawn_worker_card);
+                let app_state_for_branches = app_state.clone();
+                move || {
+                let create_mission_card_outer = Rc::clone(&create_mission_card_source);
+                let spawn_worker_card_outer = Rc::clone(&spawn_worker_card_source);
+                let app_state = app_state_for_branches.clone();
                 if branch_rows.get().is_empty() {
-                    view! { <div class="card"><div class="muted">"No branch workers are active yet."</div></div> }
+                    view! { <div class="card"><div class="muted">"No branches yet. Create one to get started."</div></div> }
                         .into_view()
                 } else if show_desk_view.get() {
                     view! {
-                        <div class="desk-board office-board">
+                        <div class="desk-board office-board office-workbench">
                             <For
                                 each=move || branch_rows.get()
-                                key=|item| item.0.clone()
-                                children=move |item| {
-                                    let branch_id = item.0;
-                                    let missions = item
-                                        .1
-                                        .into_iter()
-                                        .collect::<Vec<(String, Vec<SubAgent>)>>();
+                                key=|item| item.branch.id.clone()
+                                children=move |branch_node| {
+                                    let branch_id = branch_node.branch.id.clone();
+                                    let branch_name = branch_node.branch.name.clone();
+                                    let missions = branch_node.missions;
                                     let mission_total = missions.len();
+                                    let create_mission = Rc::clone(&create_mission_card_outer);
+                                    let spawn_worker = Rc::clone(&spawn_worker_card_outer);
+                                    let branch_id_for_mission = branch_id.clone();
 
                                     view! {
                                         <article class="card desk-branch-card">
                                             <div class="desk-branch-head">
-                                                <h3>{format!("Branch: {}", branch_id)}</h3>
-                                                <span class="tiny-pill">
-                                                    {format!(
-                                                        "{} workers",
-                                                        missions
-                                                            .iter()
-                                                            .map(|(_, workers)| workers.len())
-                                                            .sum::<usize>()
-                                                    )}
-                                                </span>
+                                                <h3>{branch_name}</h3>
+                                                <div class="toolbar-inline">
+                                                    <span class="tiny-pill">{format!("{} workers", branch_node.total_workers)}</span>
+                                                    <button
+                                                        class="tiny-icon-btn"
+                                                        prop:disabled=move || branch_busy.get()
+                                                        on:click=move |_| (create_mission)(branch_id_for_mission.clone())
+                                                    >
+                                                        "+"
+                                                    </button>
+                                                </div>
                                             </div>
 
                                             <div class="office-floor">
@@ -1024,17 +1675,32 @@ fn BranchesTabView(app_state: AppState) -> impl IntoView {
                                                 {missions
                                                     .into_iter()
                                                     .enumerate()
-                                                    .map(|(mission_index, (mission_id, workers))| {
+                                                    .map(|(mission_index, mission_node)| {
+                                                        let mission_id = mission_node.mission.id.clone();
+                                                        let mission_name = mission_node.mission.name.clone();
+                                                        let workers = mission_node.workers;
                                                         let pod_style = mission_pod_style(mission_index, mission_total);
                                                         let worker_total = workers.len();
                                                         let lane_label = mission_lane_for_workers(&workers)
                                                             .replace('_', " ");
+                                                        let spawn_worker = Rc::clone(&spawn_worker);
+                                                        let branch_id = branch_id.clone();
+                                                        let app_state = app_state.clone();
 
                                                         view! {
                                                             <section class="mission-pod" style=pod_style>
                                                                 <div class="mission-pod-head">
-                                                                    <span>{mission_id.clone()}</span>
-                                                                    <span class="tiny-pill">{format!("{} | {}", worker_total, lane_label)}</span>
+                                                                    <span>{mission_name}</span>
+                                                                    <div class="toolbar-inline">
+                                                                        <span class="tiny-pill">{format!("{} | {}", worker_total, lane_label)}</span>
+                                                                        <button
+                                                                            class="tiny-icon-btn"
+                                                                            prop:disabled=move || branch_busy.get()
+                                                                            on:click=move |_| (spawn_worker)(branch_id.clone(), mission_id.clone())
+                                                                        >
+                                                                            "+"
+                                                                        </button>
+                                                                    </div>
                                                                 </div>
 
                                                                 <div class="pod-workers">
@@ -1044,14 +1710,21 @@ fn BranchesTabView(app_state: AppState) -> impl IntoView {
                                                                         .map(|(worker_index, worker)| {
                                                                             let status = status_class(&worker.status).to_string();
                                                                             let seat_style = worker_seat_style(worker_index, worker_total);
+                                                                            let app_state = app_state.clone();
                                                                             view! {
-                                                                                <div class="office-worker" style=seat_style>
+                                                                                <button
+                                                                                    class="office-worker"
+                                                                                    style=seat_style
+                                                                                    on:click=move |_| {
+                                                                                        app_state.open_agent_chat(&worker.id);
+                                                                                    }
+                                                                                >
                                                                                     <span class=format!("status-dot {}", status)></span>
                                                                                     <div class="worker-meta">
                                                                                         <div>{worker.name}</div>
                                                                                         <div class="agent-task">{worker.objective}</div>
                                                                                     </div>
-                                                                                </div>
+                                                                                </button>
                                                                             }
                                                                         })
                                                                         .collect_view()}
@@ -1080,42 +1753,67 @@ fn BranchesTabView(app_state: AppState) -> impl IntoView {
                                     </summary>
 
                                     <For
-                                        each=move || branch_rows.get()
-                                        key=|item| item.0.clone()
-                                        children=move |item| {
-                                            let branch_id = item.0;
-                                            let missions = item
-                                                .1
-                                                .into_iter()
-                                                .collect::<Vec<(String, Vec<SubAgent>)>>();
+                                each=move || branch_rows.get()
+                                        key=|item| item.branch.id.clone()
+                                        children=move |branch_node| {
+                                            let branch_id = branch_node.branch.id.clone();
+                                            let branch_name = branch_node.branch.name.clone();
+                                            let missions = branch_node.missions;
+                                            let create_mission = Rc::clone(&create_mission_card_outer);
+                                            let spawn_worker = Rc::clone(&spawn_worker_card_outer);
+                                            let branch_id_for_mission = branch_id.clone();
+                                            let app_state = app_state.clone();
 
                                             view! {
                                                 <details class="tree-group" open=true>
                                                     <summary class="tree-summary">
-                                                        <span>{format!("Branch: {}", branch_id)}</span>
-                                                        <span class="count-pill">
-                                                            {format!(
-                                                                "{} workers",
-                                                                missions
-                                                                    .iter()
-                                                                    .map(|(_, workers)| workers.len())
-                                                                    .sum::<usize>()
-                                                            )}
-                                                        </span>
+                                                        <span>{branch_name}</span>
+                                                        <div class="tree-actions">
+                                                            <span class="count-pill">{format!("{} workers", branch_node.total_workers)}</span>
+                                                            <button
+                                                                class="tiny-icon-btn"
+                                                                prop:disabled=move || branch_busy.get()
+                                                                on:click=move |ev| {
+                                                                    ev.prevent_default();
+                                                                    ev.stop_propagation();
+                                                                    (create_mission)(branch_id_for_mission.clone());
+                                                                }
+                                                            >
+                                                                "+"
+                                                            </button>
+                                                        </div>
                                                     </summary>
 
                                                     {missions
                                                         .into_iter()
-                                                        .map(|(mission_id, workers)| {
+                                                        .map(|mission_node| {
+                                                            let mission_id = mission_node.mission.id.clone();
+                                                            let mission_name = mission_node.mission.name.clone();
+                                                            let workers = mission_node.workers;
                                                             let active_count = workers
                                                                 .iter()
                                                                 .filter(|worker| matches!(worker.status, AgentStatus::Active))
                                                                 .count();
+                                                            let spawn_worker = Rc::clone(&spawn_worker);
+                                                            let branch_id = branch_id.clone();
                                                             view! {
                                                                 <details class="tree-group mission-node" open=true>
                                                                     <summary class="tree-summary">
-                                                                        <span>{format!("Mission: {}", mission_id)}</span>
-                                                                        <span class="count-pill">{format!("{}/{} active", active_count, workers.len())}</span>
+                                                                        <span>{mission_name}</span>
+                                                                        <div class="tree-actions">
+                                                                            <span class="count-pill">{format!("{}/{} active", active_count, workers.len())}</span>
+                                                                            <button
+                                                                                class="tiny-icon-btn"
+                                                                                prop:disabled=move || branch_busy.get()
+                                                                                on:click=move |ev| {
+                                                                                    ev.prevent_default();
+                                                                                    ev.stop_propagation();
+                                                                                    (spawn_worker)(branch_id.clone(), mission_id.clone());
+                                                                                }
+                                                                            >
+                                                                                "+"
+                                                                            </button>
+                                                                        </div>
                                                                     </summary>
 
                                                                     <div class="worker-list">
@@ -1123,12 +1821,18 @@ fn BranchesTabView(app_state: AppState) -> impl IntoView {
                                                                             .into_iter()
                                                                             .map(|worker| {
                                                                                 let status = status_class(&worker.status).to_string();
+                                                                                let app_state = app_state.clone();
                                                                                 view! {
-                                                                                    <div class="worker-row">
+                                                                                    <button
+                                                                                        class="worker-row"
+                                                                                        on:click=move |_| {
+                                                                                            app_state.open_agent_chat(&worker.id);
+                                                                                        }
+                                                                                    >
                                                                                         <span class=format!("status-dot {}", status)></span>
                                                                                         <span class="worker-name">{worker.name}</span>
                                                                                         <span class="worker-status">{status_label(&worker.status)}</span>
-                                                                                    </div>
+                                                                                    </button>
                                                                                 }
                                                                             })
                                                                             .collect_view()}
@@ -1147,7 +1851,7 @@ fn BranchesTabView(app_state: AppState) -> impl IntoView {
                     }
                         .into_view()
                 }
-            }}
+            }}}
         </section>
     }
 }
@@ -1155,6 +1859,7 @@ fn BranchesTabView(app_state: AppState) -> impl IntoView {
 async fn stream_chat_reply(
     message: String,
     agent_id: Option<String>,
+    attachments: Vec<PendingChatImage>,
     mut on_token: impl FnMut(String),
 ) -> Result<String, String> {
     let window = web_sys::window().ok_or_else(|| "window unavailable".to_string())?;
@@ -1166,6 +1871,13 @@ async fn stream_chat_reply(
     let payload = json!({
         "message": message,
         "agent_id": agent_id,
+        "attachments": attachments.iter().map(|attachment| {
+            json!({
+                "name": attachment.name,
+                "media_type": attachment.media_type,
+                "data_base64": attachment.data_base64,
+            })
+        }).collect::<Vec<_>>(),
     });
     let payload_text = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
     init.set_body(&JsValue::from_str(&payload_text));
@@ -3348,6 +4060,9 @@ fn SettingsTabView(app_state: AppState) -> impl IntoView {
     let (inference_max_tokens, set_inference_max_tokens) = create_signal(String::new());
     let (inference_temperature, set_inference_temperature) = create_signal(String::new());
     let (selected_repo, set_selected_repo) = create_signal(String::new());
+    let (mattermost_url, set_mattermost_url) = create_signal(String::new());
+    let (mattermost_token, set_mattermost_token) = create_signal(String::new());
+    let (mattermost_channel_id, set_mattermost_channel_id) = create_signal(String::new());
 
     let (auto_spawn_subagents, set_auto_spawn_subagents) = create_signal(false);
     let (orchestrator_full_control, set_orchestrator_full_control) = create_signal(true);
@@ -3380,6 +4095,9 @@ fn SettingsTabView(app_state: AppState) -> impl IntoView {
                         set_inference_max_tokens.set(settings.inference_max_tokens.to_string());
                         set_inference_temperature.set(settings.inference_temperature.to_string());
                         set_selected_repo.set(settings.selected_github_repo);
+                        set_mattermost_url.set(settings.mattermost_url);
+                        set_mattermost_token.set(settings.mattermost_token);
+                        set_mattermost_channel_id.set(settings.mattermost_channel_id);
                         set_auto_spawn_subagents.set(settings.auto_spawn_subagents);
                         set_orchestrator_full_control.set(settings.orchestrator_full_control);
                         set_allow_direct_chat.set(settings.allow_direct_user_to_subagent_chat);
@@ -3430,6 +4148,9 @@ fn SettingsTabView(app_state: AppState) -> impl IntoView {
                         "inference_max_tokens": max_tokens_value,
                         "inference_temperature": temperature_value,
                         "selected_github_repo": selected_repo.get(),
+                        "mattermost_url": mattermost_url.get(),
+                        "mattermost_token": mattermost_token.get(),
+                        "mattermost_channel_id": mattermost_channel_id.get(),
                         "auto_spawn_subagents": auto_spawn_subagents.get(),
                         "orchestrator_full_control": orchestrator_full_control.get(),
                         "allow_direct_user_to_subagent_chat": allow_direct_chat.get(),
@@ -3539,6 +4260,18 @@ fn SettingsTabView(app_state: AppState) -> impl IntoView {
                         <input type="checkbox" checked=move || human_smoke_required.get() on:change=move |ev| set_human_smoke_required.set(event_target_checked(&ev)) />
                         <span>"Require human smoke test before deploy"</span>
                     </label>
+                    <label>
+                        <span>"Mattermost URL"</span>
+                        <input class="text-input" prop:value=move || mattermost_url.get() on:input=move |ev| set_mattermost_url.set(event_target_value(&ev)) />
+                    </label>
+                    <label>
+                        <span>"Mattermost Token"</span>
+                        <input class="text-input" type="password" prop:value=move || mattermost_token.get() on:input=move |ev| set_mattermost_token.set(event_target_value(&ev)) />
+                    </label>
+                    <label>
+                        <span>"Mattermost Channel ID"</span>
+                        <input class="text-input" prop:value=move || mattermost_channel_id.get() on:input=move |ev| set_mattermost_channel_id.set(event_target_value(&ev)) />
+                    </label>
                 </div>
 
                 <div class="toolbar-inline" style="margin-top: 10px;">
@@ -3570,7 +4303,6 @@ pub fn MainMissionView() -> impl IntoView {
     let left_width = create_rw_signal(278);
     let right_width = create_rw_signal(320);
     let dragging = create_rw_signal(None::<&'static str>);
-    let detached_windows = create_rw_signal(HashSet::<String>::new());
 
     window_event_listener(ev::mousemove, move |ev| {
         if let Some(side) = dragging.get_untracked() {
@@ -3593,6 +4325,8 @@ pub fn MainMissionView() -> impl IntoView {
     });
 
     let app_state_for_tabs = app_state.clone();
+    let app_state_for_agent_list = app_state.clone();
+    let app_state_for_sidebar = app_state.clone();
 
     view! {
         <div class="app-shell">
@@ -3658,6 +4392,7 @@ pub fn MainMissionView() -> impl IntoView {
                         <div class="panel-title">"Agents"</div>
                         <div class="agent-list">
                             {move || {
+                                let app_state = app_state_for_agent_list.clone();
                                 if app_state.agents.get().is_empty() {
                                     view! { <div class="agent-empty">"No active sub-agents."</div> }.into_view()
                                 } else {
@@ -3666,9 +4401,15 @@ pub fn MainMissionView() -> impl IntoView {
                                             each=move || app_state.agents.get()
                                             key=|agent| agent.id.clone()
                                             children=move |agent| {
+                                                let app_state = app_state.clone();
                                                 let id_for_click = agent.id.clone();
                                                 let id_for_class = agent.id.clone();
                                                 let id_for_label = agent.id.clone();
+                                                let id_for_open = agent.id.clone();
+                                                let app_state_for_open = app_state.clone();
+                                                let app_state_for_status = app_state.clone();
+                                                let app_state_for_click = app_state.clone();
+                                                let app_state_for_label = app_state.clone();
                                                 let status = status_class(&agent.status).to_string();
                                                 let agent_name = agent.name.clone();
                                                 let agent_scope = format!(
@@ -3679,17 +4420,20 @@ pub fn MainMissionView() -> impl IntoView {
 
                                                 view! {
                                                     <div class="agent-item">
-                                                        <div class="agent-meta">
+                                                        <button
+                                                            class="agent-meta agent-open"
+                                                            on:click=move |_| app_state_for_open.open_agent_chat(&id_for_open)
+                                                        >
                                                             <span class=format!("status-dot {}", status)></span>
                                                             <div>
                                                                 <div class="agent-name">{agent_name}</div>
                                                                 <div class="agent-task">{agent_scope}</div>
                                                             </div>
-                                                        </div>
+                                                        </button>
 
                                                         <button
                                                             class=move || {
-                                                                if detached_windows.with(|set| set.contains(&id_for_class)) {
+                                                                if app_state_for_status.detached_windows.with(|set| set.contains(&id_for_class)) {
                                                                     "agent-action detached"
                                                                 } else {
                                                                     "agent-action"
@@ -3697,21 +4441,20 @@ pub fn MainMissionView() -> impl IntoView {
                                                             }
                                                             on:click=move |_| {
                                                                 let id = id_for_click.clone();
-                                                                let focused = detached_windows.with(|set| set.contains(&id));
+                                                                let focused = app_state_for_click.detached_windows.with(|set| set.contains(&id));
+                                                                let app_state = app_state_for_click.clone();
                                                                 wasm_bindgen_futures::spawn_local(async move {
                                                                     if focused {
                                                                         focus_agent(id.clone()).await;
                                                                     } else {
                                                                         detach_agent(id.clone()).await;
                                                                     }
-                                                                    detached_windows.update(|set| {
-                                                                        set.insert(id);
-                                                                    });
+                                                                    let _ = app_state.refresh_detached_windows().await;
                                                                 });
                                                             }
                                                         >
                                                             {move || {
-                                                                if detached_windows.with(|set| set.contains(&id_for_label)) {
+                                                                if app_state_for_label.detached_windows.with(|set| set.contains(&id_for_label)) {
                                                                     "Focus"
                                                                 } else {
                                                                     "Detach"
@@ -3862,60 +4605,79 @@ pub fn MainMissionView() -> impl IntoView {
                         <details class="tree-group" open=true>
                             <summary class="tree-summary">
                                 <span>"Orchestrator"</span>
-                                <span class="count-pill">{move || app_state.agents.get().len()} " workers"</span>
+                                <div class="tree-actions">
+                                    <span class="count-pill">{move || app_state.agents.get().len()} " workers"</span>
+                                    <button
+                                        class="tiny-icon-btn"
+                                        on:click=move |ev| {
+                                            ev.prevent_default();
+                                            ev.stop_propagation();
+                                            app_state.active_tab.set(TabId::Branches);
+                                        }
+                                    >
+                                        "+"
+                                    </button>
+                                </div>
                             </summary>
 
                             {move || {
-                                let branches = grouped_branches(&app_state.agents.get())
-                                    .into_iter()
-                                    .collect::<Vec<(String, BTreeMap<String, Vec<SubAgent>>)>>();
+                                let app_state = app_state_for_sidebar.clone();
+                                let branches = app_state.topology.get();
 
                                 if branches.is_empty() {
-                                    view! { <div class="muted">"No active branch workers."</div> }.into_view()
+                                    view! { <div class="muted">"No branches yet. Open Branches to add one."</div> }.into_view()
                                 } else {
                                     branches
                                         .into_iter()
-                                        .map(|(branch_id, missions)| {
-                                            let workers_total = missions
-                                                .values()
-                                                .map(|workers| workers.len())
-                                                .sum::<usize>();
-                                            let active_total = missions
-                                                .values()
-                                                .map(|workers| {
-                                                    workers
-                                                        .iter()
-                                                        .filter(|worker| matches!(worker.status, AgentStatus::Active))
-                                                        .count()
-                                                })
-                                                .sum::<usize>();
-
-                                            let mission_rows = missions
-                                                .into_iter()
-                                                .collect::<Vec<(String, Vec<SubAgent>)>>();
+                                        .map(|branch_node| {
+                                            let branch_name = branch_node.branch.name.clone();
+                                            let mission_rows = branch_node.missions;
 
                                             view! {
                                                 <details class="tree-group" open=true>
                                                     <summary class="tree-summary">
-                                                        <span>{format!("Branch: {}", branch_id)}</span>
-                                                        <span class="count-pill">{format!("{}/{} active", active_total, workers_total)}</span>
+                                                        <span>{branch_name}</span>
+                                                        <div class="tree-actions">
+                                                            <span class="count-pill">{format!("{}/{} active", branch_node.active_workers, branch_node.total_workers)}</span>
+                                                            <button
+                                                                class="tiny-icon-btn"
+                                                                on:click=move |ev| {
+                                                                    ev.prevent_default();
+                                                                    ev.stop_propagation();
+                                                                    app_state.active_tab.set(TabId::Branches);
+                                                                }
+                                                            >
+                                                                "+"
+                                                            </button>
+                                                        </div>
                                                     </summary>
 
                                                     <div class="mission-nodes">
                                                         {mission_rows
                                                             .into_iter()
-                                                            .map(|(mission_id, workers)| {
-                                                                let active_count = workers
-                                                                    .iter()
-                                                                    .filter(|worker| matches!(worker.status, AgentStatus::Active))
-                                                                    .count();
-                                                                let total_count = workers.len();
+                                                            .map(|mission_node| {
+                                                                let active_count = mission_node.active_workers;
+                                                                let total_count = mission_node.workers.len();
+                                                                let mission_name = mission_node.mission.name.clone();
+                                                                let workers = mission_node.workers;
 
                                                                 view! {
                                                                     <details class="tree-group mission-node" open=true>
                                                                         <summary class="tree-summary">
-                                                                            <span>{format!("Mission: {}", mission_id)}</span>
-                                                                            <span class="count-pill">{format!("{}/{}", active_count, total_count)}</span>
+                                                                            <span>{mission_name}</span>
+                                                                            <div class="tree-actions">
+                                                                                <span class="count-pill">{format!("{}/{}", active_count, total_count)}</span>
+                                                                                <button
+                                                                                    class="tiny-icon-btn"
+                                                                                    on:click=move |ev| {
+                                                                                        ev.prevent_default();
+                                                                                        ev.stop_propagation();
+                                                                                        app_state.active_tab.set(TabId::Branches);
+                                                                                    }
+                                                                                >
+                                                                                    "+"
+                                                                                </button>
+                                                                            </div>
                                                                         </summary>
 
                                                                         <div class="worker-nodes">
@@ -3923,14 +4685,20 @@ pub fn MainMissionView() -> impl IntoView {
                                                                                 .into_iter()
                                                                                 .map(|worker| {
                                                                                     let status = status_class(&worker.status).to_string();
+                                                                                    let app_state = app_state.clone();
                                                                                     view! {
-                                                                                        <div class="worker-node">
+                                                                                        <button
+                                                                                            class="worker-node"
+                                                                                            on:click=move |_| {
+                                                                                                app_state.open_agent_chat(&worker.id);
+                                                                                            }
+                                                                                        >
                                                                                             <span class=format!("status-dot {}", status)></span>
                                                                                             <div class="worker-meta">
                                                                                                 <div>{worker.name}</div>
                                                                                                 <div class="agent-task">{worker.objective}</div>
                                                                                             </div>
-                                                                                        </div>
+                                                                                        </button>
                                                                                     }
                                                                                 })
                                                                                 .collect_view()}
@@ -3957,6 +4725,7 @@ pub fn MainMissionView() -> impl IntoView {
 
 #[component]
 pub fn DetachedChatView() -> impl IntoView {
+    let app_state = use_context::<AppState>().unwrap_or_else(AppState::new);
     let params = use_params_map();
     let agent_id = move || params.with(|p| p.get("id").cloned().unwrap_or_default());
 
@@ -3965,7 +4734,22 @@ pub fn DetachedChatView() -> impl IntoView {
     let (is_sending, set_is_sending) = create_signal(false);
     let (is_streaming_reply, set_is_streaming_reply) = create_signal(false);
     let (chat_error, set_chat_error) = create_signal(String::new());
+    let (pending_images, set_pending_images) = create_signal(Vec::<PendingChatImage>::new());
     let chat_log_ref = create_node_ref::<html::Div>();
+    let image_input_ref = create_node_ref::<html::Input>();
+    let agent_label = create_memo({
+        let app_state = app_state.clone();
+        move |_| {
+            let id = agent_id();
+            app_state
+                .agents
+                .get()
+                .into_iter()
+                .find(|agent| agent.id == id)
+                .map(|agent| agent.name)
+                .unwrap_or(id)
+        }
+    });
 
     let refresh_history: Rc<dyn Fn()> = Rc::new(move || {
         let id = agent_id();
@@ -4018,11 +4802,13 @@ pub fn DetachedChatView() -> impl IntoView {
         move || {
             let id = agent_id();
             let text = input.get().trim().to_string();
-            if text.is_empty() || id.is_empty() || is_sending.get() {
+            let attachments = pending_images.get();
+            if (text.is_empty() && attachments.is_empty()) || id.is_empty() || is_sending.get() {
                 return;
             }
 
             set_input.set(String::new());
+            set_pending_images.set(Vec::new());
             set_is_sending.set(true);
             set_is_streaming_reply.set(true);
             set_chat_error.set(String::new());
@@ -4031,17 +4817,30 @@ pub fn DetachedChatView() -> impl IntoView {
                 rows.push(InferenceChatMessage {
                     role: "user".to_string(),
                     content: text.clone(),
+                    attachments: attachments
+                        .iter()
+                        .map(|attachment| ChatAttachment {
+                            name: attachment.name.clone(),
+                            media_type: attachment.media_type.clone(),
+                            preview_url: Some(attachment.preview_url.clone()),
+                        })
+                        .collect(),
                 });
                 rows.push(InferenceChatMessage {
                     role: "assistant".to_string(),
                     content: String::new(),
+                    attachments: vec![],
                 });
             });
 
             let refresh_history = Rc::clone(&refresh_history);
             wasm_bindgen_futures::spawn_local(async move {
                 let mut streamed_text = String::new();
-                let stream_result = stream_chat_reply(text.clone(), Some(id.clone()), |token| {
+                let stream_result = stream_chat_reply(
+                    text.clone(),
+                    Some(id.clone()),
+                    attachments.clone(),
+                    |token| {
                     streamed_text.push_str(&token);
                     let partial = streamed_text.clone();
                     set_messages.update(|rows| {
@@ -4049,7 +4848,8 @@ pub fn DetachedChatView() -> impl IntoView {
                             last.content = partial.clone();
                         }
                     });
-                })
+                },
+                )
                 .await;
 
                 match stream_result {
@@ -4074,6 +4874,13 @@ pub fn DetachedChatView() -> impl IntoView {
                                 body: Some(json!({
                                     "message": text,
                                     "agent_id": Some(id),
+                                    "attachments": attachments.iter().map(|attachment| {
+                                        json!({
+                                            "name": attachment.name,
+                                            "media_type": attachment.media_type,
+                                            "data_base64": attachment.data_base64,
+                                        })
+                                    }).collect::<Vec<_>>(),
                                 })),
                                 admin_token: None,
                             })
@@ -4109,12 +4916,56 @@ pub fn DetachedChatView() -> impl IntoView {
 
     let send_on_enter = Rc::clone(&send_message);
     let send_on_click = Rc::clone(&send_message);
+    let trigger_image_picker = {
+        let image_input_ref = image_input_ref.clone();
+        move |_| {
+            if let Some(input) = image_input_ref.get() {
+                input.click();
+            }
+        }
+    };
+    let add_images = {
+        move |ev: web_sys::Event| {
+            let Some(target) = ev.target() else {
+                return;
+            };
+            let Ok(input) = target.dyn_into::<web_sys::HtmlInputElement>() else {
+                return;
+            };
+            let Some(files) = input.files() else {
+                return;
+            };
+            let mut selected = Vec::new();
+            for idx in 0..files.length() {
+                if let Some(file) = files.get(idx) {
+                    selected.push(file);
+                }
+            }
+            input.set_value("");
+            if selected.is_empty() {
+                return;
+            }
+            wasm_bindgen_futures::spawn_local(async move {
+                let mut loaded = Vec::new();
+                for file in selected {
+                    match file_to_pending_image(file).await {
+                        Ok(image) => loaded.push(image),
+                        Err(error) => {
+                            set_chat_error.set(format!("Failed to load selected image: {}", error));
+                            return;
+                        }
+                    }
+                }
+                set_pending_images.update(|images| images.extend(loaded));
+            });
+        }
+    };
 
     view! {
         <div class="app-shell" style="grid-template-columns: 1fr;">
             <main class="main-shell">
                 <header class="top-bar">
-                    <span class="status-chip">"Detached Agent Chat: " {agent_id}</span>
+                    <span class="status-chip">"Detached Agent Chat: " {move || agent_label.get()}</span>
                 </header>
 
                 <div class="chat-panel">
@@ -4139,15 +4990,56 @@ pub fn DetachedChatView() -> impl IntoView {
                                 } else {
                                     "message assistant"
                                 };
-                                let sender = sender_label(&msg.role);
-                                let content_view = if msg.role == "assistant" {
+                                let sender = message_sender_label(&msg.role, &agent_label.get());
+                                let content_view = if msg.role == "assistant" && msg.content.trim().is_empty() {
+                                    view! {
+                                        <div class="message-body thinking-indicator">
+                                            <span>"Kaizen is thinking"</span>
+                                            <span class="thinking-dots">
+                                                <span></span>
+                                                <span></span>
+                                                <span></span>
+                                            </span>
+                                        </div>
+                                    }.into_view()
+                                } else if msg.role == "assistant" {
                                     let rendered = render_markdown(&msg.content);
                                     view! {
                                         <div class="message-body markdown-body" inner_html=rendered></div>
                                     }
                                         .into_view()
                                 } else {
-                                    view! { <div class="message-body plain-message">{msg.content.clone()}</div> }
+                                    view! {
+                                        <div class="message-body plain-message">
+                                            {msg.content.clone()}
+                                            {if msg.attachments.is_empty() {
+                                                ().into_view()
+                                            } else {
+                                                view! {
+                                                    <div class="message-attachments">
+                                                        {msg.attachments
+                                                            .iter()
+                                                            .map(|attachment| {
+                                                                if let Some(preview_url) = attachment.preview_url.clone() {
+                                                                    view! {
+                                                                        <div class="message-attachment-card">
+                                                                            <img class="message-attachment-preview" src=preview_url alt=attachment.name.clone() />
+                                                                            <div class="message-attachment-label">{attachment.name.clone()}</div>
+                                                                        </div>
+                                                                    }
+                                                                        .into_view()
+                                                                } else {
+                                                                    view! {
+                                                                        <div class="message-attachment-chip">{attachment.name.clone()}</div>
+                                                                    }.into_view()
+                                                                }
+                                                            })
+                                                            .collect_view()}
+                                                    </div>
+                                                }.into_view()
+                                            }}
+                                        </div>
+                                    }
                                         .into_view()
                                 };
                                 view! {
@@ -4161,11 +5053,65 @@ pub fn DetachedChatView() -> impl IntoView {
                     </div>
 
                     <div class="composer-container">
+                        {move || {
+                            if pending_images.get().is_empty() {
+                                ().into_view()
+                            } else {
+                                view! {
+                                    <div class="pending-attachments">
+                                        {pending_images
+                                            .get()
+                                            .into_iter()
+                                            .enumerate()
+                                            .map(|(index, attachment)| {
+                                                let remove_index = index;
+                                                view! {
+                                                    <div class="pending-attachment">
+                                                        <img class="pending-attachment-preview" src=attachment.preview_url.clone() alt=attachment.name.clone() />
+                                                        <div class="pending-attachment-meta">
+                                                            <div>{attachment.name.clone()}</div>
+                                                            <div>{attachment.media_type.clone()}</div>
+                                                        </div>
+                                                        <button
+                                                            class="tiny-icon-btn"
+                                                            on:click=move |_| {
+                                                                set_pending_images.update(|images| {
+                                                                    if remove_index < images.len() {
+                                                                        images.remove(remove_index);
+                                                                    }
+                                                                });
+                                                            }
+                                                        >
+                                                            "×"
+                                                        </button>
+                                                    </div>
+                                                }
+                                            })
+                                            .collect_view()}
+                                    </div>
+                                }.into_view()
+                            }
+                        }}
                         <div class="composer-row">
+                            <input
+                                node_ref=image_input_ref
+                                type="file"
+                                accept="image/*"
+                                multiple=true
+                                class="hidden-file-input"
+                                on:change=add_images
+                            />
+                            <button
+                                class="attach-btn"
+                                prop:disabled=move || is_sending.get()
+                                on:click=trigger_image_picker
+                            >
+                                "+"
+                            </button>
                             <textarea
                                 class="composer"
                                 rows="3"
-                                placeholder="Message agent..."
+                                placeholder=move || format!("Message {}...", agent_label.get())
                                 prop:value=move || input.get()
                                 prop:disabled=move || is_sending.get()
                                 on:input=move |ev| set_input.set(event_target_value(&ev))
@@ -4187,6 +5133,20 @@ pub fn DetachedChatView() -> impl IntoView {
                         </div>
 
                         {move || {
+                            if is_streaming_reply.get() {
+                                view! { <div class="composer-hint">"Worker is reviewing the latest brief."</div> }.into_view()
+                            } else if !pending_images.get().is_empty() {
+                                view! {
+                                    <div class="composer-hint">
+                                        {format!("{} image attachment(s) ready to send.", pending_images.get().len())}
+                                    </div>
+                                }.into_view()
+                            } else {
+                                ().into_view()
+                            }
+                        }}
+
+                        {move || {
                             if chat_error.get().is_empty() {
                                 ().into_view()
                             } else {
@@ -4195,6 +5155,25 @@ pub fn DetachedChatView() -> impl IntoView {
                         }}
                     </div>
                 </div>
+            </main>
+        </div>
+    }
+}
+
+#[component]
+pub fn OfficeWindowView() -> impl IntoView {
+    let app_state = use_context::<AppState>().unwrap_or_else(AppState::new);
+
+    view! {
+        <div class="app-shell" style="grid-template-columns: 1fr;">
+            <main class="main-shell office-detached-shell">
+                <header class="top-bar">
+                    <div class="status-block">
+                        <span class="status-chip ok">"Office Board"</span>
+                        <span class="status-meta">"Detached company layout and worker map"</span>
+                    </div>
+                </header>
+                <BranchesTabView app_state=app_state force_desk_view=true detached_mode=true />
             </main>
         </div>
     }
@@ -4212,6 +5191,7 @@ pub fn MissionControlApp() -> impl IntoView {
                 <Routes>
                     <Route path="/" view=MainMissionView/>
                     <Route path="/chat/:id" view=DetachedChatView/>
+                    <Route path="/office" view=OfficeWindowView/>
                 </Routes>
             </main>
         </Router>

@@ -4,6 +4,7 @@
 //! per the agent_control_policy.yaml.
 
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 /// Branch lifecycle status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +76,16 @@ pub struct AgentRegistry {
     max_subagents: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentRegistrySnapshot {
+    #[serde(default)]
+    agents: Vec<SubAgent>,
+    #[serde(default)]
+    branches: Vec<Branch>,
+    #[serde(default)]
+    missions: Vec<Mission>,
+}
+
 impl AgentRegistry {
     pub fn new(max_subagents: usize) -> Self {
         let default_branch = Branch {
@@ -93,6 +104,57 @@ impl AgentRegistry {
 
     pub fn set_max_subagents(&mut self, max_subagents: usize) {
         self.max_subagents = max_subagents;
+    }
+
+    pub fn load_from_path(path: &Path, max_subagents: usize) -> Result<Self, String> {
+        if !path.exists() {
+            return Ok(Self::new(max_subagents));
+        }
+
+        let text = std::fs::read_to_string(path)
+            .map_err(|err| format!("Failed to read agent registry {}: {err}", path.display()))?;
+        let snapshot: AgentRegistrySnapshot = serde_json::from_str(&text)
+            .map_err(|err| format!("Failed to parse agent registry {}: {err}", path.display()))?;
+
+        let mut registry = Self {
+            agents: snapshot.agents,
+            branches: snapshot.branches,
+            missions: snapshot.missions,
+            max_subagents,
+        };
+        registry.ensure_defaults();
+        Ok(registry)
+    }
+
+    pub fn persist_to_path(&self, path: &Path) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            if !parent.exists() {
+                std::fs::create_dir_all(parent).map_err(|err| {
+                    format!(
+                        "Failed to create agent registry directory {}: {err}",
+                        parent.display()
+                    )
+                })?;
+            }
+        }
+
+        let payload = AgentRegistrySnapshot {
+            agents: self.agents.clone(),
+            branches: self.branches.clone(),
+            missions: self.missions.clone(),
+        };
+        let json = serde_json::to_string_pretty(&payload)
+            .map_err(|err| format!("Failed to serialize agent registry: {err}"))?;
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, json)
+            .map_err(|err| format!("Failed to write agent registry tmp {}: {err}", tmp.display()))?;
+        std::fs::rename(&tmp, path).map_err(|err| {
+            format!(
+                "Failed to persist agent registry {}: {err}",
+                path.display()
+            )
+        })?;
+        Ok(())
     }
 
     pub fn list_branches(&self) -> &[Branch] {
@@ -319,6 +381,12 @@ impl AgentRegistry {
         self.agents.iter().find(|a| a.id == agent_id)
     }
 
+    pub fn find_by_name(&self, name: &str) -> Option<&SubAgent> {
+        self.agents
+            .iter()
+            .find(|agent| agent.name.eq_ignore_ascii_case(name.trim()))
+    }
+
     /// Rename an agent. Validates length, charset, uniqueness, and reserved names.
     pub fn rename(&mut self, agent_id: &str, new_name: &str) -> Result<(), String> {
         let trimmed = new_name.trim();
@@ -414,6 +482,26 @@ impl AgentRegistry {
 
         agent.status = status;
         Ok(())
+    }
+
+    fn ensure_defaults(&mut self) {
+        if self.branches.is_empty() {
+            self.branches.push(Branch {
+                id: "primary".to_string(),
+                name: "Primary".to_string(),
+                status: BranchStatus::Active,
+            });
+        } else if !self
+            .branches
+            .iter()
+            .any(|branch| branch.id.eq_ignore_ascii_case("primary"))
+        {
+            self.branches.push(Branch {
+                id: "primary".to_string(),
+                name: "Primary".to_string(),
+                status: BranchStatus::Active,
+            });
+        }
     }
 }
 

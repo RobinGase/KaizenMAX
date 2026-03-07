@@ -14,6 +14,7 @@
   "inference_temperature": 0.699999988079071,
   "main_chat_pinned": true,
   "mattermost_channel_id": "",
+  "mattermost_token": "",
   "mattermost_url": "",
   "max_subagents": 5,
   "new_agent_chat_default_state": "closed",
