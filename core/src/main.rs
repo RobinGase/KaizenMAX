@@ -30,7 +30,7 @@ use kaizen_gateway::{
         InferenceCredential, InferenceProvider, InferenceRequest, OpenAIStreamChunk,
     },
     oauth_store,
-    provider_auth::{self, ProviderAuthStatus},
+    provider_auth::{self, ProviderAuthStatus, ZeroclawControlPlane},
     settings::{KaizenSettings, SettingsPatch},
 };
 use serde::{Deserialize, Serialize};
@@ -2430,6 +2430,182 @@ async fn list_provider_statuses(
     ))
 }
 
+#[derive(Debug, Deserialize)]
+struct ZeroclawPatchRequest {
+    provider: Option<String>,
+    model: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ZeroclawActionResponse {
+    provider: String,
+    action: String,
+    message: String,
+    redirect_url: Option<String>,
+}
+
+async fn get_zeroclaw_control_plane(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ZeroclawControlPlane>, (StatusCode, String)> {
+    require_admin_access(&state, &headers, "GET /api/zeroclaw")?;
+    let settings = state.settings.read().await.clone();
+    Ok(Json(provider_auth::zeroclaw_control_plane(&settings).await))
+}
+
+async fn patch_zeroclaw_control_plane(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<ZeroclawPatchRequest>,
+) -> Result<Json<ZeroclawControlPlane>, (StatusCode, String)> {
+    require_admin_access(&state, &headers, "PATCH /api/zeroclaw")?;
+
+    {
+        let mut settings = state.settings.write().await;
+        if let Some(provider) = payload.provider {
+            let canonical = provider_auth::canonical_provider_id(&provider)
+                .ok_or_else(|| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        "That provider is not supported in this build.".to_string(),
+                    )
+                })?
+                .to_string();
+            settings.inference_provider = canonical;
+            let models = provider_auth::provider_model_catalog(&settings.inference_provider);
+            if !models.is_empty() && !models.iter().any(|model| model == &settings.inference_model) {
+                settings.inference_model = models[0].clone();
+            }
+        }
+
+        if let Some(model) = payload.model {
+            let trimmed = model.trim();
+            if trimmed.is_empty() {
+                return Err((StatusCode::BAD_REQUEST, "Choose a model first.".to_string()));
+            }
+            settings.inference_model = trimmed.to_string();
+        }
+
+        let persisted_path = settings
+            .persist_to_workspace()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        tracing::info!(
+            "Persisted zeroclaw settings to {}",
+            persisted_path.display()
+        );
+    }
+
+    let settings = state.settings.read().await.clone();
+    Ok(Json(provider_auth::zeroclaw_control_plane(&settings).await))
+}
+
+async fn zeroclaw_provider_connect(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(provider): Path<String>,
+) -> Result<Json<ZeroclawActionResponse>, (StatusCode, String)> {
+    require_admin_access(&state, &headers, "POST /api/zeroclaw/providers/{provider}/connect")?;
+    let provider = provider_auth::canonical_provider_id(&provider)
+        .unwrap_or(provider.trim())
+        .to_string();
+
+    match provider.as_str() {
+        "gemini" => {
+            let (pending, redirect_url) =
+                oauth_store::start_gemini_oauth(default_gemini_oauth_redirect_uri())
+                    .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+            *state.pending_gemini_oauth.write().await = Some(pending);
+
+            Ok(Json(ZeroclawActionResponse {
+                provider,
+                action: "connect".to_string(),
+                message: "Continue in your browser to connect Gemini.".to_string(),
+                redirect_url: Some(redirect_url),
+            }))
+        }
+        "codex-cli" => Err((
+            StatusCode::BAD_REQUEST,
+            "Codex uses the local Codex app sign-in on this device.".to_string(),
+        )),
+        "gemini-cli" => Err((
+            StatusCode::BAD_REQUEST,
+            "Gemini CLI uses its own local sign-in on this device.".to_string(),
+        )),
+        "openai" | "anthropic" | "nvidia" => Err((
+            StatusCode::BAD_REQUEST,
+            "This provider becomes ready when its key is available on this device.".to_string(),
+        )),
+        _ => Err((
+            StatusCode::BAD_REQUEST,
+            "That provider is not supported in this build.".to_string(),
+        )),
+    }
+}
+
+async fn zeroclaw_provider_refresh(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(provider): Path<String>,
+) -> Result<Json<ZeroclawActionResponse>, (StatusCode, String)> {
+    require_admin_access(&state, &headers, "POST /api/zeroclaw/providers/{provider}/refresh")?;
+    let provider = provider_auth::canonical_provider_id(&provider)
+        .unwrap_or(provider.trim())
+        .to_string();
+
+    match provider.as_str() {
+        "gemini" => {
+            let tokens = oauth_store::refresh_stored_gemini_tokens()
+                .await
+                .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+            oauth_store::save_gemini_tokens(&tokens)
+                .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+            Ok(Json(ZeroclawActionResponse {
+                provider,
+                action: "refresh".to_string(),
+                message: "Gemini sign-in refreshed.".to_string(),
+                redirect_url: None,
+            }))
+        }
+        _ => Err((
+            StatusCode::BAD_REQUEST,
+            "Refresh is not available for this provider.".to_string(),
+        )),
+    }
+}
+
+async fn zeroclaw_provider_disconnect(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(provider): Path<String>,
+) -> Result<Json<ZeroclawActionResponse>, (StatusCode, String)> {
+    require_admin_access(
+        &state,
+        &headers,
+        "DELETE /api/zeroclaw/providers/{provider}",
+    )?;
+    let provider = provider_auth::canonical_provider_id(&provider)
+        .unwrap_or(provider.trim())
+        .to_string();
+
+    match provider.as_str() {
+        "gemini" => {
+            *state.pending_gemini_oauth.write().await = None;
+            oauth_store::clear_gemini_tokens()
+                .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+            Ok(Json(ZeroclawActionResponse {
+                provider,
+                action: "disconnect".to_string(),
+                message: "Gemini sign-in removed from this device.".to_string(),
+                redirect_url: None,
+            }))
+        }
+        _ => Err((
+            StatusCode::BAD_REQUEST,
+            "Disconnect is not available for this provider.".to_string(),
+        )),
+    }
+}
+
 // ---- OAuth Framework Endpoints ----
 
 #[derive(Serialize)]
@@ -3042,6 +3218,22 @@ async fn main() {
         .route("/api/crystal-ball/validate", get(crystal_ball_validate))
         .route("/api/crystal-ball/smoke", post(crystal_ball_smoke))
         .route("/api/settings", get(get_settings).patch(patch_settings))
+        .route(
+            "/api/zeroclaw",
+            get(get_zeroclaw_control_plane).patch(patch_zeroclaw_control_plane),
+        )
+        .route(
+            "/api/zeroclaw/providers/{provider}/connect",
+            post(zeroclaw_provider_connect),
+        )
+        .route(
+            "/api/zeroclaw/providers/{provider}/refresh",
+            post(zeroclaw_provider_refresh),
+        )
+        .route(
+            "/api/zeroclaw/providers/{provider}",
+            delete(zeroclaw_provider_disconnect),
+        )
         .route("/api/chat", post(chat))
         .route("/api/chat/history", get(get_chat_history))
         .route("/api/chat/stream", post(chat_stream))

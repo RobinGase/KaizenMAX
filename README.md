@@ -23,6 +23,18 @@ Kaizen MAX is a Windows-first operator cockpit for AI-assisted engineering.
     - Codex CLI: install `codex` and complete `codex login` once
 5. Send a message in Kaizen chat
 
+## Release Updates
+
+- The desktop app treats `origin/main` as the release channel for repo installs.
+- On launch and every 15 minutes, Mission Control checks whether the local checkout is behind `origin/main`.
+- If `main` has new commits, the app shows an in-app update notification and an `Apply Update` action.
+- Applying the update runs `scripts/update-kaizen-max.ps1`, which:
+  - fetches `origin/main`
+  - performs a fast-forward pull
+  - rebuilds the backend and desktop app
+  - relaunches Kaizen MAX
+- Auto-apply is intentionally blocked when the checkout is dirty or not on `main`.
+
 ## Crystal Ball Bridge (Optional)
 
 All setup is in `Settings -> Providers & Auth`:

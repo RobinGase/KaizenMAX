@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { RepoUpdateStatus } from "./types";
 
 type Method = "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
 
@@ -46,4 +47,12 @@ export async function coreRequest<T>(input: CoreRequestInput): Promise<T> {
 
 export async function openExternalUrl(url: string): Promise<void> {
   await invoke("open_external_url", { url });
+}
+
+export async function getRepoUpdateStatus(): Promise<RepoUpdateStatus> {
+  return invoke<RepoUpdateStatus>("get_repo_update_status");
+}
+
+export async function applyRepoUpdate(): Promise<void> {
+  await invoke("apply_repo_update");
 }

@@ -14,6 +14,52 @@ export interface HealthResponse {
   version: string;
 }
 
+export interface RepoUpdateStatus {
+  enabled: boolean;
+  git_available: boolean;
+  release_branch: string;
+  current_branch: string | null;
+  repo_root: string | null;
+  local_commit: string | null;
+  local_subject: string | null;
+  remote_commit: string | null;
+  remote_subject: string | null;
+  behind_count: number;
+  update_available: boolean;
+  local_dirty: boolean;
+  can_apply_update: boolean;
+  message: string;
+}
+
+export interface ZeroclawProviderAction {
+  kind: string;
+  label: string;
+}
+
+export interface ZeroclawProviderOption {
+  id: string;
+  label: string;
+  selected: boolean;
+  ready: boolean;
+  connected: boolean;
+  auth_kind: string;
+  badge: string;
+  summary: string;
+  models: string[];
+  primary_action: ZeroclawProviderAction | null;
+  secondary_action: ZeroclawProviderAction | null;
+}
+
+export interface ZeroclawControlPlane {
+  selected_provider: string;
+  selected_model: string;
+  ready: boolean;
+  headline: string;
+  detail: string;
+  providers: ZeroclawProviderOption[];
+  available_models: string[];
+}
+
 export interface SubAgent {
   id: string;
   name: string;

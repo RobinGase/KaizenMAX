@@ -7,8 +7,9 @@ import {
   onCleanup,
   onMount
 } from "solid-js";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { createStore } from "solid-js/store";
-import { coreRequest, openExternalUrl } from "./lib/tauri";
+import { applyRepoUpdate, coreRequest, getRepoUpdateStatus, openExternalUrl } from "./lib/tauri";
 import headerLogo from "./assets/branding/headerlogo.png";
 import brandEmblem from "./assets/branding/logo-emblem.png";
 import kaizenText from "./assets/branding/kaizen-text.png";
@@ -30,10 +31,11 @@ import type {
   HealthResponse,
   KaizenSettings,
   Notice,
-  OAuthStatus,
-  ProviderAuthStatus,
+  RepoUpdateStatus,
   SubAgent,
-  TransitionResult
+  TransitionResult,
+  ZeroclawControlPlane,
+  ZeroclawProviderAction
 } from "./lib/types";
 
 type TabId = "mission" | "gates" | "activity" | "workspace" | "integrations" | "settings";
@@ -45,26 +47,16 @@ interface WorkspaceTile {
 
 const TABS: Array<{ id: TabId; label: string }> = [
   { id: "mission", label: "Mission" },
-  { id: "gates", label: "Workflow Gates" },
-  { id: "activity", label: "Activity" },
+  { id: "gates", label: "Workflow" },
+  { id: "activity", label: "Status" },
   { id: "workspace", label: "Workspace" },
-  { id: "integrations", label: "Providers & Auth" },
-  { id: "settings", label: "System Settings" }
+  { id: "integrations", label: "Zeroclaw" },
+  { id: "settings", label: "Settings" }
 ];
 
 const KAIZEN_MODES = ["yolo", "build", "plan", "reason", "orchestrator"];
 const SUBAGENT_MODES = ["build", "plan"];
 const AGENT_STATUSES: AgentStatus[] = ["idle", "active", "blocked", "review_pending", "done"];
-const OAUTH_PROVIDERS = ["gemini"];
-const PROVIDER_MODEL_HINTS: Record<string, string[]> = {
-  anthropic: ["claude-sonnet-4-20250514", "claude-3-7-sonnet-latest"],
-  openai: ["gpt-4.1", "gpt-4.1-mini", "o3-mini"],
-  gemini: ["gemini-2.5-flash", "gemini-2.5-pro"],
-  "codex-cli": ["gpt-5.4", "gpt-5-codex", "use-codex-config"],
-  nvidia: ["meta/llama-3.1-70b-instruct", "mistralai/mixtral-8x7b-instruct-v0.1"],
-  kaizen: ["use-configured-provider"],
-  zeroclaw: ["use-configured-provider"]
-};
 
 const GATE_LABELS: Record<keyof GateConditions, string> = {
   plan_defined: "Plan defined",
@@ -93,6 +85,13 @@ function parseError(error: unknown): string {
   return "Unexpected error";
 }
 
+function shortCommit(commit: string | null | undefined): string {
+  if (!commit) {
+    return "unknown";
+  }
+  return commit.slice(0, 7);
+}
+
 function loadWorkspaceTiles(): WorkspaceTile[] {
   const raw = localStorage.getItem("kaizen.workspace.tiles");
   if (!raw) {
@@ -118,6 +117,8 @@ export default function App() {
 
   const [state, setState] = createStore({
     health: null as HealthResponse | null,
+    updateStatus: null as RepoUpdateStatus | null,
+    zeroclaw: null as ZeroclawControlPlane | null,
     settings: null as KaizenSettings | null,
     settingsDraft: {} as Partial<KaizenSettings>,
     agents: [] as SubAgent[],
@@ -134,14 +135,10 @@ export default function App() {
     selectedRepo: "",
     workspaceInput: "",
     workspaceTiles: loadWorkspaceTiles() as WorkspaceTile[],
-    providerStatuses: [] as ProviderAuthStatus[],
-    oauth: {} as Record<string, OAuthStatus | null>,
     selectedAgentId: "",
     chatHistory: [] as ChatMessage[],
     chatMessage: "",
     chatMode: "yolo",
-    chatProvider: "",
-    chatModel: "",
     wrapMode: false,
     wrapTargets: "",
     clearHistory: false,
@@ -197,12 +194,6 @@ export default function App() {
     const payload = await apiGet<KaizenSettings>("/api/settings");
     setState("settings", payload);
     setState("settingsDraft", { ...payload });
-    if (!state.chatProvider) {
-      setState("chatProvider", payload.inference_provider || "gemini");
-    }
-    if (!state.chatModel) {
-      setState("chatModel", payload.inference_model || "gemini-2.5-flash");
-    }
     if (!state.selectedRepo && payload.selected_github_repo) {
       setState("selectedRepo", payload.selected_github_repo);
     }
@@ -261,46 +252,55 @@ export default function App() {
     setState("githubRepos", reposPayload.repos ?? []);
   }
 
-  async function refreshProviderStatuses(): Promise<void> {
-    const payload = await apiGet<ProviderAuthStatus[]>("/api/providers/status");
-    setState("providerStatuses", payload);
+  async function refreshZeroclaw(): Promise<void> {
+    const payload = await apiGet<ZeroclawControlPlane>("/api/zeroclaw");
+    setState("zeroclaw", payload);
   }
 
-  async function refreshOauthStatuses(): Promise<void> {
-    const updates: Record<string, OAuthStatus | null> = {};
-    for (const provider of OAUTH_PROVIDERS) {
-      try {
-        updates[provider] = await apiGet<OAuthStatus>(`/api/oauth/${provider}/status`);
-      } catch {
-        updates[provider] = null;
-      }
-    }
-    setState("oauth", updates);
+  async function refreshUpdateStatus(): Promise<void> {
+    const payload = await getRepoUpdateStatus();
+    setState("updateStatus", payload);
   }
 
   async function refreshAll(): Promise<void> {
     await Promise.allSettled([
       refreshHealth(),
+      refreshUpdateStatus(),
+      refreshZeroclaw(),
       refreshSettings(),
       refreshAgents(),
       refreshGates(),
       refreshEvents(),
       refreshChatHistory(),
       refreshCrystalHealth(),
-      refreshGithub(),
-      refreshProviderStatuses(),
-      refreshOauthStatuses()
+      refreshGithub()
     ]);
   }
 
-  function scheduleOauthStatusRefresh(attempts = 12, delayMs = 2500): void {
+  async function applyReleaseUpdate(): Promise<void> {
+    await runTask("apply-update", async () => {
+      const status = await getRepoUpdateStatus();
+      setState("updateStatus", status);
+      if (!status.can_apply_update) {
+        throw new Error(status.message);
+      }
+
+      await applyRepoUpdate();
+      pushNotice("info", "Applying release update from origin/main. The app will relaunch after rebuild.");
+      window.setTimeout(() => {
+        void getCurrentWindow().close();
+      }, 800);
+    });
+  }
+
+  function scheduleZeroclawRefresh(attempts = 12, delayMs = 2500): void {
     const tick = (): void => {
       if (attempts <= 0) {
         return;
       }
       attempts -= 1;
-      void Promise.allSettled([refreshOauthStatuses(), refreshProviderStatuses()]).then(() => {
-        if (attempts > 0 && !state.oauth.gemini?.connected) {
+      void Promise.allSettled([refreshZeroclaw(), refreshSettings()]).then(() => {
+        if (attempts > 0 && !state.zeroclaw?.ready) {
           window.setTimeout(tick, delayMs);
         }
       });
@@ -357,8 +357,8 @@ export default function App() {
         message,
         clear_history: state.clearHistory,
         mode: state.chatMode,
-        provider: state.chatProvider,
-        model: state.chatModel
+        provider: "zeroclaw",
+        model: state.zeroclaw?.selected_model || state.settings?.inference_model || ""
       };
 
       if (state.selectedAgentId) {
@@ -513,59 +513,61 @@ export default function App() {
     });
   }
 
-  async function disconnectOauth(provider: string): Promise<void> {
-    await runTask(`oauth-disconnect-${provider}`, async () => {
-      await apiDelete(`/api/oauth/${encodeURIComponent(provider)}`);
-      await Promise.allSettled([refreshOauthStatuses(), refreshProviderStatuses()]);
-      pushNotice("success", `${provider} OAuth disconnected.`);
+  async function saveZeroclawProvider(provider: string): Promise<void> {
+    await runTask(`zeroclaw-provider-${provider}`, async () => {
+      const payload = await apiPatch<ZeroclawControlPlane>("/api/zeroclaw", { provider });
+      setState("zeroclaw", payload);
+      await refreshSettings();
+      pushNotice("success", `${payload.providers.find((entry) => entry.id === provider)?.label || provider} selected.`);
     });
   }
 
-  async function tryStartOauth(provider: string): Promise<void> {
-    const key = `oauth-start-${provider}`;
-    setBusy(key, true);
-    try {
-      const response = await apiGet<{ redirect_url?: string }>(
-        `/api/oauth/${encodeURIComponent(provider)}/start`
-      );
-      if (response.redirect_url) {
-        try {
-          await openExternalUrl(response.redirect_url);
-        } catch {
-          window.open(response.redirect_url, "_blank", "noopener,noreferrer");
-        }
-      }
-      scheduleOauthStatusRefresh();
-      pushNotice("info", `${provider} OAuth opened in your browser.`);
-    } catch (error) {
-      const message = parseError(error);
-      if (message.toLowerCase().includes("not implemented")) {
-        pushNotice("info", `${provider} OAuth start is not implemented in backend yet.`);
-      } else {
-        pushNotice("error", message);
-      }
-    } finally {
-      setBusy(key, false);
-    }
+  async function saveZeroclawModel(model: string): Promise<void> {
+    await runTask(`zeroclaw-model-${model}`, async () => {
+      const payload = await apiPatch<ZeroclawControlPlane>("/api/zeroclaw", { model });
+      setState("zeroclaw", payload);
+      await refreshSettings();
+      pushNotice("success", "Model updated.");
+    });
   }
 
-  async function tryRefreshOauth(provider: string): Promise<void> {
-    const key = `oauth-refresh-${provider}`;
-    setBusy(key, true);
-    try {
-      await apiPost<unknown>(`/api/oauth/${encodeURIComponent(provider)}/refresh`);
-      await Promise.allSettled([refreshOauthStatuses(), refreshProviderStatuses()]);
-      pushNotice("info", `${provider} OAuth refreshed.`);
-    } catch (error) {
-      const message = parseError(error);
-      if (message.toLowerCase().includes("not implemented")) {
-        pushNotice("info", `${provider} OAuth refresh is not implemented in backend yet.`);
-      } else {
-        pushNotice("error", message);
+  async function runProviderAction(provider: string, action: ZeroclawProviderAction): Promise<void> {
+    await runTask(`provider-action-${provider}-${action.kind}`, async () => {
+      if (action.kind === "connect") {
+        const response = await apiPost<{ redirect_url?: string; message?: string }>(
+          `/api/zeroclaw/providers/${encodeURIComponent(provider)}/connect`
+        );
+        if (response.redirect_url) {
+          try {
+            await openExternalUrl(response.redirect_url);
+          } catch {
+            window.open(response.redirect_url, "_blank", "noopener,noreferrer");
+          }
+        }
+        scheduleZeroclawRefresh();
+        pushNotice("info", response.message || "Continue in your browser.");
+        return;
       }
-    } finally {
-      setBusy(key, false);
-    }
+
+      if (action.kind === "refresh") {
+        const response = await apiPost<{ message?: string }>(
+          `/api/zeroclaw/providers/${encodeURIComponent(provider)}/refresh`
+        );
+        await Promise.allSettled([refreshZeroclaw(), refreshSettings()]);
+        pushNotice("success", response.message || "Connection refreshed.");
+        return;
+      }
+
+      if (action.kind === "disconnect") {
+        const response = await coreRequest<{ message?: string }>({
+          method: "DELETE",
+          path: `/api/zeroclaw/providers/${encodeURIComponent(provider)}`,
+          adminToken: adminToken()
+        });
+        await Promise.allSettled([refreshZeroclaw(), refreshSettings()]);
+        pushNotice("success", response.message || "Disconnected.");
+      }
+    });
   }
 
   function updateSettingsDraft<K extends keyof KaizenSettings>(key: K, value: KaizenSettings[K]): void {
@@ -589,22 +591,7 @@ export default function App() {
     pushNotice("info", "Settings draft reset.");
   }
 
-  const geminiOauth = createMemo(() => state.oauth.gemini ?? null);
-  const geminiProviderStatus = createMemo(
-    () => state.providerStatuses.find((status) => status.provider === "gemini") ?? null
-  );
-  const zeroclawStatus = createMemo(
-    () => state.providerStatuses.find((status) => status.provider === "zeroclaw") ?? null
-  );
-
   const activeModes = createMemo(() => (state.selectedAgentId ? SUBAGENT_MODES : KAIZEN_MODES));
-
-  const modelHints = createMemo(() => {
-    if (!state.chatProvider) {
-      return [];
-    }
-    return PROVIDER_MODEL_HINTS[state.chatProvider] || [];
-  });
 
   const currentAgent = createMemo(() => state.agents.find((entry) => entry.id === state.selectedAgentId) || null);
 
@@ -619,18 +606,28 @@ export default function App() {
   });
 
   createEffect(() => {
-    if (!state.chatProvider && state.settings?.inference_provider) {
-      setState("chatProvider", state.settings.inference_provider);
-    }
-    if (!state.chatModel && state.settings?.inference_model) {
-      setState("chatModel", state.settings.inference_model);
+    if (!activeModes().includes(state.chatMode)) {
+      setState("chatMode", activeModes()[0] || "yolo");
     }
   });
 
   createEffect(() => {
-    if (!activeModes().includes(state.chatMode)) {
-      setState("chatMode", activeModes()[0] || "yolo");
+    const updateStatus = state.updateStatus;
+    if (!updateStatus?.update_available || !updateStatus.remote_commit) {
+      return;
     }
+
+    const noticeKey = "kaizen.update.last-notified";
+    const lastNotified = localStorage.getItem(noticeKey);
+    if (lastNotified === updateStatus.remote_commit) {
+      return;
+    }
+
+    localStorage.setItem(noticeKey, updateStatus.remote_commit);
+    pushNotice(
+      "info",
+      `Release update ready from main: ${shortCommit(updateStatus.remote_commit)} ${updateStatus.remote_subject || ""}`.trim()
+    );
   });
 
   onMount(() => {
@@ -642,8 +639,13 @@ export default function App() {
       });
     }, 5000);
 
+    const updateTicker = window.setInterval(() => {
+      void runTask("update-status", refreshUpdateStatus);
+    }, 15 * 60 * 1000);
+
     onCleanup(() => {
       window.clearInterval(runtimeTicker);
+      window.clearInterval(updateTicker);
     });
   });
 
@@ -699,12 +701,7 @@ export default function App() {
               <div>
                 <h1 class="top-bar-heading">Mission Control</h1>
                 <p class="top-bar-blurb">
-                  Current route:{" "}
-                  {zeroclawStatus()?.resolved_provider ||
-                    state.settings?.inference_provider ||
-                    state.chatProvider ||
-                    "unresolved"}
-                  {" "} / Model: {state.settings?.inference_model || state.chatModel || "unset"}
+                  {state.zeroclaw?.headline || "Choose a provider and model for Zeroclaw."}
                 </p>
               </div>
               <img class="top-bar-logo" src={headerLogo} alt="" aria-hidden="true" />
@@ -714,10 +711,69 @@ export default function App() {
               <span class={`status-chip ${state.health?.status === "ok" ? "ok" : "warn"}`}>
                 {state.health ? `${state.health.engine} ${state.health.version}` : "Backend pending"}
               </span>
+              <span
+                class={`status-chip ${
+                  state.updateStatus?.update_available
+                    ? "warn"
+                    : state.updateStatus?.enabled
+                      ? "ok"
+                      : "neutral"
+                }`}
+              >
+                Release:{" "}
+                {state.updateStatus?.update_available
+                  ? `${state.updateStatus.behind_count} pending`
+                  : state.updateStatus?.enabled
+                    ? "current"
+                    : "unavailable"}
+              </span>
               <span class="status-chip neutral">Gate: {state.gates?.current_state || "unknown"}</span>
               <span class="status-chip neutral">Agents: {state.agents.length}</span>
               <span class="status-chip neutral">Events: {state.events.length}</span>
             </div>
+
+            <Show when={state.updateStatus}>
+              {(updateStatus) => (
+                <section
+                  class={`release-banner ${
+                    updateStatus().update_available ? "available" : updateStatus().enabled ? "current" : "offline"
+                  }`}
+                >
+                  <div class="release-banner-copy">
+                    <div class="release-banner-kicker">Release Channel / {updateStatus().release_branch}</div>
+                    <h2>
+                      {updateStatus().update_available
+                        ? "Update ready from main"
+                        : updateStatus().enabled
+                          ? "This install is on the current release"
+                          : "Update checks are unavailable"}
+                    </h2>
+                    <p>{updateStatus().message}</p>
+                    <div class="release-banner-meta">
+                      <span>Local {shortCommit(updateStatus().local_commit)}</span>
+                      <span>Remote {shortCommit(updateStatus().remote_commit)}</span>
+                      <span>Branch {updateStatus().current_branch || "unknown"}</span>
+                    </div>
+                  </div>
+                  <div class="release-banner-actions">
+                    <button
+                      class="btn ghost"
+                      onClick={() => void runTask("update-status", refreshUpdateStatus)}
+                      disabled={!!busy["update-status"]}
+                    >
+                      Check Updates
+                    </button>
+                    <button
+                      class="btn"
+                      onClick={() => void applyReleaseUpdate()}
+                      disabled={!updateStatus().can_apply_update || !!busy["apply-update"]}
+                    >
+                      {busy["apply-update"] ? "Updating..." : "Apply Update"}
+                    </button>
+                  </div>
+                </section>
+              )}
+            </Show>
           </div>
 
           <div class="top-bar-side">
@@ -762,33 +818,6 @@ export default function App() {
                     </select>
                   </label>
 
-                  <label>
-                    Provider
-                    <input
-                      value={state.chatProvider}
-                      list="provider-hints"
-                      onInput={(event) => setState("chatProvider", event.currentTarget.value.trim())}
-                    />
-                  </label>
-
-                  <label>
-                    Model
-                    <input
-                      value={state.chatModel}
-                      list="model-hints"
-                      onInput={(event) => setState("chatModel", event.currentTarget.value.trim())}
-                    />
-                  </label>
-
-                  <label class="check">
-                    <input
-                      type="checkbox"
-                      checked={state.wrapMode}
-                      onChange={(event) => setState("wrapMode", event.currentTarget.checked)}
-                    />
-                    Wrap mode
-                  </label>
-
                   <label class="check">
                     <input
                       type="checkbox"
@@ -802,26 +831,6 @@ export default function App() {
                     Refresh History
                   </button>
                 </div>
-
-                <Show when={state.wrapMode}>
-                  <div class="wrap-targets">
-                    <label>
-                      Wrap targets
-                      <input
-                        value={state.wrapTargets}
-                        onInput={(event) => setState("wrapTargets", event.currentTarget.value)}
-                        placeholder="anthropic:claude-sonnet-4-20250514, gemini:gemini-2.5-flash"
-                      />
-                    </label>
-                  </div>
-                </Show>
-
-                <datalist id="provider-hints">
-                  <For each={Object.keys(PROVIDER_MODEL_HINTS)}>{(provider) => <option value={provider} />}</For>
-                </datalist>
-                <datalist id="model-hints">
-                  <For each={modelHints()}>{(model) => <option value={model} />}</For>
-                </datalist>
 
                 <div class="chat-log">
                   <Show
@@ -970,67 +979,84 @@ export default function App() {
           <Show when={activeTab() === "activity"}>
             <section class="card single">
               <div class="card-head">
-                <h2>Crystal Ball Activity</h2>
+                <h2>System Status</h2>
                 <div class="inline-actions">
-                  <label>
-                    Limit
-                    <select
-                      value={state.eventsLimit}
-                      onChange={(event) => setState("eventsLimit", Number(event.currentTarget.value) || 100)}
-                    >
-                      <option value={50}>50</option>
-                      <option value={100}>100</option>
-                      <option value={250}>250</option>
-                      <option value={500}>500</option>
-                    </select>
-                  </label>
-                  <button class="btn ghost" onClick={() => void runTask("events-refresh", refreshEvents)}>
-                    Refresh Events
+                  <button class="btn ghost" onClick={() => void runTask("status-refresh", refreshAll)}>
+                    Refresh
                   </button>
                 </div>
               </div>
 
               <div class="inline-actions wrap">
-                <button class="btn ghost" onClick={() => void runTask("cb-health", refreshCrystalHealth)}>
-                  Health
-                </button>
                 <button class="btn ghost" onClick={() => void runTask("cb-validate", validateCrystal)}>
-                  Validate
+                  Check Bridge
                 </button>
                 <button class="btn ghost" onClick={() => void runTask("cb-smoke", smokeCrystal)}>
-                  Smoke
+                  Send Test
                 </button>
                 <button class="btn ghost" onClick={() => void runTask("cb-audit", auditCrystal)}>
-                  Audit
+                  Verify Archive
                 </button>
               </div>
 
               <div class="grid-two">
-                <div class="result-block compact">
-                  <h3>Health</h3>
-                  <pre>{JSON.stringify(state.crystalHealth, null, 2)}</pre>
+                <div class="summary-card">
+                  <div class="summary-label">Backend</div>
+                  <div class="summary-value">{state.health?.status === "ok" ? "Online" : "Checking"}</div>
+                  <div class="summary-note">{state.health ? `${state.health.engine} ${state.health.version}` : "Starting"}</div>
                 </div>
-                <div class="result-block compact">
-                  <h3>Validation / Smoke / Audit</h3>
-                  <pre>{JSON.stringify({ validate: state.crystalValidation, smoke: state.crystalSmoke, audit: state.crystalAudit }, null, 2)}</pre>
+                <div class="summary-card">
+                  <div class="summary-label">Zeroclaw</div>
+                  <div class="summary-value">{state.zeroclaw?.ready ? "Ready" : "Needs setup"}</div>
+                  <div class="summary-note">{state.zeroclaw?.detail || "Choose a provider to continue."}</div>
                 </div>
-              </div>
-
-              <div class="event-feed">
-                <For each={state.events}>
-                  {(eventItem) => (
-                    <div class="event-row">
-                      <div class="event-head">
-                        <span>{eventItem.event_type}</span>
-                        <span>{eventItem.timestamp}</span>
-                      </div>
-                      <div class="event-body">{eventItem.message}</div>
-                      <div class="event-meta">
-                        {eventItem.source_actor} → {eventItem.target_actor} · {eventItem.task_id}
-                      </div>
-                    </div>
-                  )}
-                </For>
+                <div class="summary-card">
+                  <div class="summary-label">Crystal Ball</div>
+                  <div class="summary-value">
+                    {state.crystalHealth?.enabled ? (state.crystalHealth.mattermost_connected ? "Connected" : "Local only") : "Off"}
+                  </div>
+                  <div class="summary-note">
+                    {state.crystalHealth?.enabled
+                      ? `${state.events.length} recent items available`
+                      : "Bridge is turned off in settings."}
+                  </div>
+                </div>
+                <div class="summary-card">
+                  <div class="summary-label">Workspace</div>
+                  <div class="summary-value">{state.workspaceTiles.length}</div>
+                  <div class="summary-note">Attached local folders</div>
+                </div>
+              </div>              <div class="stack-list">
+                <div class="soft-row">
+                  <span>Mattermost bridge</span>
+                  <strong>{state.crystalHealth?.mattermost_connected ? "Connected" : "Not connected"}</strong>
+                </div>
+                <div class="soft-row">
+                  <span>Archive integrity</span>
+                  <strong>{state.crystalAudit?.valid ?? state.crystalHealth?.archive_integrity_valid ? "Healthy" : "Needs review"}</strong>
+                </div>
+                <div class="soft-row">
+                  <span>Recent activity</span>
+                  <strong>{state.events.length} items</strong>
+                </div>
+                <Show when={state.crystalValidation?.error}>
+                  <div class="soft-row">
+                    <span>Bridge check</span>
+                    <strong>{state.crystalValidation?.error}</strong>
+                  </div>
+                </Show>
+                <Show when={state.crystalSmoke?.error}>
+                  <div class="soft-row">
+                    <span>Last test</span>
+                    <strong>{state.crystalSmoke?.error}</strong>
+                  </div>
+                </Show>
+                <Show when={state.crystalAudit?.reason}>
+                  <div class="soft-row">
+                    <span>Archive note</span>
+                    <strong>{state.crystalAudit?.reason}</strong>
+                  </div>
+                </Show>
               </div>
             </section>
           </Show>
@@ -1038,20 +1064,28 @@ export default function App() {
           <Show when={activeTab() === "workspace"}>
             <section class="card single">
               <div class="card-head">
-                <h2>Workspace & GitHub</h2>
+                <h2>Workspace</h2>
                 <button class="btn ghost" onClick={() => void runTask("github-refresh", refreshGithub)}>
                   Refresh
                 </button>
               </div>
 
-              <div class="result-block compact">
-                <h3>GitHub status</h3>
-                <pre>{JSON.stringify(state.githubStatus, null, 2)}</pre>
+              <div class="grid-two">
+                <div class="summary-card">
+                  <div class="summary-label">GitHub</div>
+                  <div class="summary-value">{state.githubStatus?.authenticated ? "Connected" : "Not connected"}</div>
+                  <div class="summary-note">{state.githubStatus?.login || "Sign in with GitHub CLI on this device."}</div>
+                </div>
+                <div class="summary-card">
+                  <div class="summary-label">Repositories</div>
+                  <div class="summary-value">{state.githubRepos.length}</div>
+                  <div class="summary-note">Available in your GitHub account</div>
+                </div>
               </div>
 
               <div class="inline-actions wrap">
                 <label>
-                  Selected repo
+                  Active repository
                   <select
                     value={state.selectedRepo}
                     onChange={(event) => setState("selectedRepo", event.currentTarget.value)}
@@ -1063,7 +1097,7 @@ export default function App() {
                   </select>
                 </label>
                 <button class="btn primary" onClick={() => void saveRepoSelection()}>
-                  Save Repo in Settings
+                  Save
                 </button>
               </div>
 
@@ -1092,169 +1126,125 @@ export default function App() {
                 </For>
               </div>
             </section>
-          </Show>
-
-          <Show when={activeTab() === "integrations"}>
+          </Show>          <Show when={activeTab() === "integrations"}>
             <section class="card single">
               <div class="card-head">
-                <h2>Providers & Auth</h2>
+                <h2>Zeroclaw</h2>
                 <div class="inline-actions">
-                  <button
-                    class="btn ghost"
-                    onClick={() =>
-                      void runTask("providers-refresh", async () => {
-                        await Promise.allSettled([refreshProviderStatuses(), refreshOauthStatuses()]);
-                      })
-                    }
-                  >
-                    Refresh Auth Status
+                  <button class="btn ghost" onClick={() => void runTask("zeroclaw-refresh", async () => {
+                    await Promise.allSettled([refreshZeroclaw(), refreshSettings()]);
+                  })}>
+                    Refresh
                   </button>
                 </div>
               </div>
 
-              <div class="result-block compact">
-                <h3>Runtime auth model</h3>
-                <pre>
-                  {JSON.stringify(
-                    {
-                      runtime_engine: state.settings?.runtime_engine ?? null,
-                      inference_provider: state.settings?.inference_provider ?? null,
-                      zeroclaw_routes_to: zeroclawStatus()?.resolved_provider ?? null
-                    },
-                    null,
-                    2
-                  )}
-                </pre>
-              </div>
-
-              <div class="result-block compact">
-                <h3>Zeroclaw control plane</h3>
-                <pre>
-                  {zeroclawStatus()?.message ??
-                    "Zeroclaw uses the configured inference provider and its local auth method."}
-                </pre>
-              </div>
-
-              <div class="secret-row">
+              <div class="hero-panel">
                 <div>
-                  <strong>Gemini OAuth</strong>
-                  <div class="agent-meta muted">
-                    supported {geminiOauth()?.supported ? "yes" : "no"} Â· connected{" "}
-                    {geminiOauth()?.connected ? "yes" : "no"}
-                  </div>
-                  <div class="agent-meta muted">
-                    access token {geminiOauth()?.access_token_configured ? "present" : "missing"} Â· refresh token{" "}
-                    {geminiOauth()?.refresh_token_configured ? "present" : "missing"}
-                  </div>
-                  <div class="agent-meta muted">
-                    Local Gemini OAuth needs `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_CLOUD_PROJECT`.
-                  </div>
-                  <div class="agent-meta muted">
-                    If `inference_provider` is `codex-cli`, zeroclaw will use Codex CLI ChatGPT OAuth instead.
-                  </div>
+                  <div class="hero-kicker">Control Plane</div>
+                  <h3>{state.zeroclaw?.headline || "Choose a provider"}</h3>
+                  <p>{state.zeroclaw?.detail || "Zeroclaw keeps provider setup in one place."}</p>
                 </div>
-                <div class="inline-actions wrap">
-                  <button
-                    class="btn primary"
-                    onClick={() => void tryStartOauth("gemini")}
-                    disabled={!!busy["oauth-start-gemini"]}
-                  >
-                    {busy["oauth-start-gemini"] ? "Starting..." : "Connect OAuth"}
-                  </button>
-                  <button
-                    class="btn ghost"
-                    onClick={() => void tryRefreshOauth("gemini")}
-                    disabled={!!busy["oauth-refresh-gemini"]}
-                  >
-                    {busy["oauth-refresh-gemini"] ? "Refreshing..." : "Refresh Token"}
-                  </button>
-                  <button
-                    class="btn danger"
-                    onClick={() => void disconnectOauth("gemini")}
-                    disabled={!!busy["oauth-disconnect-gemini"]}
-                  >
-                    {busy["oauth-disconnect-gemini"] ? "Disconnecting..." : "Disconnect"}
-                  </button>
+                <div class={`hero-badge ${state.zeroclaw?.ready ? "ready" : "pending"}`}>
+                  {state.zeroclaw?.ready ? "Ready" : "Setup needed"}
                 </div>
               </div>
 
-              <div class="result-block compact">
-                <h3>Gemini OAuth status</h3>
-                <pre>
-                  {JSON.stringify(
-                    {
-                      oauth: geminiOauth(),
-                      runtime_provider: geminiProviderStatus()
-                    },
-                    null,
-                    2
-                  )}
-                </pre>
+              <div class="grid-two">
+                <label>
+                  Provider
+                  <select
+                    value={state.zeroclaw?.selected_provider || ""}
+                    onChange={(event) => void saveZeroclawProvider(event.currentTarget.value)}
+                  >
+                    <For each={state.zeroclaw?.providers || []}>
+                      {(provider) => <option value={provider.id}>{provider.label}</option>}
+                    </For>
+                  </select>
+                </label>
+
+                <label>
+                  Model
+                  <select
+                    value={state.zeroclaw?.selected_model || ""}
+                    onChange={(event) => void saveZeroclawModel(event.currentTarget.value)}
+                  >
+                    <For each={state.zeroclaw?.available_models || []}>
+                      {(model) => <option value={model}>{model}</option>}
+                    </For>
+                  </select>
+                </label>
               </div>
 
-              <div class="secret-list">
-                <For each={state.providerStatuses}>
-                  {(status) => (
-                    <div class="secret-row">
-                      <div>
-                        <strong>{status.provider}</strong>
-                        <div class="agent-meta muted">
-                          method {status.auth_method} · configured {status.configured ? "yes" : "no"} · chat {status.can_chat ? "ready" : "blocked"}
+              <div class="provider-grid">
+                <For each={state.zeroclaw?.providers || []}>
+                  {(provider) => (
+                    <article class={`provider-card ${provider.selected ? "selected" : ""}`}>
+                      <div class="provider-card-head">
+                        <div>
+                          <h3>{provider.label}</h3>
+                          <div class="provider-card-summary">{provider.summary}</div>
                         </div>
-                        <div class="agent-meta muted">routes to {status.resolved_provider}</div>
-                        <div class="agent-meta muted">{status.env_hints.join(", ")}</div>
+                        <span class={`provider-badge ${provider.ready ? "ready" : provider.connected ? "pending" : "idle"}`}>
+                          {provider.badge}
+                        </span>
                       </div>
-                      <div class="result-block compact">
-                        <pre>{status.message}</pre>
+
+                      <div class="provider-models">
+                        <For each={provider.models}>
+                          {(model) => <span class="provider-model-pill">{model}</span>}
+                        </For>
                       </div>
-                    </div>
+
+                      <div class="inline-actions wrap">
+                        <button class={`btn ${provider.selected ? "primary" : "ghost"}`} onClick={() => void saveZeroclawProvider(provider.id)}>
+                          {provider.selected ? "Selected" : "Use This Provider"}
+                        </button>
+                        <Show when={provider.primary_action}>
+                          {(action) => (
+                            <button
+                              class="btn ghost"
+                              onClick={() => void runProviderAction(provider.id, action())}
+                              disabled={!!busy[`provider-action-${provider.id}-${action().kind}`]}
+                            >
+                              {busy[`provider-action-${provider.id}-${action().kind}`] ? "Working..." : action().label}
+                            </button>
+                          )}
+                        </Show>
+                        <Show when={provider.secondary_action}>
+                          {(action) => (
+                            <button
+                              class="btn danger"
+                              onClick={() => void runProviderAction(provider.id, action())}
+                              disabled={!!busy[`provider-action-${provider.id}-${action().kind}`]}
+                            >
+                              {busy[`provider-action-${provider.id}-${action().kind}`] ? "Working..." : action().label}
+                            </button>
+                          )}
+                        </Show>
+                      </div>
+                    </article>
                   )}
                 </For>
               </div>
             </section>
-          </Show>
-
-          <Show when={activeTab() === "settings"}>
+          </Show>          <Show when={activeTab() === "settings"}>
             <section class="card single">
               <div class="card-head">
-                <h2>System Settings</h2>
+                <h2>Settings</h2>
                 <div class="inline-actions">
                   <button class="btn ghost" onClick={resetSettingsDraft}>
-                    Reset Draft
+                    Reset
                   </button>
                   <button class="btn primary" onClick={() => void saveSettings()} disabled={!!busy.saveSettings}>
-                    Save Settings
+                    Save
                   </button>
                 </div>
               </div>
 
               <div class="settings-grid">
                 <label>
-                  Runtime engine
-                  <input
-                    value={String(state.settingsDraft.runtime_engine ?? "")}
-                    onInput={(event) => updateSettingsDraft("runtime_engine", event.currentTarget.value)}
-                  />
-                </label>
-
-                <label>
-                  Inference provider
-                  <input
-                    value={String(state.settingsDraft.inference_provider ?? "")}
-                    onInput={(event) => updateSettingsDraft("inference_provider", event.currentTarget.value)}
-                  />
-                </label>
-
-                <label>
-                  Inference model
-                  <input
-                    value={String(state.settingsDraft.inference_model ?? "")}
-                    onInput={(event) => updateSettingsDraft("inference_model", event.currentTarget.value)}
-                  />
-                </label>
-
-                <label>
-                  Max subagents
+                  Max teammates
                   <input
                     type="number"
                     value={Number(state.settingsDraft.max_subagents ?? 1)}
@@ -1263,27 +1253,23 @@ export default function App() {
                 </label>
 
                 <label>
-                  Max tokens
+                  Reply size
                   <input
                     type="number"
                     value={Number(state.settingsDraft.inference_max_tokens ?? 4096)}
-                    onInput={(event) =>
-                      updateSettingsDraft("inference_max_tokens", Number(event.currentTarget.value) || 4096)
-                    }
+                    onInput={(event) => updateSettingsDraft("inference_max_tokens", Number(event.currentTarget.value) || 4096)}
                   />
                 </label>
 
                 <label>
-                  Temperature
+                  Creativity
                   <input
                     type="number"
                     step="0.05"
                     min="0"
                     max="1"
                     value={Number(state.settingsDraft.inference_temperature ?? 0.7)}
-                    onInput={(event) =>
-                      updateSettingsDraft("inference_temperature", Number(event.currentTarget.value) || 0.7)
-                    }
+                    onInput={(event) => updateSettingsDraft("inference_temperature", Number(event.currentTarget.value) || 0.7)}
                   />
                 </label>
 
@@ -1296,7 +1282,7 @@ export default function App() {
                 </label>
 
                 <label>
-                  Mattermost channel ID
+                  Mattermost channel
                   <input
                     value={String(state.settingsDraft.mattermost_channel_id ?? "")}
                     onInput={(event) => updateSettingsDraft("mattermost_channel_id", event.currentTarget.value)}
@@ -1306,32 +1292,19 @@ export default function App() {
                 <label class="check">
                   <input
                     type="checkbox"
-                    checked={Boolean(state.settingsDraft.hard_gates_enabled)}
-                    onChange={(event) =>
-                      updateSettingsDraft("hard_gates_enabled", event.currentTarget.checked)
-                    }
+                    checked={Boolean(state.settingsDraft.crystal_ball_enabled)}
+                    onChange={(event) => updateSettingsDraft("crystal_ball_enabled", event.currentTarget.checked)}
                   />
-                  Hard gates enabled
+                  Enable Crystal Ball bridge
                 </label>
 
                 <label class="check">
                   <input
                     type="checkbox"
                     checked={Boolean(state.settingsDraft.require_human_smoke_test_before_deploy)}
-                    onChange={(event) =>
-                      updateSettingsDraft("require_human_smoke_test_before_deploy", event.currentTarget.checked)
-                    }
+                    onChange={(event) => updateSettingsDraft("require_human_smoke_test_before_deploy", event.currentTarget.checked)}
                   />
-                  Require human smoke test before deploy
-                </label>
-
-                <label class="check">
-                  <input
-                    type="checkbox"
-                    checked={Boolean(state.settingsDraft.crystal_ball_enabled)}
-                    onChange={(event) => updateSettingsDraft("crystal_ball_enabled", event.currentTarget.checked)}
-                  />
-                  Crystal Ball enabled
+                  Require a manual check before deploy
                 </label>
 
                 <label class="check">
@@ -1340,31 +1313,8 @@ export default function App() {
                     checked={Boolean(state.settingsDraft.auto_spawn_subagents)}
                     onChange={(event) => updateSettingsDraft("auto_spawn_subagents", event.currentTarget.checked)}
                   />
-                  Auto spawn subagents
+                  Let Kaizen start helpers automatically
                 </label>
-
-                <label class="check">
-                  <input
-                    type="checkbox"
-                    checked={Boolean(state.settingsDraft.provider_inference_only)}
-                    onChange={(event) => updateSettingsDraft("provider_inference_only", event.currentTarget.checked)}
-                  />
-                  Provider inference only
-                </label>
-
-                <label class="check">
-                  <input
-                    type="checkbox"
-                    checked={Boolean(state.settingsDraft.credentials_ui_enabled)}
-                    onChange={(event) => updateSettingsDraft("credentials_ui_enabled", event.currentTarget.checked)}
-                  />
-                  Credentials UI enabled
-                </label>
-              </div>
-
-              <div class="result-block compact">
-                <h3>Current settings snapshot</h3>
-                <pre>{JSON.stringify(state.settings, null, 2)}</pre>
               </div>
             </section>
           </Show>
@@ -1379,3 +1329,6 @@ export default function App() {
     </div>
   );
 }
+
+
+

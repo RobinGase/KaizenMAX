@@ -19,6 +19,38 @@ pub struct ProviderAuthStatus {
     pub env_hints: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ZeroclawProviderAction {
+    pub kind: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ZeroclawProviderOption {
+    pub id: String,
+    pub label: String,
+    pub selected: bool,
+    pub ready: bool,
+    pub connected: bool,
+    pub auth_kind: String,
+    pub badge: String,
+    pub summary: String,
+    pub models: Vec<String>,
+    pub primary_action: Option<ZeroclawProviderAction>,
+    pub secondary_action: Option<ZeroclawProviderAction>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ZeroclawControlPlane {
+    pub selected_provider: String,
+    pub selected_model: String,
+    pub ready: bool,
+    pub headline: String,
+    pub detail: String,
+    pub providers: Vec<ZeroclawProviderOption>,
+    pub available_models: Vec<String>,
+}
+
 pub async fn collect_provider_auth_statuses(settings: &KaizenSettings) -> Vec<ProviderAuthStatus> {
     let openai = openai_status();
     let anthropic = anthropic_status();
@@ -76,6 +108,79 @@ pub async fn provider_auth_status(provider: &str, settings: &KaizenSettings) -> 
         Some("nvidia") => nvidia_status(),
         Some(other) => unsupported_status(other),
         None => unsupported_status(provider.trim()),
+    }
+}
+
+pub async fn zeroclaw_control_plane(settings: &KaizenSettings) -> ZeroclawControlPlane {
+    let statuses = collect_provider_auth_statuses(settings).await;
+    let mut provider_rows = Vec::new();
+
+    for status in statuses.iter().filter(|row| !row.native_alias) {
+        let models = provider_model_catalog(status.provider.as_str());
+        let selected = canonical_provider_id(&settings.inference_provider) == Some(status.provider.as_str());
+        let (badge, summary, primary_action, secondary_action) =
+            zeroclaw_option_presentation(status);
+
+        provider_rows.push(ZeroclawProviderOption {
+            id: status.provider.clone(),
+            label: provider_label(status.provider.as_str()).to_string(),
+            selected,
+            ready: status.can_chat,
+            connected: status.configured,
+            auth_kind: status.auth_method.clone(),
+            badge,
+            summary,
+            models,
+            primary_action,
+            secondary_action,
+        });
+    }
+
+    provider_rows.sort_by_key(|row| {
+        (
+            if row.selected { 0 } else if row.ready { 1 } else { 2 },
+            row.label.clone(),
+        )
+    });
+
+    let selected_provider = canonical_provider_id(&settings.inference_provider)
+        .unwrap_or(settings.inference_provider.trim())
+        .to_string();
+    let selected_row = provider_rows
+        .iter()
+        .find(|row| row.id == selected_provider)
+        .or_else(|| provider_rows.iter().find(|row| row.selected));
+    let available_models = selected_row
+        .map(|row| row.models.clone())
+        .unwrap_or_else(|| provider_model_catalog(selected_provider.as_str()));
+    let ready = selected_row.map(|row| row.ready).unwrap_or(false);
+
+    let headline = if let Some(row) = selected_row {
+        if row.ready {
+            format!("Zeroclaw is ready with {}", row.label)
+        } else if row.connected {
+            format!("{} needs attention", row.label)
+        } else {
+            format!("Finish connecting {}", row.label)
+        }
+    } else {
+        "Choose a provider for Zeroclaw".to_string()
+    };
+
+    let detail = if let Some(base) = statuses.iter().find(|row| row.provider == selected_provider) {
+        user_facing_status_detail(base)
+    } else {
+        "Choose the provider you want Zeroclaw to use, then pick a model.".to_string()
+    };
+
+    ZeroclawControlPlane {
+        selected_provider,
+        selected_model: settings.inference_model.clone(),
+        ready,
+        headline,
+        detail,
+        providers: provider_rows,
+        available_models,
     }
 }
 
@@ -522,7 +627,7 @@ fn first_present_env<const N: usize>(keys: [&str; N]) -> Option<(String, String)
     None
 }
 
-fn canonical_provider_id(value: &str) -> Option<&'static str> {
+pub fn canonical_provider_id(value: &str) -> Option<&'static str> {
     match value.trim().to_ascii_lowercase().as_str() {
         "openai" | "gpt" | "codex" => Some("openai"),
         "anthropic" | "claude" => Some("anthropic"),
@@ -539,6 +644,136 @@ fn is_native_alias(value: &str) -> bool {
         value.trim().to_ascii_lowercase().as_str(),
         "zeroclaw" | "kaizen" | "kai-zen" | "native"
     )
+}
+
+pub fn provider_model_catalog(provider: &str) -> Vec<String> {
+    match canonical_provider_id(provider).unwrap_or(provider.trim()) {
+        "anthropic" => vec![
+            "claude-sonnet-4-20250514".to_string(),
+            "claude-3-7-sonnet-latest".to_string(),
+            "claude-3-5-haiku-latest".to_string(),
+        ],
+        "openai" => vec![
+            "gpt-5.4".to_string(),
+            "gpt-5".to_string(),
+            "gpt-4.1".to_string(),
+            "gpt-4.1-mini".to_string(),
+            "o3-mini".to_string(),
+        ],
+        "gemini" => vec![
+            "gemini-2.5-pro".to_string(),
+            "gemini-2.5-flash".to_string(),
+            "gemini-2.0-flash".to_string(),
+        ],
+        "gemini-cli" => vec![
+            "gemini-2.5-pro".to_string(),
+            "gemini-2.5-flash".to_string(),
+        ],
+        "codex-cli" => vec![
+            "gpt-5.4".to_string(),
+            "gpt-5-codex".to_string(),
+            "use-codex-config".to_string(),
+        ],
+        "nvidia" => vec![
+            "meta/llama-3.1-70b-instruct".to_string(),
+            "meta/llama-3.3-70b-instruct".to_string(),
+            "mistralai/mixtral-8x7b-instruct-v0.1".to_string(),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+fn provider_label(provider: &str) -> &'static str {
+    match provider {
+        "anthropic" => "Claude",
+        "openai" => "OpenAI",
+        "gemini" => "Gemini",
+        "gemini-cli" => "Gemini CLI",
+        "codex-cli" => "Codex",
+        "nvidia" => "NVIDIA",
+        _ => "Provider",
+    }
+}
+
+fn zeroclaw_option_presentation(
+    status: &ProviderAuthStatus,
+) -> (
+    String,
+    String,
+    Option<ZeroclawProviderAction>,
+    Option<ZeroclawProviderAction>,
+) {
+    let badge = if status.can_chat {
+        "Ready".to_string()
+    } else if status.configured {
+        "Needs attention".to_string()
+    } else {
+        "Not connected".to_string()
+    };
+
+    let summary = user_facing_status_detail(status);
+
+    let primary_action = match status.provider.as_str() {
+        "gemini" if status.can_chat => Some(ZeroclawProviderAction {
+            kind: "refresh".to_string(),
+            label: "Refresh sign-in".to_string(),
+        }),
+        "gemini" => Some(ZeroclawProviderAction {
+            kind: "connect".to_string(),
+            label: "Connect".to_string(),
+        }),
+        _ => None,
+    };
+
+    let secondary_action = match status.provider.as_str() {
+        "gemini" if status.configured => Some(ZeroclawProviderAction {
+            kind: "disconnect".to_string(),
+            label: "Disconnect".to_string(),
+        }),
+        _ => None,
+    };
+
+    (badge, summary, primary_action, secondary_action)
+}
+
+fn user_facing_status_detail(status: &ProviderAuthStatus) -> String {
+    match status.provider.as_str() {
+        "codex-cli" => {
+            if status.can_chat {
+                "Ready on this device.".to_string()
+            } else {
+                "Sign in with Codex on this device to use it.".to_string()
+            }
+        }
+        "gemini" => match status.auth_method.as_str() {
+            "local_oauth" if status.can_chat => "Connected with Google sign-in.".to_string(),
+            "local_oauth" => "Use Google sign-in to finish connecting Gemini.".to_string(),
+            "api_key_env" => "Ready on this device.".to_string(),
+            "oauth_access_token_env" | "oauth_adc" => "Ready on this device.".to_string(),
+            _ => "Connect Gemini to use it with Zeroclaw.".to_string(),
+        },
+        "openai" | "anthropic" | "nvidia" => {
+            if status.can_chat {
+                "Ready on this device.".to_string()
+            } else {
+                "This provider becomes ready when its key is available on this device.".to_string()
+            }
+        }
+        "gemini-cli" => {
+            if status.can_chat {
+                "Ready on this device.".to_string()
+            } else {
+                "Sign in with Gemini CLI on this device to use it.".to_string()
+            }
+        }
+        _ => {
+            if status.can_chat {
+                "Ready.".to_string()
+            } else {
+                "Not ready yet.".to_string()
+            }
+        }
+    }
 }
 
 fn google_project_id() -> Option<String> {

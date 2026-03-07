@@ -182,6 +182,7 @@ Stop-StaleProcesses
 
 [System.Environment]::SetEnvironmentVariable("KAIZEN_HOST", "127.0.0.1", "Process")
 [System.Environment]::SetEnvironmentVariable("KAIZEN_CORE_URL", "http://127.0.0.1:9100", "Process")
+[System.Environment]::SetEnvironmentVariable("KAIZEN_REPO_ROOT", $repoRoot, "Process")
 
 if ([string]::IsNullOrWhiteSpace($env:KAIZEN_INFERENCE_PROVIDER)) {
     [System.Environment]::SetEnvironmentVariable("KAIZEN_INFERENCE_PROVIDER", "codex-cli", "Process")
