@@ -51,7 +51,34 @@ if (-not (Test-Path (Join-Path $repoRoot ".git"))) {
 $logsDir = Join-Path $repoRoot "logs\updater"
 New-Item -ItemType Directory -Force $logsDir | Out-Null
 $logPath = Join-Path $logsDir "update-last.log"
-Start-Transcript -Path $logPath -Force | Out-Null
+$transcriptStarted = $false
+try {
+    Start-Transcript -Path $logPath -Force | Out-Null
+    $transcriptStarted = $true
+} catch {
+}
+
+function Start-Launcher {
+    param(
+        [string]$LauncherPath,
+        [switch]$Rebuild
+    )
+
+    $arguments = @(
+        "-NoLogo",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        $LauncherPath
+    )
+
+    if ($Rebuild.IsPresent) {
+        $arguments += "-Rebuild"
+    }
+
+    Start-Process -FilePath "powershell.exe" -ArgumentList $arguments -WindowStyle Hidden | Out-Null
+}
 
 try {
     Start-Sleep -Seconds 2
@@ -73,14 +100,16 @@ try {
 
     $behind = ((& $gitPath -C $repoRoot rev-list --count HEAD..origin/main) | Out-String).Trim()
     if ([int]$behind -le 0) {
-        & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $launcherPath | Out-Null
+        Start-Launcher -LauncherPath $launcherPath
         exit 0
     }
 
     Invoke-CheckedCommand -WorkingDirectory $repoRoot -FilePath $gitPath -Arguments @("pull", "--ff-only", "origin", "main")
 
-    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $launcherPath -Rebuild | Out-Null
+    Start-Launcher -LauncherPath $launcherPath -Rebuild
 }
 finally {
-    Stop-Transcript | Out-Null
+    if ($transcriptStarted) {
+        Stop-Transcript | Out-Null
+    }
 }
