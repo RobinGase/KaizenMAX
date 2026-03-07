@@ -12,8 +12,8 @@ Kaizen MAX is a Windows-first operator cockpit for AI-assisted engineering.
 1. Start the stack:
    - `scripts/start-max.bat`
    - or `scripts/start-max.ps1`
-2. The native desktop Mission Control UI opens (`Tauri v2 + SolidJS`).
-3. Open `Settings -> Providers & Auth`
+2. The native desktop Mission Control UI opens (`Tauri v2 + Leptos`).
+3. Open `Integrations`
 4. Configure inference:
     - `zeroclaw` routes through the configured `inference_provider`
     - default local path: `codex-cli` with ChatGPT OAuth (`codex login`)
@@ -25,7 +25,7 @@ Kaizen MAX is a Windows-first operator cockpit for AI-assisted engineering.
 
 ## Crystal Ball Bridge (Optional)
 
-All setup is in `Settings -> Providers & Auth`:
+All setup is in `Integrations` and `Settings`:
 
 1. Set Mattermost URL and Channel ID
 2. Set `MATTERMOST_TOKEN` in the environment
@@ -57,14 +57,14 @@ Current build runs without vault:
 
 - Windows 10/11
 - Rust stable toolchain (`cargo`)
-- Node.js + npm (for Mission Control UI dev/build)
+- `trunk` (`cargo install trunk`) for Rust-native frontend builds
 
 The legacy React frontend is retired on the `RustTestBranch` rewrite path.
 
 ## Verify Build
 
 - Core tests: run `cargo test` in `core/`
-- UI checks: run `npm install && npm run check` in `ui-tauri-solid/`
-- UI dev launch: run `npm run tauri:dev` in `ui-tauri-solid/`
+- UI checks: run `cargo check --workspace` in `ui-rust-native/`
+- UI dev launch: run `cargo tauri dev` in `ui-rust-native/`
 
 For full architecture and rollout details, see `implementation_plan.md`.

@@ -1241,7 +1241,7 @@ async fn chat(
                 tracing::warn!("Inference not available: {}", reason);
                 (
                     format!(
-                        "Kaizen is in offline mode. Open Settings -> Providers & Auth and configure \
+                        "Kaizen is in offline mode. Open Integrations and configure \
                          OpenAI/Anthropic/NVIDIA API keys, Gemini API key or Google OAuth, or Gemini CLI local OAuth. Reason: {reason}"
                     ),
                     None,
@@ -2589,7 +2589,7 @@ async fn oauth_start(
         return Err((
             StatusCode::BAD_REQUEST,
             format!(
-                "OAuth is not available for provider '{}'. Use the provider's supported local auth method in Settings -> Providers & Auth.",
+                "OAuth is not available for provider '{}'. Use the provider's supported local auth method in Integrations.",
                 provider
             ),
         ));

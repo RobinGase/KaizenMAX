@@ -3,7 +3,7 @@
 ## Phase 0 - Completed Baseline Reset
 - Archive legacy frontend state and remove obsolete rewrite branch.
 - Establish fresh branch and new architecture direction.
-- Initialize new Tauri v2 + SolidJS Mission Control shell.
+- Initialize the Rust-native Tauri Mission Control shell.
 
 ## Phase 1 - Mission Control Functional Baseline
 - Implement all major tabs with working backend actions.

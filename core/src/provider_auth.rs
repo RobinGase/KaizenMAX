@@ -322,7 +322,7 @@ fn gemini_status() -> ProviderAuthStatus {
         auth_method: "unconfigured".to_string(),
         configured: false,
         can_chat: false,
-        message: "Set GEMINI_API_KEY / GOOGLE_API_KEY, connect Gemini OAuth in Providers & Auth, or configure Google ADC OAuth.".to_string(),
+        message: "Set GEMINI_API_KEY / GOOGLE_API_KEY, connect Gemini OAuth in Integrations, or configure Google ADC OAuth.".to_string(),
         env_hints: gemini_env_hints(),
     }
 }
@@ -733,7 +733,7 @@ async fn resolve_gemini_credential() -> Result<InferenceCredential, String> {
         return Err(error);
     }
 
-    Err("No Gemini credential configured. Set GEMINI_API_KEY / GOOGLE_API_KEY, connect Gemini OAuth in Providers & Auth, or configure Google ADC OAuth.".to_string())
+    Err("No Gemini credential configured. Set GEMINI_API_KEY / GOOGLE_API_KEY, connect Gemini OAuth in Integrations, or configure Google ADC OAuth.".to_string())
 }
 
 fn gemini_env_hints() -> Vec<String> {

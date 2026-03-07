@@ -2,18 +2,17 @@
 
 ## Top-Level Map
 - `core/` - Rust backend runtime and API surface.
-- `ui-tauri-solid/` - active desktop frontend (Tauri v2 + SolidJS).
+- `ui-rust-native/` - active desktop frontend (Tauri v2 + Leptos).
 - `scripts/` - launch, validation, and smoke automation.
 - `config/` - defaults and schema for runtime settings.
 - `contexts/` - policies and prompt templates.
 - `tools/Nex_Alignment/` - external governance toolkit (submodule).
 - `docs/` - focused technical docs.
 
-## Frontend Structure (`ui-tauri-solid/`)
-- `src/App.tsx` - Mission Control shell and tab workflows.
-- `src/lib/types.ts` - typed API/domain models.
-- `src/lib/tauri.ts` - command bridge request helper.
-- `src/styles.css` - visual system tokens and layout styling.
+## Frontend Structure (`ui-rust-native/`)
+- `frontend/src/app.rs` - Mission Control shell and workflows.
+- `frontend/src/models/types.rs` - typed API/domain models.
+- `frontend/src/styles.css` - Rust-native visual system styling.
 - `src-tauri/src/commands.rs` - backend proxy command handlers.
 - `src-tauri/src/lib.rs` - Tauri app bootstrap and state wiring.
 

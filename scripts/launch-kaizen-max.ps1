@@ -8,11 +8,11 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = (Resolve-Path "$PSScriptRoot\..").Path
 $coreDir = Join-Path $repoRoot "core"
-$uiDir = Join-Path $repoRoot "ui-tauri-solid"
+$uiDir = Join-Path $repoRoot "ui-rust-native"
 $envFile = Join-Path $repoRoot ".env"
 $logsDir = Join-Path $repoRoot "logs\launcher"
 $coreExe = Join-Path $coreDir "target\release\kaizen-gateway.exe"
-$uiExe = Join-Path $uiDir "src-tauri\target\release\kaizen_mission_control.exe"
+$uiExe = Join-Path $uiDir "target\release\kaizen_mission_control.exe"
 
 function Load-EnvironmentFile {
     param([string]$Path)
@@ -146,7 +146,6 @@ Load-EnvironmentFile -Path $envFile
 New-Item -ItemType Directory -Force $logsDir | Out-Null
 
 $cargoPath = Get-ToolPath -PreferredPath (Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe") -CommandName "cargo"
-$npmPath = Get-ToolPath -PreferredPath (Join-Path ${env:ProgramFiles} "nodejs\npm.cmd") -CommandName "npm"
 
 $coreSources = @(
     (Join-Path $coreDir "Cargo.toml"),
@@ -155,9 +154,11 @@ $coreSources = @(
 )
 
 $uiSources = @(
-    (Join-Path $uiDir "package.json"),
-    (Join-Path $uiDir "package-lock.json"),
-    (Join-Path $uiDir "src"),
+    (Join-Path $uiDir "Cargo.toml"),
+    (Join-Path $uiDir "Cargo.lock"),
+    (Join-Path $uiDir "frontend\Cargo.toml"),
+    (Join-Path $uiDir "frontend\index.html"),
+    (Join-Path $uiDir "frontend\src"),
     (Join-Path $uiDir "src-tauri\Cargo.toml"),
     (Join-Path $uiDir "src-tauri\Cargo.lock"),
     (Join-Path $uiDir "src-tauri\tauri.conf.json"),
@@ -165,17 +166,12 @@ $uiSources = @(
     (Join-Path $uiDir "src-tauri\icons")
 )
 
-if (-not (Test-Path (Join-Path $uiDir "node_modules"))) {
-    Invoke-CheckedCommand -WorkingDirectory $uiDir -FilePath $npmPath -Arguments @("ci")
-}
-
 if (Test-RebuildNeeded -TargetPath $coreExe -SourcePaths $coreSources -Force:$Rebuild) {
     Invoke-CheckedCommand -WorkingDirectory $coreDir -FilePath $cargoPath -Arguments @("build", "--release", "--bin", "kaizen-gateway")
 }
 
 if (Test-RebuildNeeded -TargetPath $uiExe -SourcePaths $uiSources -Force:$Rebuild) {
-    Invoke-CheckedCommand -WorkingDirectory $uiDir -FilePath $npmPath -Arguments @("run", "build")
-    Invoke-CheckedCommand -WorkingDirectory $uiDir -FilePath $npmPath -Arguments @("run", "tauri:build")
+    Invoke-CheckedCommand -WorkingDirectory $uiDir -FilePath $cargoPath -Arguments @("tauri", "build")
 }
 
 Stop-StaleProcesses

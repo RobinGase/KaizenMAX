@@ -336,11 +336,11 @@ function Stop-StaleKaizenProcesses {
         }
 
         if ($name -eq "cargo.exe") {
-            return ($cmd -like "*$repoRootLower*\\core*") -or ($cmd -like "*$repoRootLower*\\ui-tauri-solid*")
+            return ($cmd -like "*$repoRootLower*\\core*") -or ($cmd -like "*$repoRootLower*\\ui-rust-native*")
         }
 
-        if ($name -eq "node.exe" -or $name -eq "npm.exe" -or $name -eq "npm.cmd") {
-            return ($cmd -like "*$repoRootLower*\\ui-tauri-solid*")
+        if ($name -eq "trunk.exe") {
+            return ($cmd -like "*$repoRootLower*\\ui-rust-native*")
         }
 
         return $false
@@ -413,7 +413,7 @@ Write-Host "[Kaizen MAX] Loaded environment from $EnvFile" -ForegroundColor Cyan
 
 $repoRoot = (Resolve-Path "$PSScriptRoot\..").Path
 $coreDir = Join-Path $repoRoot "core"
-$uiDir = Join-Path $repoRoot "ui-tauri-solid"
+$uiDir = Join-Path $repoRoot "ui-rust-native"
 Stop-StaleKaizenProcesses -RepoRoot $repoRoot
 $jobHandle = New-KillOnCloseJob
 
@@ -443,7 +443,7 @@ try {
 
     if (-not $CoreOnly) {
         $uiExeCandidates = @(
-            (Join-Path $uiDir "src-tauri\target\release\kaizen_mission_control.exe")
+            (Join-Path $uiDir "target\release\kaizen_mission_control.exe")
         )
 
         $uiExe = $uiExeCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
@@ -451,8 +451,10 @@ try {
         if ($uiExe) {
             $uiProcess = Start-ExecutableProcess -Name "Kaizen MAX UI" -ExecutablePath $uiExe -WorkingDirectory $uiDir -JobHandle $jobHandle
         } else {
-            Write-Host "[Kaizen MAX] Release Mission Control binary not found. Using npm run tauri:dev." -ForegroundColor Yellow
-            $uiProcess = Start-CommandProcess -Name "Kaizen MAX UI" -WorkingDirectory $uiDir -Command "npm run tauri:dev" -JobHandle $jobHandle
+            Write-Host "[Kaizen MAX] Release Mission Control binary not found. Using cargo tauri dev." -ForegroundColor Yellow
+            $cargoPath = Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe"
+            if (-not (Test-Path $cargoPath)) { $cargoPath = "cargo" }
+            $uiProcess = Start-CommandProcess -Name "Kaizen MAX UI" -WorkingDirectory $uiDir -Command "`"$cargoPath`" tauri dev" -JobHandle $jobHandle
         }
 
         $started.Add([PSCustomObject]@{

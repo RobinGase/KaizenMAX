@@ -5,8 +5,7 @@ This document defines the fresh-start architecture after retiring the legacy Dio
 
 ## System Layout
 - `core/`: Rust Axum backend for orchestration, chat inference, agent lifecycle, gates, settings, secrets vault, and Crystal Ball events.
-- `ui-tauri-solid/`: current transitional desktop app.
-- `ui-rust-native/` (in progress): Tauri host with Rust-native frontend pipeline (no Node in default path).
+- `ui-rust-native/`: Tauri host with Rust-native frontend pipeline (primary desktop app).
 - `tools/Nex_Alignment/`: external governance framework used for planning, audit discipline, and release checkpoints.
 
 ## Runtime Boundaries
@@ -26,8 +25,8 @@ This document defines the fresh-start architecture after retiring the legacy Dio
 
 ## API Contract Strategy
 - Reuse existing backend routes in `core/src/main.rs`.
-- Keep typed frontend interfaces under `ui-tauri-solid/src/lib/types.ts`.
-- Keep request transport centralized in `ui-tauri-solid/src/lib/tauri.ts`.
+- Keep typed frontend interfaces under `ui-rust-native/frontend/src/models/types.rs`.
+- Keep transport and command bridge logic inside the Rust-native frontend/Tauri host.
 
 ## Reliability and Security Baseline
 - Health polling + explicit error toasts in UI.
@@ -36,8 +35,7 @@ This document defines the fresh-start architecture after retiring the legacy Dio
 - Secret reveal action requires explicit user confirmation.
 
 ## Build and Launch
-- Transitional UI dev: `npm run tauri:dev` in `ui-tauri-solid/`.
-- Target UI dev path: cargo-only Rust-native frontend (no Node default dependency).
+- UI dev: `cargo tauri dev` in `ui-rust-native/`.
 - Core dev: `cargo run` in `core/` or `scripts/start-max.ps1 -CoreOnly`.
 - Combined pipeline: `scripts/start-max.ps1` starts core + Mission Control UI.
 
