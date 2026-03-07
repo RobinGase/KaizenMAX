@@ -21,6 +21,7 @@ Kaizen MAX is a Windows-first operator cockpit for AI-assisted engineering.
     - Gemini: `GEMINI_API_KEY` / `GOOGLE_API_KEY`, or set `GOOGLE_OAUTH_CLIENT_ID` + `GOOGLE_CLOUD_PROJECT` and click `Connect OAuth`
     - Gemini CLI: install `gemini` and complete its local login once
     - Codex CLI: install `codex` and complete `codex login` once
+    - OpenClaw fallback: install `openclaw`; Zeroclaw will use allowed OpenClaw tools when a local Zeroclaw tool is missing
 5. Send a message in Kaizen chat
 
 ## Crystal Ball Bridge (Optional)
@@ -52,6 +53,9 @@ Current build runs without vault:
 - App-managed Gemini OAuth stores tokens locally at `data/oauth/gemini_tokens.json` by default
 - `zeroclaw` is the provider/auth control plane and routes to the configured provider
 - Default zeroclaw route is `codex-cli` (`gpt-5.4`) so the local app works without vault or API keys on a logged-in Codex CLI setup
+- OpenClaw fallback is enabled by default when `openclaw` is available on PATH
+- Current OpenClaw fallback tools: `sessions`, `browser`, `scheduler`, `health`
+- Current explicit chat syntax: `/openclaw sessions`, `/openclaw browser status`, `/openclaw browser open https://example.com`, `/openclaw cron list`
 
 ## Minimal Requirements
 

@@ -13,6 +13,8 @@ $envFile = Join-Path $repoRoot ".env"
 $logsDir = Join-Path $repoRoot "logs\launcher"
 $coreExe = Join-Path $coreDir "target\release\kaizen-gateway.exe"
 $uiExe = Join-Path $uiDir "target\release\kaizen_mission_control.exe"
+$openclawStdout = Join-Path $logsDir "openclaw-gateway.log"
+$openclawStderr = Join-Path $logsDir "openclaw-gateway.err.log"
 
 function Load-EnvironmentFile {
     param([string]$Path)
@@ -142,6 +144,63 @@ function Wait-CoreHealthy {
     throw "Core did not become healthy.`nSTDOUT:`n$stdout`nSTDERR:`n$stderr"
 }
 
+function Test-OpenClawFallbackEnabled {
+    if ([string]::IsNullOrWhiteSpace($env:ZEROCLAW_OPENCLAW_FALLBACK_ENABLED)) {
+        return $true
+    }
+
+    $value = $env:ZEROCLAW_OPENCLAW_FALLBACK_ENABLED.Trim().ToLowerInvariant()
+    return -not @("0", "false", "off", "no").Contains($value)
+}
+
+function Test-OpenClawHealthy {
+    param([string]$OpenClawPath)
+
+    & $OpenClawPath health --json *> $null
+    return ($LASTEXITCODE -eq 0)
+}
+
+function Wait-OpenClawHealthy {
+    param([string]$OpenClawPath)
+
+    for ($attempt = 0; $attempt -lt 30; $attempt++) {
+        Start-Sleep -Milliseconds 500
+        if (Test-OpenClawHealthy -OpenClawPath $OpenClawPath) {
+            return
+        }
+    }
+
+    $stderr = if (Test-Path $openclawStderr) { Get-Content $openclawStderr -Tail 80 | Out-String } else { "" }
+    throw "OpenClaw gateway did not become healthy.`nSTDERR:`n$stderr"
+}
+
+function Ensure-OpenClawGateway {
+    if (-not (Test-OpenClawFallbackEnabled)) {
+        return
+    }
+
+    $preferredOpenClaw = if ($env:OPENCLAW_CLI_PATH) { $env:OPENCLAW_CLI_PATH } else { Join-Path $env:APPDATA "npm\openclaw.cmd" }
+    try {
+        $openClawPath = Get-ToolPath -PreferredPath $preferredOpenClaw -CommandName "openclaw"
+    } catch {
+        return
+    }
+
+    if (Test-OpenClawHealthy -OpenClawPath $openClawPath) {
+        return
+    }
+
+    Remove-Item $openclawStdout, $openclawStderr -ErrorAction SilentlyContinue
+    Start-Process `
+        -FilePath $openClawPath `
+        -ArgumentList @("gateway", "run", "--auth", "none") `
+        -RedirectStandardOutput $openclawStdout `
+        -RedirectStandardError $openclawStderr `
+        -WindowStyle Hidden | Out-Null
+
+    Wait-OpenClawHealthy -OpenClawPath $openClawPath
+}
+
 Load-EnvironmentFile -Path $envFile
 New-Item -ItemType Directory -Force $logsDir | Out-Null
 
@@ -200,6 +259,8 @@ try {
     Stop-Process -Id $coreProc.Id -Force -ErrorAction SilentlyContinue
     throw
 }
+
+Ensure-OpenClawGateway
 
 Start-Process -FilePath $uiExe -WorkingDirectory (Split-Path -Parent $uiExe) | Out-Null
 Write-Host "Kaizen MAX launched." -ForegroundColor Green

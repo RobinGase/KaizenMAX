@@ -519,12 +519,29 @@ async fn invoke_tauri_command<T: for<'de> serde::Deserialize<'de>>(cmd: &str) ->
     serde_wasm_bindgen::from_value(response).map_err(|e| e.to_string())
 }
 
+async fn invoke_tauri_with_args<T: for<'de> serde::Deserialize<'de>>(
+    cmd: &str,
+    payload: Value,
+) -> Result<T, String> {
+    let args = serde_wasm_bindgen::to_value(&payload).map_err(|e| e.to_string())?;
+    let response = tauri_invoke(cmd, args).await.map_err(js_error)?;
+    serde_wasm_bindgen::from_value(response).map_err(|e| e.to_string())
+}
+
 async fn check_release_update() -> Result<ReleaseUpdateStatus, String> {
     invoke_tauri_command("check_release_update").await
 }
 
 async fn apply_release_update() -> Result<ReleaseUpdateAction, String> {
     invoke_tauri_command("apply_release_update").await
+}
+
+async fn start_local_auth_flow(provider: &str) -> Result<LocalAuthAction, String> {
+    invoke_tauri_with_args(
+        "start_local_auth_flow",
+        json!({ "provider": provider.to_string() }),
+    )
+    .await
 }
 
 #[derive(Clone)]
@@ -2616,9 +2633,12 @@ fn IntegrationsTabView(app_state: AppState) -> impl IntoView {
     let (gh_repos, set_gh_repos) = create_signal(Vec::<GitHubRepoSummary>::new());
     let (provider_statuses, set_provider_statuses) =
         create_signal(Vec::<ProviderAuthStatusResponse>::new());
-    let (current_settings, set_current_settings) = create_signal(None::<KaizenSettings>);
+    let (runtime_status, set_runtime_status) = create_signal(None::<ZeroclawRuntimeStatusResponse>);
+    let (_current_settings, set_current_settings) = create_signal(None::<KaizenSettings>);
     let (oauth_statuses, set_oauth_statuses) =
         create_signal(HashMap::<String, OAuthStatusResponse>::new());
+    let (selected_provider, set_selected_provider) = create_signal("codex-cli".to_string());
+    let (selected_model, set_selected_model) = create_signal("gpt-5.4".to_string());
     let (integration_error, set_integration_error) = create_signal(String::new());
     let (integration_notice, set_integration_notice) = create_signal(String::new());
     let (integration_busy, set_integration_busy) = create_signal(false);
@@ -2644,7 +2664,11 @@ fn IntegrationsTabView(app_state: AppState) -> impl IntoView {
                 })
                 .await
                 {
-                    Ok(settings) => set_current_settings.set(Some(settings)),
+                    Ok(settings) => {
+                        set_selected_provider.set(settings.inference_provider.clone());
+                        set_selected_model.set(settings.inference_model.clone());
+                        set_current_settings.set(Some(settings));
+                    }
                     Err(err) => issues.push(format!("Settings: {}", err)),
                 }
 
@@ -2682,6 +2706,22 @@ fn IntegrationsTabView(app_state: AppState) -> impl IntoView {
                 {
                     Ok(rows) => set_provider_statuses.set(rows),
                     Err(err) => issues.push(format!("Provider auth: {}", err)),
+                }
+
+                match core_request::<ZeroclawRuntimeStatusResponse>(CoreRequestInput {
+                    method: "GET".to_string(),
+                    path: "/api/zeroclaw/status".to_string(),
+                    body: None,
+                    admin_token: token.clone(),
+                })
+                .await
+                {
+                    Ok(status) => {
+                        set_selected_provider.set(status.active_provider.clone());
+                        set_selected_model.set(status.active_model.clone());
+                        set_runtime_status.set(Some(status));
+                    }
+                    Err(err) => issues.push(format!("Zeroclaw runtime: {}", err)),
                 }
 
                 match core_request::<OAuthStatusResponse>(CoreRequestInput {
@@ -2837,7 +2877,10 @@ fn IntegrationsTabView(app_state: AppState) -> impl IntoView {
     {
         let refresh_integrations = Rc::clone(&refresh_integrations);
         create_effect(move |_| {
-            (refresh_integrations)();
+            untrack({
+                let refresh_integrations = Rc::clone(&refresh_integrations);
+                move || (refresh_integrations)()
+            });
             let refresh_integrations = Rc::clone(&refresh_integrations);
             if let Ok(handle) =
                 set_interval_with_handle(move || (refresh_integrations)(), Duration::from_secs(20))
@@ -2849,18 +2892,150 @@ fn IntegrationsTabView(app_state: AppState) -> impl IntoView {
 
     let refresh_integrations_top = Rc::clone(&refresh_integrations);
     let gemini_oauth = create_memo(move |_| oauth_statuses.get().get("gemini").cloned());
-    let zeroclaw_status = create_memo(move |_| {
+    let codex_status = create_memo(move |_| {
         provider_statuses
             .get()
             .into_iter()
-            .find(|row| row.provider == "zeroclaw")
+            .find(|row| row.provider == "codex-cli")
     });
+    let gemini_status = create_memo(move |_| {
+        provider_statuses
+            .get()
+            .into_iter()
+            .find(|row| row.provider == "gemini")
+    });
+    let gemini_cli_status = create_memo(move |_| {
+        provider_statuses
+            .get()
+            .into_iter()
+            .find(|row| row.provider == "gemini-cli")
+    });
+    let runtime_provider_options = create_memo(move |_| {
+        runtime_status
+            .get()
+            .map(|status| status.providers)
+            .unwrap_or_default()
+    });
+    let selected_provider_models = create_memo(move |_| {
+        runtime_provider_options
+            .get()
+            .into_iter()
+            .find(|provider| provider.id == selected_provider.get())
+            .map(|provider| provider.models)
+            .unwrap_or_default()
+    });
+
+    let save_route: Rc<dyn Fn(String, String)> = Rc::new({
+        let app_state = app_state.clone();
+        let refresh_integrations = Rc::clone(&refresh_integrations);
+        move |provider: String, model: String| {
+            if integration_busy.get() {
+                return;
+            }
+
+            set_integration_busy.set(true);
+            set_selected_provider.set(provider.clone());
+            set_selected_model.set(model.clone());
+            let app_state = app_state.clone();
+            let refresh_integrations = Rc::clone(&refresh_integrations);
+            wasm_bindgen_futures::spawn_local(async move {
+                match core_request::<KaizenSettings>(CoreRequestInput {
+                    method: "PATCH".to_string(),
+                    path: "/api/settings".to_string(),
+                    body: Some(json!({
+                        "inference_provider": provider,
+                        "inference_model": model,
+                    })),
+                    admin_token: app_state.admin_token_opt(),
+                })
+                .await
+                {
+                    Ok(settings) => {
+                        set_current_settings.set(Some(settings));
+                        set_integration_error.set(String::new());
+                        set_integration_notice.set("Zeroclaw updated.".to_string());
+                    }
+                    Err(err) => {
+                        set_integration_notice.set(String::new());
+                        set_integration_error.set(format!("Could not save Zeroclaw route: {}", err));
+                    }
+                }
+                set_integration_busy.set(false);
+                (refresh_integrations)();
+            });
+        }
+    });
+
+    let start_codex_auth: Rc<dyn Fn()> = Rc::new({
+        let schedule_oauth_poll = Rc::clone(&schedule_oauth_poll);
+        let refresh_integrations = Rc::clone(&refresh_integrations);
+        move || {
+            if integration_busy.get() {
+                return;
+            }
+
+            set_integration_busy.set(true);
+            let schedule_oauth_poll = Rc::clone(&schedule_oauth_poll);
+            let refresh_integrations = Rc::clone(&refresh_integrations);
+            wasm_bindgen_futures::spawn_local(async move {
+                match start_local_auth_flow("codex-cli").await {
+                    Ok(action) => {
+                        set_integration_error.set(String::new());
+                        set_integration_notice.set(action.message);
+                        (schedule_oauth_poll)();
+                    }
+                    Err(err) => {
+                        set_integration_notice.set(String::new());
+                        set_integration_error.set(format!("Codex sign-in failed: {}", err));
+                    }
+                }
+                set_integration_busy.set(false);
+                (refresh_integrations)();
+            });
+        }
+    });
+
+    let start_gemini_cli_auth: Rc<dyn Fn()> = Rc::new({
+        let schedule_oauth_poll = Rc::clone(&schedule_oauth_poll);
+        let refresh_integrations = Rc::clone(&refresh_integrations);
+        move || {
+            if integration_busy.get() {
+                return;
+            }
+
+            set_integration_busy.set(true);
+            let schedule_oauth_poll = Rc::clone(&schedule_oauth_poll);
+            let refresh_integrations = Rc::clone(&refresh_integrations);
+            wasm_bindgen_futures::spawn_local(async move {
+                match start_local_auth_flow("gemini-cli").await {
+                    Ok(action) => {
+                        set_integration_error.set(String::new());
+                        set_integration_notice.set(action.message);
+                        (schedule_oauth_poll)();
+                    }
+                    Err(err) => {
+                        set_integration_notice.set(String::new());
+                        set_integration_error.set(format!("Gemini CLI sign-in failed: {}", err));
+                    }
+                }
+                set_integration_busy.set(false);
+                (refresh_integrations)();
+            });
+        }
+    });
+
+    let save_route_for_selector = Rc::clone(&save_route);
+    let start_codex_auth_card = Rc::clone(&start_codex_auth);
+    let start_gemini_oauth_card = Rc::clone(&start_gemini_oauth);
+    let refresh_gemini_oauth_card = Rc::clone(&refresh_gemini_oauth);
+    let disconnect_gemini_oauth_card = Rc::clone(&disconnect_gemini_oauth);
+    let start_gemini_cli_auth_card = Rc::clone(&start_gemini_cli_auth);
 
     view! {
         <section class="tab-view">
             <div class="tab-head">
                 <h2>"Integrations"</h2>
-                <p>"GitHub and provider auth integration status."</p>
+                <p>"Set up Zeroclaw once, then let it handle the runtime."</p>
             </div>
 
             <div class="toolbar-inline" style="margin-bottom: 12px;">
@@ -2889,165 +3064,274 @@ fn IntegrationsTabView(app_state: AppState) -> impl IntoView {
                 }
             }}
 
-            <div class="card-grid three-col">
-                <article class="card">
-                    <h3>"GitHub"</h3>
+            <div class="card">
+                <h3>"Zeroclaw"</h3>
+                <div class="list-stack compact" style="margin-bottom: 12px;">
+                    <div>{move || {
+                        runtime_status
+                            .get()
+                            .map(|status| status.message)
+                            .unwrap_or_else(|| "Zeroclaw runtime is loading.".to_string())
+                    }}</div>
+                    <div class="muted">{move || {
+                        runtime_status
+                            .get()
+                            .map(|status| format!("{} connected account(s).", status.connected_accounts))
+                            .unwrap_or_else(|| "Checking connected accounts.".to_string())
+                    }}</div>
+                </div>
+                <div class="form-grid two-col" style="align-items: end;">
+                    <label>
+                        <span>"Provider"</span>
+                        <select
+                            class="select-input"
+                            prop:value=move || selected_provider.get()
+                            prop:disabled=move || integration_busy.get()
+                            on:change=move |ev| set_selected_provider.set(event_target_value(&ev))
+                        >
+                            <For
+                                each=move || runtime_provider_options.get()
+                                key=|provider| provider.id.clone()
+                                children=move |provider| {
+                                    view! {
+                                        <option value={provider.id.clone()}>{provider.label}</option>
+                                    }
+                                }
+                            />
+                        </select>
+                    </label>
+                    <label>
+                        <span>"Model"</span>
+                        <select
+                            class="select-input"
+                            prop:value=move || selected_model.get()
+                            prop:disabled=move || integration_busy.get() || selected_provider_models.get().is_empty()
+                            on:change=move |ev| set_selected_model.set(event_target_value(&ev))
+                        >
+                            <For
+                                each=move || selected_provider_models.get()
+                                key=|model| model.clone()
+                                children=move |model| {
+                                    view! {
+                                        <option value={model.clone()}>{model}</option>
+                                    }
+                                }
+                            />
+                        </select>
+                    </label>
+                </div>
+                <div class="toolbar-inline" style="margin-top: 12px;">
+                    <button
+                        class="action-btn"
+                        prop:disabled=move || integration_busy.get()
+                        on:click=move |_| (save_route_for_selector)(selected_provider.get(), selected_model.get())
+                    >
+                        "Save Zeroclaw"
+                    </button>
+                </div>
+            </div>
+
+            <div class="card">
+                <h3>"Tools"</h3>
+                <div class="list-stack compact">
                     {move || {
-                        if let Some(status) = gh_status.get() {
+                        if let Some(status) = runtime_status.get() {
                             view! {
-                                <div class="list-stack">
-                                    <div><strong>"Authenticated: "</strong>{if status.authenticated { "Yes" } else { "No" }}</div>
-                                    <div><strong>"Host: "</strong>{status.host}</div>
-                                    <div><strong>"Login: "</strong>{status.login.unwrap_or_else(|| "-".to_string())}</div>
-                                    <div><strong>"Token Source: "</strong>{status.token_source.unwrap_or_else(|| "-".to_string())}</div>
-                                </div>
-                            }
-                                .into_view()
+                                <For
+                                    each=move || status.tools.clone()
+                                    key=|tool| tool.id.clone()
+                                    children=move |tool| {
+                                        let state = if tool.available && tool.connected {
+                                            "Ready"
+                                        } else if tool.available {
+                                            "Available"
+                                        } else {
+                                            "Planned"
+                                        };
+                                        view! {
+                                            <div class="repo-row">
+                                                <span>{format!("{} · {}", tool.label, state)}</span>
+                                                <span>{tool.message}</span>
+                                            </div>
+                                        }
+                                    }
+                                />
+                            }.into_view()
                         } else {
-                            view! { <div class="muted">"No GitHub status yet."</div> }.into_view()
+                            view! { <div class="muted">"Tool status is loading."</div> }.into_view()
                         }
                     }}
-                </article>
+                </div>
+            </div>
 
+            <div class="card-grid two-col">
                 <article class="card">
-                    <h3>"Runtime Auth Model"</h3>
+                    <h3>"Codex"</h3>
                     {move || {
-                        if let Some(settings) = current_settings.get() {
+                        if let Some(status) = codex_status.get() {
+                            let start_codex_auth_click = Rc::clone(&start_codex_auth_card);
                             view! {
                                 <div class="list-stack">
-                                    <div><strong>"Runtime Engine: "</strong>{settings.runtime_engine}</div>
-                                    <div><strong>"Inference Provider: "</strong>{settings.inference_provider}</div>
-                                    <div><strong>"Inference Model: "</strong>{settings.inference_model}</div>
-                                    <div><strong>"Gateway: "</strong>{app_state.health.get().map(|status| status.version).unwrap_or_else(|| "-".to_string())}</div>
-                                </div>
-                            }
-                                .into_view()
-                        } else {
-                            view! { <div class="muted">"No runtime status yet."</div> }.into_view()
-                        }
-                    }}
-                </article>
-
-                <article class="card">
-                    <h3>"Gemini OAuth"</h3>
-                    {move || {
-                        if let Some(status) = gemini_oauth.get() {
-                            let start_gemini_oauth = Rc::clone(&start_gemini_oauth);
-                            let refresh_gemini_oauth = Rc::clone(&refresh_gemini_oauth);
-                            let disconnect_gemini_oauth = Rc::clone(&disconnect_gemini_oauth);
-                            view! {
-                                <div class="list-stack">
-                                    <div><strong>"Supported: "</strong>{if status.supported { "Yes" } else { "No" }}</div>
-                                    <div><strong>"Connected: "</strong>{if status.connected { "Yes" } else { "No" }}</div>
-                                    <div><strong>"Access Token: "</strong>{if status.access_token_configured { "Present" } else { "Missing" }}</div>
-                                    <div><strong>"Refresh Token: "</strong>{if status.refresh_token_configured { "Present" } else { "Missing" }}</div>
+                                    <div>{if status.can_chat { "Signed in." } else { "Not connected yet." }}</div>
                                     <div>{status.message}</div>
                                     <div class="toolbar-inline">
                                         <button
                                             class="action-btn"
                                             prop:disabled=move || integration_busy.get()
-                                            on:click=move |_| (start_gemini_oauth)()
+                                            on:click=move |_| (start_codex_auth_click)()
                                         >
-                                            "Connect OAuth"
-                                        </button>
-                                        <button
-                                            class="action-btn subtle"
-                                            prop:disabled=move || integration_busy.get()
-                                            on:click=move |_| (refresh_gemini_oauth)()
-                                        >
-                                            "Refresh Token"
-                                        </button>
-                                        <button
-                                            class="action-btn danger"
-                                            prop:disabled=move || integration_busy.get()
-                                            on:click=move |_| (disconnect_gemini_oauth)()
-                                        >
-                                            "Disconnect"
+                                            "Add Account"
                                         </button>
                                     </div>
                                 </div>
                             }
                                 .into_view()
                         } else {
-                            view! { <div class="muted">"No Gemini OAuth status loaded."</div> }.into_view()
+                            view! { <div class="muted">"Codex status is loading."</div> }.into_view()
                         }
                     }}
                 </article>
-            </div>
-
-            <div class="card-grid two-col">
-                <article class="card">
-                    <h3>"Zeroclaw Control Plane"</h3>
-                    <div class="list-stack">
-                        <div>{move || zeroclaw_status.get().map(|row| row.message).unwrap_or_else(|| "Zeroclaw uses the configured provider and its local auth method.".to_string())}</div>
-                        <div>"Set inference_provider to `codex-cli` when you want zeroclaw to use Codex CLI ChatGPT OAuth."</div>
-                        <div>"Set inference_provider to `gemini` when you want zeroclaw to use Gemini API or Gemini OAuth."</div>
-                        <div>"Set inference_provider to `gemini-cli` when you want zeroclaw to use Gemini CLI local OAuth."</div>
-                    </div>
-                </article>
 
                 <article class="card">
-                    <h3>"Provider Guidance"</h3>
-                    <div class="list-stack">
-                        <div>"OpenAI / Anthropic / NVIDIA use env vars for API access."</div>
-                        <div>"Gemini app OAuth needs `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_CLOUD_PROJECT`."</div>
-                        <div>"Codex CLI uses `codex login` and its local `~/.codex/auth.json` session."</div>
-                        <div>"If you use API keys, set them in the shell environment before launch."</div>
-                    </div>
-                </article>
-            </div>
-
-            <div class="card-grid two-col">
-                <article class="card">
-                    <h3>"Repositories"</h3>
+                    <h3>"Gemini"</h3>
                     {move || {
-                        if gh_repos.get().is_empty() {
-                            view! { <div class="muted">"No repositories loaded."</div> }.into_view()
-                        } else {
+                        if let Some(status) = gemini_status.get() {
+                            let oauth = gemini_oauth.get();
+                            let start_gemini_oauth_click = Rc::clone(&start_gemini_oauth_card);
+                            let refresh_gemini_oauth_click = Rc::clone(&refresh_gemini_oauth_card);
+                            let disconnect_gemini_oauth_click = Rc::clone(&disconnect_gemini_oauth_card);
                             view! {
-                                <For
-                                    each=move || gh_repos.get()
-                                    key=|repo| repo.name_with_owner.clone()
-                                    children=move |repo| {
-                                        view! {
-                                            <div class="repo-row">
-                                                <span>{repo.name_with_owner}</span>
-                                                <span>{repo.viewer_permission}</span>
-                                            </div>
+                                <div class="list-stack">
+                                    <div>{status.message}</div>
+                                    <div class="toolbar-inline">
+                                        <button
+                                            class="action-btn"
+                                            prop:disabled=move || integration_busy.get()
+                                            on:click=move |_| (start_gemini_oauth_click)()
+                                        >
+                                            "Connect"
+                                        </button>
+                                    </div>
+                                    {move || {
+                                        if let Some(oauth) = oauth.clone() {
+                                            if oauth.connected {
+                                                let refresh_gemini_oauth_button = Rc::clone(&refresh_gemini_oauth_click);
+                                                let disconnect_gemini_oauth_button = Rc::clone(&disconnect_gemini_oauth_click);
+                                                view! {
+                                                    <div class="toolbar-inline">
+                                                        <button
+                                                            class="action-btn subtle"
+                                                            prop:disabled=move || integration_busy.get()
+                                                            on:click=move |_| (refresh_gemini_oauth_button)()
+                                                        >
+                                                            "Refresh"
+                                                        </button>
+                                                        <button
+                                                            class="action-btn danger"
+                                                            prop:disabled=move || integration_busy.get()
+                                                            on:click=move |_| (disconnect_gemini_oauth_button)()
+                                                        >
+                                                            "Disconnect"
+                                                        </button>
+                                                    </div>
+                                                }.into_view()
+                                            } else {
+                                                ().into_view()
+                                            }
+                                        } else {
+                                            ().into_view()
                                         }
-                                    }
-                                />
+                                    }}
+                                </div>
                             }
                                 .into_view()
-                        }
-                    }}
-                </article>
-
-                <article class="card">
-                    <h3>"Provider Details"</h3>
-                    {move || {
-                        if provider_statuses.get().is_empty() {
-                            view! { <div class="muted">"No provider details loaded."</div> }.into_view()
                         } else {
-                            view! {
-                                <For
-                                    each=move || provider_statuses.get()
-                                    key=|row| row.provider.clone()
-                                    children=move |row| {
-                                        view! {
-                                            <div class="repo-row">
-                                                <span>{format!("{} -> {}", row.provider, row.resolved_provider)}</span>
-                                                <span>{row.message}</span>
-                                            </div>
-                                        }
-                                    }
-                                />
-                            }
-                                .into_view()
+                            view! { <div class="muted">"Gemini status is loading."</div> }.into_view()
                         }
                     }}
                 </article>
             </div>
+
+            <details class="card details-card">
+                <summary class="details-summary">"Advanced"</summary>
+                <div class="card-grid two-col" style="margin-top: 12px;">
+                    <article class="card inner-card">
+                        <h3>"Gemini CLI"</h3>
+                        {move || {
+                            let start_gemini_cli_auth_click = Rc::clone(&start_gemini_cli_auth_card);
+                            view! {
+                                <div class="list-stack compact">
+                                    <div>{move || {
+                                        gemini_cli_status
+                                            .get()
+                                            .map(|row| row.message)
+                                            .unwrap_or_else(|| "Gemini CLI status is loading.".to_string())
+                                    }}</div>
+                                    <div class="toolbar-inline">
+                                        <button
+                                            class="action-btn subtle"
+                                            prop:disabled=move || integration_busy.get()
+                                            on:click=move |_| (start_gemini_cli_auth_click)()
+                                        >
+                                            "Add Account"
+                                        </button>
+                                    </div>
+                                </div>
+                            }
+                                .into_view()
+                        }}
+                    </article>
+
+                    <article class="card inner-card">
+                        <h3>"Other Providers"</h3>
+                        <div class="list-stack compact">
+                            <div>"OpenAI, Anthropic, and NVIDIA use API keys today."</div>
+                            <div>"Multiple OpenAI accounts are not supported yet."</div>
+                            <div>"Kilocode is not integrated yet."</div>
+                        </div>
+                    </article>
+
+                    <article class="card inner-card">
+                        <h3>"GitHub"</h3>
+                        {move || {
+                            if let Some(status) = gh_status.get() {
+                                view! {
+                                    <div class="list-stack compact">
+                                        <div>{if status.authenticated { "Connected." } else { "Not connected." }}</div>
+                                        <div>{status.login.unwrap_or_else(|| status.host)}</div>
+                                    </div>
+                                }.into_view()
+                            } else {
+                                view! { <div class="muted">"GitHub status is loading."</div> }.into_view()
+                            }
+                        }}
+                    </article>
+
+                    <article class="card inner-card">
+                        <h3>"Repositories"</h3>
+                        {move || {
+                            if gh_repos.get().is_empty() {
+                                view! { <div class="muted">"No repositories loaded."</div> }.into_view()
+                            } else {
+                                view! {
+                                    <For
+                                        each=move || gh_repos.get()
+                                        key=|repo| repo.name_with_owner.clone()
+                                        children=move |repo| {
+                                            view! {
+                                                <div class="repo-row">
+                                                    <span>{repo.name_with_owner}</span>
+                                                    <span>{repo.viewer_permission}</span>
+                                                </div>
+                                            }
+                                        }
+                                    />
+                                }.into_view()
+                            }
+                        }}
+                    </article>
+                </div>
+            </details>
         </section>
     }
 }

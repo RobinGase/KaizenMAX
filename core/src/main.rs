@@ -29,9 +29,11 @@ use kaizen_gateway::{
         InferenceCredential, InferenceProvider, InferenceRequest, LiveInferenceEvent,
         OpenAIStreamChunk,
     },
+    openclaw_bridge,
     oauth_store,
     provider_auth::{self, ProviderAuthStatus},
     settings::{KaizenSettings, SettingsPatch},
+    zeroclaw_runtime::{self, ZeroclawProviderOption, ZeroclawRuntimeStatus, ZeroclawToolStatus},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -928,6 +930,33 @@ async fn append_to_conversation(
     }
 }
 
+async fn try_openclaw_fallback_reply(
+    state: &AppState,
+    conversation_key: &str,
+    user_message: &str,
+    expected_version: u64,
+) -> Result<Option<(String, Option<String>, Option<String>)>, (StatusCode, String)> {
+    match openclaw_bridge::maybe_execute_from_prompt(user_message).await {
+        Ok(Some(result)) => {
+            append_to_conversation(
+                state,
+                conversation_key,
+                user_message,
+                &result.reply,
+                expected_version,
+            )
+            .await;
+            Ok(Some((
+                result.reply,
+                Some(result.tool_id),
+                Some("openclaw-fallback".to_string()),
+            )))
+        }
+        Ok(None) => Ok(None),
+        Err(error) => Err((StatusCode::BAD_GATEWAY, error)),
+    }
+}
+
 fn parse_gemini_stream_tokens(data: &str) -> Vec<String> {
     fn collect_tokens(value: &serde_json::Value, out: &mut Vec<String>) {
         if let Some(candidates) = value.get("candidates").and_then(|v| v.as_array()) {
@@ -1069,6 +1098,54 @@ async fn chat(
         ));
     }
     let use_wrap_mode = wrap_mode_requested && requested_targets.len() > 1;
+
+    if !use_wrap_mode {
+        if let Some((reply, model, provider_name)) = try_openclaw_fallback_reply(
+            &state,
+            &conversation_key,
+            message,
+            expected_conversation_version,
+        )
+        .await?
+        {
+            let active_agents = state.agents.read().await.active_count();
+            let gate_state = state.gates.read().await.current_state;
+
+            push_event(
+                &state,
+                CrystalBallEvent {
+                    event_id: next_id(&state, "event"),
+                    timestamp: now_timestamp(),
+                    event_type: "orchestration.response".to_string(),
+                    source_actor: target.clone(),
+                    source_agent_id: target.to_lowercase(),
+                    target_actor: source.clone(),
+                    target_agent_id: "human".to_string(),
+                    task_id: "chat".to_string(),
+                    message: if reply.len() > 200 {
+                        format!("{}...", &reply[..200])
+                    } else {
+                        reply.clone()
+                    },
+                    visibility: "operator".to_string(),
+                },
+            )
+            .await;
+
+            return Ok(Json(ChatResponse {
+                reply,
+                source,
+                target,
+                active_agents,
+                gate_state,
+                model,
+                provider: provider_name,
+                mode: selected_mode,
+                input_tokens: None,
+                output_tokens: None,
+            }));
+        }
+    }
 
     // Attempt real inference
     let (reply, model, provider_name, input_tokens, output_tokens) = if use_wrap_mode {
@@ -1361,6 +1438,35 @@ async fn chat_stream(
     }
 
     let expected_conversation_version = conversation_version(&state, &conversation_key).await;
+
+    if let Some((reply, model, provider_name)) = try_openclaw_fallback_reply(
+        &state,
+        &conversation_key,
+        &message,
+        expected_conversation_version,
+    )
+    .await?
+    {
+        let stream = async_stream::stream! {
+            let token_event = Event::default()
+                .event("token")
+                .data(serde_json::json!({ "text": reply.clone() }).to_string());
+            yield Result::<Event, Infallible>::Ok(token_event);
+
+            let done_event = Event::default().event("done").data(
+                serde_json::json!({
+                    "full_response": reply,
+                    "model": model,
+                    "provider": provider_name,
+                })
+                .to_string(),
+            );
+            yield Result::<Event, Infallible>::Ok(done_event);
+        };
+
+        let sse = Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)));
+        return Ok(sse.into_response());
+    }
 
     let (provider, model, mut credential) = resolve_inference(
         &state,
@@ -2512,6 +2618,35 @@ async fn list_provider_statuses(
     ))
 }
 
+async fn zeroclaw_runtime_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ZeroclawRuntimeStatus>, (StatusCode, String)> {
+    require_admin_access(&state, &headers, "GET /api/zeroclaw/status")?;
+    let settings = state.settings.read().await.clone();
+    Ok(Json(zeroclaw_runtime::collect_runtime_status(&settings).await))
+}
+
+async fn zeroclaw_provider_options(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ZeroclawProviderOption>>, (StatusCode, String)> {
+    require_admin_access(&state, &headers, "GET /api/zeroclaw/providers")?;
+    let settings = state.settings.read().await.clone();
+    Ok(Json(
+        zeroclaw_runtime::collect_provider_options(&settings).await,
+    ))
+}
+
+async fn zeroclaw_tool_statuses(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ZeroclawToolStatus>>, (StatusCode, String)> {
+    require_admin_access(&state, &headers, "GET /api/zeroclaw/tools")?;
+    let settings = state.settings.read().await.clone();
+    Ok(Json(zeroclaw_runtime::collect_tool_statuses(&settings).await))
+}
+
 // ---- OAuth Framework Endpoints ----
 
 #[derive(Serialize)]
@@ -3147,6 +3282,9 @@ async fn main() {
         .route("/api/github/repos", get(github_repos))
         // No-vault provider auth endpoints
         .route("/api/providers/status", get(list_provider_statuses))
+        .route("/api/zeroclaw/status", get(zeroclaw_runtime_status))
+        .route("/api/zeroclaw/providers", get(zeroclaw_provider_options))
+        .route("/api/zeroclaw/tools", get(zeroclaw_tool_statuses))
         // OAuth endpoints
         .route("/api/oauth/{provider}/start", get(oauth_start))
         .route("/api/oauth/{provider}/status", get(oauth_status))

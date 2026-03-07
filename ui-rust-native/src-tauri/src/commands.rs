@@ -268,6 +268,67 @@ pub async fn open_external_url(url: String) -> Result<(), String> {
         .map_err(|error| format!("Failed to open external URL: {error}"))
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAuthAction {
+    pub started: bool,
+    pub message: String,
+}
+
+fn provider_auth_command(provider: &str) -> Result<ProcessCommand, String> {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "codex" | "codex-cli" => {
+            let mut command = if cfg!(windows) {
+                let mut command = ProcessCommand::new("cmd");
+                command.arg("/C").arg("codex");
+                command
+            } else {
+                ProcessCommand::new("codex")
+            };
+            command.arg("login");
+            Ok(command)
+        }
+        "gemini" | "gemini-cli" => {
+            let mut command = ProcessCommand::new("gemini");
+            command.arg("login");
+            Ok(command)
+        }
+        other => Err(format!(
+            "Local sign-in is not available for provider '{}'.",
+            other
+        )),
+    }
+}
+
+#[tauri::command]
+pub async fn start_local_auth_flow(provider: String) -> Result<LocalAuthAction, String> {
+    let mut command = provider_auth_command(&provider)?;
+
+    #[cfg(windows)]
+    {
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    command
+        .spawn()
+        .map_err(|error| format!("Failed to start sign-in for {}: {error}", provider))?;
+
+    let message = match provider.trim().to_ascii_lowercase().as_str() {
+        "codex" | "codex-cli" => {
+            "Codex sign-in started. Finish the login in your browser, then return here."
+        }
+        "gemini" | "gemini-cli" => {
+            "Gemini sign-in started. Finish the login flow, then return here."
+        }
+        _ => "Sign-in started.",
+    };
+
+    Ok(LocalAuthAction {
+        started: true,
+        message: message.to_string(),
+    })
+}
+
 #[tauri::command]
 pub async fn core_request(
     input: CoreRequestInput,

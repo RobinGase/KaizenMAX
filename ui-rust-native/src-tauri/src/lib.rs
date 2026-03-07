@@ -2,7 +2,8 @@ pub mod commands;
 
 use commands::{
     apply_release_update, check_release_update, close_agent_window, core_request,
-    focus_agent_window, open_agent_window, open_external_url, CoreClientState,
+    focus_agent_window, open_agent_window, open_external_url, start_local_auth_flow,
+    CoreClientState,
 };
 use std::sync::Once;
 
@@ -47,6 +48,7 @@ pub fn run() {
             core_request,
             check_release_update,
             apply_release_update,
+            start_local_auth_flow,
             open_external_url,
             open_agent_window,
             focus_agent_window,

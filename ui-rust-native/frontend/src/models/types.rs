@@ -288,6 +288,47 @@ pub struct ProviderAuthStatusResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ZeroclawActionHintResponse {
+    pub kind: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ZeroclawProviderOptionResponse {
+    pub id: String,
+    pub label: String,
+    pub active: bool,
+    pub configured: bool,
+    pub ready: bool,
+    pub auth_method: String,
+    pub message: String,
+    pub models: Vec<String>,
+    pub auth_action: Option<ZeroclawActionHintResponse>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ZeroclawToolStatusResponse {
+    pub id: String,
+    pub label: String,
+    pub category: String,
+    pub available: bool,
+    pub connected: bool,
+    pub status: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ZeroclawRuntimeStatusResponse {
+    pub ready: bool,
+    pub active_provider: String,
+    pub active_model: String,
+    pub connected_accounts: u32,
+    pub message: String,
+    pub providers: Vec<ZeroclawProviderOptionResponse>,
+    pub tools: Vec<ZeroclawToolStatusResponse>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReleaseUpdateStatus {
     pub supported: bool,
     pub repo_root: Option<String>,
@@ -303,6 +344,12 @@ pub struct ReleaseUpdateStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReleaseUpdateAction {
+    pub started: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalAuthAction {
     pub started: bool,
     pub message: String,
 }
