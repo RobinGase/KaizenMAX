@@ -286,3 +286,23 @@ pub struct ProviderAuthStatusResponse {
     pub message: String,
     pub env_hints: Vec<String>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseUpdateStatus {
+    pub supported: bool,
+    pub repo_root: Option<String>,
+    pub current_branch: Option<String>,
+    pub current_commit: Option<String>,
+    pub remote_commit: Option<String>,
+    pub worktree_clean: bool,
+    pub update_available: bool,
+    pub can_apply: bool,
+    pub behind_count: u32,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseUpdateAction {
+    pub started: bool,
+    pub message: String,
+}

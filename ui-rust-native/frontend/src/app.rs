@@ -513,6 +513,20 @@ async fn core_request<T: for<'de> serde::Deserialize<'de>>(
     }
 }
 
+async fn invoke_tauri_command<T: for<'de> serde::Deserialize<'de>>(cmd: &str) -> Result<T, String> {
+    let args = serde_wasm_bindgen::to_value(&json!({})).map_err(|e| e.to_string())?;
+    let response = tauri_invoke(cmd, args).await.map_err(js_error)?;
+    serde_wasm_bindgen::from_value(response).map_err(|e| e.to_string())
+}
+
+async fn check_release_update() -> Result<ReleaseUpdateStatus, String> {
+    invoke_tauri_command("check_release_update").await
+}
+
+async fn apply_release_update() -> Result<ReleaseUpdateAction, String> {
+    invoke_tauri_command("apply_release_update").await
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub active_tab: RwSignal<TabId>,
@@ -520,6 +534,9 @@ pub struct AppState {
     pub agents: RwSignal<Vec<SubAgent>>,
     pub events: RwSignal<Vec<CrystalBallEvent>>,
     pub admin_token: RwSignal<String>,
+    pub release_update: RwSignal<Option<ReleaseUpdateStatus>>,
+    pub update_busy: RwSignal<bool>,
+    pub update_notice: RwSignal<String>,
 }
 
 impl AppState {
@@ -530,6 +547,9 @@ impl AppState {
             agents: create_rw_signal(vec![]),
             events: create_rw_signal(vec![]),
             admin_token: create_rw_signal(load_admin_token()),
+            release_update: create_rw_signal(None),
+            update_busy: create_rw_signal(false),
+            update_notice: create_rw_signal(String::new()),
         }
     }
 
@@ -545,6 +565,7 @@ impl AppState {
             let _ = state_init.refresh_health().await;
             let _ = state_init.refresh_agents().await;
             let _ = state_init.refresh_events().await;
+            let _ = state_init.refresh_release_update().await;
         });
 
         if let Ok(handle) = set_interval_with_handle(
@@ -557,6 +578,21 @@ impl AppState {
                 });
             },
             Duration::from_secs(5),
+        ) {
+            on_cleanup(move || {
+                handle.clear();
+            });
+        }
+
+        let update_state = self.clone();
+        if let Ok(handle) = set_interval_with_handle(
+            move || {
+                let state_clone = update_state.clone();
+                wasm_bindgen_futures::spawn_local(async move {
+                    let _ = state_clone.refresh_release_update().await;
+                });
+            },
+            Duration::from_secs(900),
         ) {
             on_cleanup(move || {
                 handle.clear();
@@ -597,6 +633,12 @@ impl AppState {
         })
         .await?;
         self.events.set(payload);
+        Ok(())
+    }
+
+    async fn refresh_release_update(&self) -> Result<(), String> {
+        let payload = check_release_update().await?;
+        self.release_update.set(Some(payload));
         Ok(())
     }
 }
@@ -3446,6 +3488,63 @@ pub fn MainMissionView() -> impl IntoView {
                         </div>
 
                         <div class="top-metrics">
+                            {let app_state_for_banner = app_state.clone();
+                            move || {
+                                let update_status = app_state_for_banner.release_update.get();
+                                if let Some(status) = update_status {
+                                    if status.update_available {
+                                        let app_state_for_update = app_state_for_banner.clone();
+                                        let app_state_for_click = app_state_for_update.clone();
+                                        view! {
+                                            <div class="update-cta">
+                                                <span class="count-pill update-pill">
+                                                    {format!("Update ready +{}", status.behind_count)}
+                                                </span>
+                                                <button
+                                                    class="tiny-btn active"
+                                                    prop:disabled=move || app_state_for_update.update_busy.get()
+                                                    on:click=move |_| {
+                                                        let app_state = app_state_for_click.clone();
+                                                        app_state.update_busy.set(true);
+                                                        wasm_bindgen_futures::spawn_local(async move {
+                                                            match apply_release_update().await {
+                                                                Ok(action) => {
+                                                                    app_state.update_notice.set(action.message);
+                                                                }
+                                                                Err(error) => {
+                                                                    app_state.update_busy.set(false);
+                                                                    app_state.update_notice.set(error);
+                                                                    let _ = app_state.refresh_release_update().await;
+                                                                }
+                                                            }
+                                                        });
+                                                    }
+                                                >
+                                                    {move || {
+                                                        if app_state_for_update.update_busy.get() {
+                                                            "Updating..."
+                                                        } else {
+                                                            "Apply Update"
+                                                        }
+                                                    }}
+                                                </button>
+                                            </div>
+                                        }
+                                        .into_view()
+                                    } else if !app_state_for_banner.update_notice.get().is_empty() {
+                                        view! {
+                                            <span class="count-pill">
+                                                {app_state_for_banner.update_notice.get()}
+                                            </span>
+                                        }
+                                        .into_view()
+                                    } else {
+                                        ().into_view()
+                                    }
+                                } else {
+                                    ().into_view()
+                                }
+                            }}
                             <span class="count-pill">"Agents " {move || app_state.agents.get().len()}</span>
                             <span class="count-pill">"Events " {move || app_state.events.get().len()}</span>
                         </div>

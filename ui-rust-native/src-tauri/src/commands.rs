@@ -1,8 +1,20 @@
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::{
+    env,
+    path::{Path, PathBuf},
+    process::Command as ProcessCommand,
+    time::Duration,
+};
 use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder as WindowBuilder};
 use tracing::{debug, info};
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 fn agent_window_label(agent_id: &str) -> String {
     let safe_id: String = agent_id
@@ -23,6 +35,28 @@ pub struct CoreClientState {
     pub client: reqwest::Client,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseUpdateStatus {
+    pub supported: bool,
+    pub repo_root: Option<String>,
+    pub current_branch: Option<String>,
+    pub current_commit: Option<String>,
+    pub remote_commit: Option<String>,
+    pub worktree_clean: bool,
+    pub update_available: bool,
+    pub can_apply: bool,
+    pub behind_count: u32,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseUpdateAction {
+    pub started: bool,
+    pub message: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CoreRequestInput {
@@ -38,6 +72,185 @@ pub struct CoreRequestInput {
 pub struct CoreResponseOutput {
     pub status: u16,
     pub body: Value,
+}
+
+fn derive_repo_root_from_exe() -> Option<PathBuf> {
+    let exe = env::current_exe().ok()?;
+    let mut current = exe.parent()?.to_path_buf();
+    for _ in 0..4 {
+        current = current.parent()?.to_path_buf();
+    }
+    if current.join(".git").exists() {
+        Some(current)
+    } else {
+        None
+    }
+}
+
+fn resolve_repo_root() -> Option<PathBuf> {
+    if let Ok(value) = env::var("KAIZEN_REPO_ROOT") {
+        let candidate = PathBuf::from(value);
+        if candidate.join(".git").exists() {
+            return Some(candidate);
+        }
+    }
+    derive_repo_root_from_exe()
+}
+
+fn run_git(repo_root: &Path, args: &[&str]) -> Result<String, String> {
+    let output = ProcessCommand::new("git")
+        .args(args)
+        .current_dir(repo_root)
+        .output()
+        .map_err(|error| format!("Failed to run git {}: {error}", args.join(" ")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() { stderr } else { stdout };
+        return Err(format!("git {} failed: {}", args.join(" "), detail));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn release_update_status() -> ReleaseUpdateStatus {
+    let Some(repo_root) = resolve_repo_root() else {
+        return ReleaseUpdateStatus {
+            supported: false,
+            repo_root: None,
+            current_branch: None,
+            current_commit: None,
+            remote_commit: None,
+            worktree_clean: false,
+            update_available: false,
+            can_apply: false,
+            behind_count: 0,
+            reason: "This install is not running from a repo checkout, so repo-based updates are unavailable.".to_string(),
+        };
+    };
+
+    let repo_root_text = repo_root.display().to_string();
+
+    let current_branch = match run_git(&repo_root, &["rev-parse", "--abbrev-ref", "HEAD"]) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            return ReleaseUpdateStatus {
+                supported: false,
+                repo_root: Some(repo_root_text),
+                current_branch: None,
+                current_commit: None,
+                remote_commit: None,
+                worktree_clean: false,
+                update_available: false,
+                can_apply: false,
+                behind_count: 0,
+                reason: error,
+            };
+        }
+    };
+
+    let current_commit = run_git(&repo_root, &["rev-parse", "HEAD"]).ok();
+    let worktree_clean = run_git(&repo_root, &["status", "--porcelain"])
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(false);
+
+    if let Err(error) = run_git(&repo_root, &["fetch", "origin", "main"]) {
+        return ReleaseUpdateStatus {
+            supported: false,
+            repo_root: Some(repo_root_text),
+            current_branch,
+            current_commit,
+            remote_commit: None,
+            worktree_clean,
+            update_available: false,
+            can_apply: false,
+            behind_count: 0,
+            reason: error,
+        };
+    }
+
+    let remote_commit = match run_git(&repo_root, &["rev-parse", "origin/main"]) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            return ReleaseUpdateStatus {
+                supported: false,
+                repo_root: Some(repo_root_text),
+                current_branch,
+                current_commit,
+                remote_commit: None,
+                worktree_clean,
+                update_available: false,
+                can_apply: false,
+                behind_count: 0,
+                reason: error,
+            };
+        }
+    };
+
+    let behind_count = run_git(&repo_root, &["rev-list", "--count", "HEAD..origin/main"])
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(0);
+
+    let on_main = current_branch.as_deref() == Some("main");
+    let update_available = behind_count > 0;
+    let can_apply = on_main && worktree_clean && update_available;
+
+    let reason = if !on_main {
+        "Release updates are only available when this checkout is on main.".to_string()
+    } else if !worktree_clean {
+        "Local changes are present. Commit or discard them before applying a release update.".to_string()
+    } else if update_available {
+        "A newer main branch release is available.".to_string()
+    } else {
+        "This install is already on the latest main branch release.".to_string()
+    };
+
+    ReleaseUpdateStatus {
+        supported: true,
+        repo_root: Some(repo_root_text),
+        current_branch,
+        current_commit,
+        remote_commit,
+        worktree_clean,
+        update_available,
+        can_apply,
+        behind_count,
+        reason,
+    }
+}
+
+fn spawn_release_update_process(repo_root: &Path) -> Result<(), String> {
+    let script_path = repo_root.join("scripts").join("update-kaizen-max.ps1");
+    if !script_path.exists() {
+        return Err(format!(
+            "Updater script not found at {}",
+            script_path.display()
+        ));
+    }
+
+    let mut command = ProcessCommand::new("powershell.exe");
+    command
+        .arg("-NoLogo")
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-File")
+        .arg(&script_path)
+        .arg("-RepoRoot")
+        .arg(repo_root)
+        .current_dir(repo_root);
+
+    #[cfg(windows)]
+    {
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Failed to start updater: {error}"))
 }
 
 #[tauri::command]
@@ -115,6 +328,39 @@ pub async fn core_request(
     debug!(status = status, path = %path, "core_request complete");
 
     Ok(CoreResponseOutput { status, body })
+}
+
+#[tauri::command]
+pub async fn check_release_update() -> Result<ReleaseUpdateStatus, String> {
+    Ok(release_update_status())
+}
+
+#[tauri::command]
+pub async fn apply_release_update(app: AppHandle) -> Result<ReleaseUpdateAction, String> {
+    let status = release_update_status();
+    if !status.supported {
+        return Err(status.reason);
+    }
+    if !status.can_apply {
+        return Err(status.reason);
+    }
+
+    let repo_root = status
+        .repo_root
+        .clone()
+        .ok_or_else(|| "Updater repo root is unavailable.".to_string())?;
+    spawn_release_update_process(Path::new(&repo_root))?;
+
+    let app_to_close = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(400));
+        app_to_close.exit(0);
+    });
+
+    Ok(ReleaseUpdateAction {
+        started: true,
+        message: "Applying update from origin/main. Mission Control will restart when the build is ready.".to_string(),
+    })
 }
 
 #[tauri::command(rename_all = "snake_case")]

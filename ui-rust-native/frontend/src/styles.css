@@ -351,6 +351,12 @@ body,
   gap: 8px;
 }
 
+.update-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .count-pill,
 .tiny-pill {
   border: 1px solid var(--mc-border-strong);
@@ -365,6 +371,12 @@ body,
 
 .tiny-pill {
   padding: 2px 7px;
+}
+
+.update-pill {
+  border-color: rgba(35, 121, 255, 0.72);
+  color: #ffffff;
+  background: rgba(35, 121, 255, 0.1);
 }
 
 .main-mission,
