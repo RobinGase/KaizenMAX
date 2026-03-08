@@ -12,6 +12,7 @@ pub mod openclaw_bridge;
 pub mod provider_auth;
 pub mod providers;
 pub mod settings;
+pub mod worker_runtime;
 pub mod zeroclaw_runtime;
 // vault module removed - now lives in standalone Kai-Vault repo
 // see: D:\KaizenInnovations\Kai-Vault

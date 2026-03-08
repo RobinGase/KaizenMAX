@@ -463,12 +463,15 @@ impl AgentRegistry {
         let allowed = match (from, to) {
             (AgentStatus::Idle, AgentStatus::Active) => true,
             (AgentStatus::Idle, AgentStatus::Blocked) => true,
+            (AgentStatus::Active, AgentStatus::Idle) => true,
             (AgentStatus::Active, AgentStatus::ReviewPending) => true,
             (AgentStatus::ReviewPending, AgentStatus::Done) => kaizen_review_approved,
             (AgentStatus::ReviewPending, AgentStatus::Active) => true,
+            (AgentStatus::ReviewPending, AgentStatus::Idle) => true,
             (AgentStatus::ReviewPending, AgentStatus::Blocked) => true,
             (AgentStatus::Active, AgentStatus::Blocked) => true,
             (AgentStatus::Blocked, AgentStatus::Active) => true,
+            (AgentStatus::Blocked, AgentStatus::Idle) => true,
             // Idempotent state updates are allowed.
             (a, b) if a == b => true,
             _ => false,

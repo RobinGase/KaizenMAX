@@ -516,6 +516,56 @@ async fn core_request<T: for<'de> serde::Deserialize<'de>>(
     }
 }
 
+fn worker_job_status_label(status: &WorkerJobStatus) -> &'static str {
+    match status {
+        WorkerJobStatus::Pending => "Queued",
+        WorkerJobStatus::Claimed => "Claimed",
+        WorkerJobStatus::Running => "Running",
+        WorkerJobStatus::Completed => "Completed",
+        WorkerJobStatus::Blocked => "Blocked",
+        WorkerJobStatus::Failed => "Failed",
+        WorkerJobStatus::Cancelled => "Cancelled",
+    }
+}
+
+fn worker_job_status_class(status: &WorkerJobStatus) -> &'static str {
+    match status {
+        WorkerJobStatus::Pending => "queued",
+        WorkerJobStatus::Claimed => "claimed",
+        WorkerJobStatus::Running => "running",
+        WorkerJobStatus::Completed => "done",
+        WorkerJobStatus::Blocked => "blocked",
+        WorkerJobStatus::Failed => "failed",
+        WorkerJobStatus::Cancelled => "idle",
+    }
+}
+
+fn latest_worker_job_for_agent(agent_id: &str, jobs: &[WorkerJob]) -> Option<WorkerJob> {
+    jobs.iter()
+        .filter(|job| job.agent_id == agent_id)
+        .max_by(|left, right| left.updated_at.cmp(&right.updated_at))
+        .cloned()
+}
+
+fn live_heartbeat_for_agent(agent_id: &str, heartbeats: &[WorkerHeartbeat]) -> Option<WorkerHeartbeat> {
+    heartbeats
+        .iter()
+        .filter(|heartbeat| heartbeat.agent_id == agent_id)
+        .max_by(|left, right| left.last_heartbeat_at.cmp(&right.last_heartbeat_at))
+        .cloned()
+}
+
+fn worker_runtime_summary(agent_id: &str, jobs: &[WorkerJob], heartbeats: &[WorkerHeartbeat]) -> Option<String> {
+    if let Some(heartbeat) = live_heartbeat_for_agent(agent_id, heartbeats) {
+        return Some(heartbeat.progress_message);
+    }
+
+    latest_worker_job_for_agent(agent_id, jobs).map(|job| {
+        job.progress_message
+            .unwrap_or_else(|| worker_job_status_label(&job.status).to_string())
+    })
+}
+
 #[derive(Clone, PartialEq)]
 struct PendingChatImage {
     name: String,
@@ -605,6 +655,8 @@ pub struct AppState {
     pub health: RwSignal<Option<HealthResponse>>,
     pub agents: RwSignal<Vec<SubAgent>>,
     pub topology: RwSignal<Vec<BranchTopologyNode>>,
+    pub worker_jobs: RwSignal<Vec<WorkerJob>>,
+    pub worker_heartbeats: RwSignal<Vec<WorkerHeartbeat>>,
     pub events: RwSignal<Vec<CrystalBallEvent>>,
     pub admin_token: RwSignal<String>,
     pub detached_windows: RwSignal<HashSet<String>>,
@@ -623,6 +675,8 @@ impl AppState {
             health: create_rw_signal(None),
             agents: create_rw_signal(vec![]),
             topology: create_rw_signal(vec![]),
+            worker_jobs: create_rw_signal(vec![]),
+            worker_heartbeats: create_rw_signal(vec![]),
             events: create_rw_signal(vec![]),
             admin_token: create_rw_signal(load_admin_token()),
             detached_windows: create_rw_signal(HashSet::new()),
@@ -672,6 +726,8 @@ impl AppState {
             let _ = state_init.refresh_health().await;
             let _ = state_init.refresh_agents().await;
             let _ = state_init.refresh_topology().await;
+            let _ = state_init.refresh_worker_jobs().await;
+            let _ = state_init.refresh_worker_heartbeats().await;
             let _ = state_init.refresh_events().await;
             let _ = state_init.refresh_detached_windows().await;
             let _ = state_init.refresh_release_update().await;
@@ -684,6 +740,8 @@ impl AppState {
                     let _ = state_clone.refresh_health().await;
                     let _ = state_clone.refresh_agents().await;
                     let _ = state_clone.refresh_topology().await;
+                    let _ = state_clone.refresh_worker_jobs().await;
+                    let _ = state_clone.refresh_worker_heartbeats().await;
                     let _ = state_clone.refresh_events().await;
                 });
             },
@@ -773,6 +831,30 @@ impl AppState {
         Ok(())
     }
 
+    async fn refresh_worker_jobs(&self) -> Result<(), String> {
+        let payload = core_request::<Vec<WorkerJob>>(CoreRequestInput {
+            method: "GET".to_string(),
+            path: "/api/worker/jobs?limit=120".to_string(),
+            body: None,
+            admin_token: None,
+        })
+        .await?;
+        self.worker_jobs.set(payload);
+        Ok(())
+    }
+
+    async fn refresh_worker_heartbeats(&self) -> Result<(), String> {
+        let payload = core_request::<Vec<WorkerHeartbeat>>(CoreRequestInput {
+            method: "GET".to_string(),
+            path: "/api/worker/heartbeats".to_string(),
+            body: None,
+            admin_token: None,
+        })
+        .await?;
+        self.worker_heartbeats.set(payload);
+        Ok(())
+    }
+
     async fn refresh_detached_windows(&self) -> Result<(), String> {
         let payload = list_detached_windows().await?;
         self.detached_windows
@@ -828,6 +910,47 @@ fn MissionTabView(app_state: AppState) -> impl IntoView {
             .unwrap_or_else(|| {
                 "Talk with Kaizen about priorities, staff, execution, or decisions...".to_string()
             })
+    });
+    let active_worker_job = create_memo({
+        let app_state = app_state.clone();
+        move |_| {
+            let target_id = app_state.active_chat_id.get();
+            if target_id == "kaizen" {
+                None
+            } else {
+                latest_worker_job_for_agent(&target_id, &app_state.worker_jobs.get())
+            }
+        }
+    });
+    let active_worker_heartbeat = create_memo({
+        let app_state = app_state.clone();
+        move |_| {
+            let target_id = app_state.active_chat_id.get();
+            if target_id == "kaizen" {
+                None
+            } else {
+                live_heartbeat_for_agent(&target_id, &app_state.worker_heartbeats.get())
+            }
+        }
+    });
+    let kaizen_job_summary = create_memo({
+        let app_state = app_state.clone();
+        move |_| {
+            let jobs = app_state.worker_jobs.get();
+            let queued = jobs
+                .iter()
+                .filter(|job| matches!(job.status, WorkerJobStatus::Pending | WorkerJobStatus::Claimed))
+                .count();
+            let running = jobs
+                .iter()
+                .filter(|job| matches!(job.status, WorkerJobStatus::Running))
+                .count();
+            let blocked = jobs
+                .iter()
+                .filter(|job| matches!(job.status, WorkerJobStatus::Blocked | WorkerJobStatus::Failed))
+                .count();
+            (queued, running, blocked)
+        }
     });
 
     let refresh_main_history: Rc<dyn Fn()> = Rc::new(move || {
@@ -1055,6 +1178,8 @@ fn MissionTabView(app_state: AppState) -> impl IntoView {
                 set_is_streaming_reply.set(false);
 
                 (refresh_main_history)();
+                let _ = app_state.refresh_worker_jobs().await;
+                let _ = app_state.refresh_worker_heartbeats().await;
                 let _ = app_state.refresh_events().await;
                 set_is_sending.set(false);
             });
@@ -1144,6 +1269,41 @@ fn MissionTabView(app_state: AppState) -> impl IntoView {
                                 })
                         }}
                     </div>
+                    {move || {
+                        if let Some(job) = active_worker_job.get() {
+                            let heartbeat = active_worker_heartbeat.get();
+                            let summary = heartbeat
+                                .as_ref()
+                                .map(|beat| beat.progress_message.clone())
+                                .or_else(|| job.progress_message.clone())
+                                .unwrap_or_else(|| "Worker is standing by.".to_string());
+                            let step = heartbeat
+                                .as_ref()
+                                .map(|beat| beat.current_step.clone())
+                                .or_else(|| job.current_step.clone())
+                                .unwrap_or_else(|| "idle".to_string());
+                            view! {
+                                <div class="runtime-strip">
+                                    <span class=format!("runtime-pill {}", worker_job_status_class(&job.status))>
+                                        {worker_job_status_label(&job.status)}
+                                    </span>
+                                    <span class="runtime-step">{step}</span>
+                                    <span class="runtime-copy">{summary}</span>
+                                </div>
+                            }
+                            .into_view()
+                        } else {
+                            let (queued, running, blocked) = kaizen_job_summary.get();
+                            view! {
+                                <div class="runtime-strip">
+                                    <span class="runtime-pill neutral">{format!("{} queued", queued)}</span>
+                                    <span class="runtime-pill running">{format!("{} running", running)}</span>
+                                    <span class="runtime-pill blocked">{format!("{} blocked", blocked)}</span>
+                                </div>
+                            }
+                            .into_view()
+                        }
+                    }}
                 </div>
 
                 <div
@@ -1508,6 +1668,8 @@ fn BranchesTabView(
                 }
                 let _ = app_state.refresh_agents().await;
                 let _ = app_state.refresh_topology().await;
+                let _ = app_state.refresh_worker_jobs().await;
+                let _ = app_state.refresh_worker_heartbeats().await;
                 let _ = app_state.refresh_events().await;
                 set_branch_busy.set(false);
             });
@@ -1537,7 +1699,11 @@ fn BranchesTabView(
     });
 
     view! {
-        <section class="tab-view">
+        <section
+            class="tab-view branches-tab-view"
+            class:desk-mode=move || show_desk_view.get()
+            class:detached-mode=move || detached_mode
+        >
             <div class="tab-head">
                 <h2>"Branches"</h2>
                 <p>"Shape the company structure and add workers where you need them."</p>
@@ -1711,6 +1877,12 @@ fn BranchesTabView(
                                                                             let status = status_class(&worker.status).to_string();
                                                                             let seat_style = worker_seat_style(worker_index, worker_total);
                                                                             let app_state = app_state.clone();
+                                                                            let runtime_summary = worker_runtime_summary(
+                                                                                &worker.id,
+                                                                                &app_state.worker_jobs.get_untracked(),
+                                                                                &app_state.worker_heartbeats.get_untracked(),
+                                                                            )
+                                                                            .unwrap_or_else(|| worker.objective.clone());
                                                                             view! {
                                                                                 <button
                                                                                     class="office-worker"
@@ -1722,7 +1894,7 @@ fn BranchesTabView(
                                                                                     <span class=format!("status-dot {}", status)></span>
                                                                                     <div class="worker-meta">
                                                                                         <div>{worker.name}</div>
-                                                                                        <div class="agent-task">{worker.objective}</div>
+                                                                                        <div class="agent-task">{runtime_summary}</div>
                                                                                     </div>
                                                                                 </button>
                                                                             }
@@ -2522,6 +2694,8 @@ fn WorkspaceTabView(app_state: AppState) -> impl IntoView {
                     Err(err) => set_workspace_notice.set(err),
                 }
                 let _ = app_state.refresh_agents().await;
+                let _ = app_state.refresh_worker_jobs().await;
+                let _ = app_state.refresh_worker_heartbeats().await;
                 let _ = app_state.refresh_events().await;
                 set_workspace_busy.set(false);
             });
@@ -2583,6 +2757,8 @@ fn WorkspaceTabView(app_state: AppState) -> impl IntoView {
                 }
 
                 let _ = app_state.refresh_agents().await;
+                let _ = app_state.refresh_worker_jobs().await;
+                let _ = app_state.refresh_worker_heartbeats().await;
                 let _ = app_state.refresh_events().await;
                 set_workspace_busy.set(false);
             });
@@ -4327,6 +4503,7 @@ pub fn MainMissionView() -> impl IntoView {
     let app_state_for_tabs = app_state.clone();
     let app_state_for_agent_list = app_state.clone();
     let app_state_for_sidebar = app_state.clone();
+    let app_state_for_metrics = app_state.clone();
 
     view! {
         <div class="app-shell">
@@ -4417,6 +4594,12 @@ pub fn MainMissionView() -> impl IntoView {
                                                     branch_label(&agent.branch_id),
                                                     mission_label(&agent)
                                                 );
+                                                let runtime_summary = worker_runtime_summary(
+                                                    &agent.id,
+                                                    &app_state.worker_jobs.get_untracked(),
+                                                    &app_state.worker_heartbeats.get_untracked(),
+                                                )
+                                                .unwrap_or_else(|| agent.objective.clone());
 
                                                 view! {
                                                     <div class="agent-item">
@@ -4428,6 +4611,7 @@ pub fn MainMissionView() -> impl IntoView {
                                                             <div>
                                                                 <div class="agent-name">{agent_name}</div>
                                                                 <div class="agent-task">{agent_scope}</div>
+                                                                <div class="agent-runtime">{runtime_summary}</div>
                                                             </div>
                                                         </button>
 
@@ -4573,6 +4757,26 @@ pub fn MainMissionView() -> impl IntoView {
                                 }
                             }}
                             <span class="count-pill">"Agents " {move || app_state.agents.get().len()}</span>
+                            <span class="count-pill">
+                                "Jobs "
+                                {move || {
+                                    app_state_for_metrics
+                                        .worker_jobs
+                                        .get()
+                                        .into_iter()
+                                        .filter(|job| matches!(job.status, WorkerJobStatus::Pending | WorkerJobStatus::Claimed | WorkerJobStatus::Running))
+                                        .count()
+                                }}
+                            </span>
+                            <span class="count-pill">
+                                "Running "
+                                {move || {
+                                    app_state_for_metrics
+                                        .worker_heartbeats
+                                        .get()
+                                        .len()
+                                }}
+                            </span>
                             <span class="count-pill">"Events " {move || app_state.events.get().len()}</span>
                         </div>
                     </header>
@@ -4686,6 +4890,12 @@ pub fn MainMissionView() -> impl IntoView {
                                                                                 .map(|worker| {
                                                                                     let status = status_class(&worker.status).to_string();
                                                                                     let app_state = app_state.clone();
+                                                                                    let runtime_summary = worker_runtime_summary(
+                                                                                        &worker.id,
+                                                                                        &app_state.worker_jobs.get_untracked(),
+                                                                                        &app_state.worker_heartbeats.get_untracked(),
+                                                                                    )
+                                                                                    .unwrap_or_else(|| worker.objective.clone());
                                                                                     view! {
                                                                                         <button
                                                                                             class="worker-node"
@@ -4696,7 +4906,7 @@ pub fn MainMissionView() -> impl IntoView {
                                                                                             <span class=format!("status-dot {}", status)></span>
                                                                                             <div class="worker-meta">
                                                                                                 <div>{worker.name}</div>
-                                                                                                <div class="agent-task">{worker.objective}</div>
+                                                                                                <div class="agent-task">{runtime_summary}</div>
                                                                                             </div>
                                                                                         </button>
                                                                                     }

@@ -34,6 +34,7 @@ use kaizen_gateway::{
     oauth_store,
     provider_auth::{self, ProviderAuthStatus},
     settings::{KaizenSettings, SettingsPatch},
+    worker_runtime::{WorkerJob, WorkerJobLease, WorkerJobStatus, WorkerRuntimeState},
     zeroclaw_runtime::{self, ZeroclawProviderOption, ZeroclawRuntimeStatus, ZeroclawToolStatus},
 };
 use serde::{Deserialize, Serialize};
@@ -55,6 +56,10 @@ use tracing_subscriber::EnvFilter;
 
 const LOCAL_EVENT_RETENTION_SECS: f64 = 72.0 * 3600.0;
 const MAX_LOCAL_EVENTS: usize = 1000;
+const WORKER_HEARTBEAT_SECS: u64 = 5;
+const WORKER_STALE_AFTER_SECS: f64 = 20.0;
+const WORKER_POLL_SECS: u64 = 3;
+const WORKER_MAX_PARALLEL_JOBS: usize = 4;
 
 #[derive(Clone)]
 struct AppState {
@@ -71,6 +76,9 @@ struct AppState {
     /// Per-session conversation history (keyed by "kaizen" or agent_id).
     conversations: Arc<RwLock<HashMap<String, Vec<InferenceChatMessage>>>>,
     conversation_state_path: Arc<PathBuf>,
+    worker_runtime: Arc<RwLock<WorkerRuntimeState>>,
+    worker_state_path: Arc<PathBuf>,
+    workspace_root: Arc<PathBuf>,
     /// Monotonic generation counters for conversation keys.
     ///
     /// Any clear/remove operation bumps the generation so stale in-flight
@@ -982,6 +990,46 @@ async fn append_to_conversation(
     }
 }
 
+async fn append_assistant_to_conversation(
+    state: &AppState,
+    key: &str,
+    assistant_msg: &str,
+    expected_version: u64,
+) {
+    if key != "kaizen" {
+        let agents = state.agents.read().await;
+        if agents.get(key).is_none() {
+            return;
+        }
+    }
+
+    let mut conversations = state.conversations.write().await;
+    let current_version = {
+        let versions = state.conversation_versions.read().await;
+        versions.get(key).copied().unwrap_or(0)
+    };
+    if current_version != expected_version {
+        return;
+    }
+
+    let history = conversations.entry(key.to_string()).or_default();
+    history.push(InferenceChatMessage {
+        role: "assistant".to_string(),
+        content: assistant_msg.to_string(),
+        attachments: vec![],
+    });
+
+    if history.len() > 100 {
+        let drain = history.len() - 100;
+        history.drain(0..drain);
+    }
+    drop(conversations);
+
+    if let Err(err) = persist_conversations(state).await {
+        tracing::warn!("Failed to persist conversation '{}': {}", key, err);
+    }
+}
+
 async fn persist_agent_registry(state: &AppState) -> Result<(), String> {
     let registry = state.agents.read().await;
     registry.persist_to_path(state.agent_state_path.as_ref())
@@ -990,6 +1038,11 @@ async fn persist_agent_registry(state: &AppState) -> Result<(), String> {
 async fn persist_conversations(state: &AppState) -> Result<(), String> {
     let conversations = state.conversations.read().await;
     persist_conversations_snapshot(state.conversation_state_path.as_ref(), &conversations)
+}
+
+async fn persist_worker_runtime(state: &AppState) -> Result<(), String> {
+    let runtime = state.worker_runtime.read().await;
+    runtime.persist_to_path(state.worker_state_path.as_ref())
 }
 
 fn persist_conversations_snapshot(
@@ -1184,11 +1237,21 @@ async fn try_staff_dispatch_reply(
             .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err))?;
     }
 
+    let mut queue_failures = Vec::new();
     for agent in &dispatched {
-        let ack = format!(
-            "Kaizen briefed {} on the work in {}/{} and asked them to move now.",
-            agent.name, agent.branch_id, agent.mission_id
-        );
+        let ack = match enqueue_worker_job(state, agent, user_message, "Kaizen", conversation_key).await {
+            Ok(job) => format!(
+                "Kaizen briefed {} on the work in {}/{} and queued job {}.",
+                agent.name, agent.branch_id, agent.mission_id, job.job_id
+            ),
+            Err(err) => {
+                queue_failures.push(format!("{} ({})", agent.name, err));
+                format!(
+                    "Kaizen briefed {} on the work in {}/{}, but the background runner could not queue it yet.",
+                    agent.name, agent.branch_id, agent.mission_id
+                )
+            }
+        };
         let agent_version = conversation_version(state, &agent.id).await;
         append_to_conversation(state, &agent.id, user_message, &[], &ack, agent_version).await;
 
@@ -1235,6 +1298,18 @@ async fn try_staff_dispatch_reply(
         }
     }
 
+    if !queue_failures.is_empty() {
+        if !reply.is_empty() {
+            reply.push('\n');
+        }
+        reply.push_str("Queue issues:\n");
+        for item in queue_failures {
+            reply.push_str("- ");
+            reply.push_str(&item);
+            reply.push('\n');
+        }
+    }
+
     if reply.trim().is_empty() {
         return Ok(None);
     }
@@ -1266,6 +1341,647 @@ fn conversation_store_path() -> PathBuf {
     }
 
     PathBuf::from("../data/conversations.json")
+}
+
+fn worker_runtime_path() -> PathBuf {
+    if let Ok(path) = std::env::var("KAIZEN_WORKER_STATE_PATH") {
+        return PathBuf::from(path);
+    }
+
+    PathBuf::from("../data/worker_runtime.json")
+}
+
+fn workspace_root_path() -> PathBuf {
+    if let Ok(path) = std::env::var("KAIZEN_WORKSPACE_ROOT") {
+        return PathBuf::from(path);
+    }
+
+    std::fs::canonicalize("..").unwrap_or_else(|_| PathBuf::from(".."))
+}
+
+async fn sync_agent_runtime_status(state: &AppState, agent_id: &str) {
+    let desired_status = {
+        let runtime = state.worker_runtime.read().await;
+        let has_live_work = runtime.list_jobs().iter().any(|job| {
+            job.agent_id == agent_id
+                && matches!(
+                    job.status,
+                    WorkerJobStatus::Pending | WorkerJobStatus::Claimed | WorkerJobStatus::Running
+                )
+        });
+
+        if has_live_work {
+            AgentStatus::Active
+        } else if runtime
+            .latest_job_for_agent(agent_id)
+            .map(|job| matches!(job.status, WorkerJobStatus::Blocked | WorkerJobStatus::Failed))
+            .unwrap_or(false)
+        {
+            AgentStatus::Blocked
+        } else {
+            AgentStatus::Idle
+        }
+    };
+
+    let should_persist = {
+        let mut registry = state.agents.write().await;
+        let Some(agent) = registry.get(agent_id).cloned() else {
+            return;
+        };
+
+        if matches!(agent.status, AgentStatus::Done) {
+            return;
+        }
+
+        if agent.status == AgentStatus::ReviewPending && desired_status == AgentStatus::Idle {
+            return;
+        }
+
+        if agent.status == desired_status {
+            false
+        } else {
+            registry
+                .set_status(agent_id, desired_status, false)
+                .map(|_| true)
+                .unwrap_or(false)
+        }
+    };
+
+    if should_persist {
+        if let Err(err) = persist_agent_registry(state).await {
+            tracing::warn!("Failed to persist synced agent status for {}: {}", agent_id, err);
+        }
+    }
+}
+
+async fn enqueue_worker_job(
+    state: &AppState,
+    agent: &SubAgent,
+    instruction: &str,
+    requested_by: &str,
+    source_conversation: &str,
+) -> Result<WorkerJob, String> {
+    let now = now_timestamp();
+    let job = {
+        let mut runtime = state.worker_runtime.write().await;
+        runtime.enqueue_job(
+            next_id(state, "job"),
+            agent.id.clone(),
+            agent.branch_id.clone(),
+            agent.mission_id.clone(),
+            agent.task_id.clone(),
+            instruction.to_string(),
+            requested_by.to_string(),
+            source_conversation.to_string(),
+            now,
+        )
+    };
+
+    persist_worker_runtime(state).await?;
+    sync_agent_runtime_status(state, &agent.id).await;
+    Ok(job)
+}
+
+async fn worker_runner_tick(state: &AppState) {
+    let now = now_timestamp();
+    let now_ts = parse_timestamp_seconds(&now).unwrap_or_default();
+
+    let (reclaimed, leases) = {
+        let mut runtime = state.worker_runtime.write().await;
+        let reclaimed = runtime.reclaim_stale_jobs(now_ts, WORKER_STALE_AFTER_SECS, &now);
+        let leases =
+            runtime.claim_pending_jobs(WORKER_MAX_PARALLEL_JOBS, now_ts, WORKER_STALE_AFTER_SECS, &now);
+        (reclaimed, leases)
+    };
+
+    if !reclaimed.is_empty() || !leases.is_empty() {
+        if let Err(err) = persist_worker_runtime(state).await {
+            tracing::warn!("Failed to persist worker runtime tick state: {}", err);
+        }
+    }
+
+    for job in reclaimed {
+        push_event(
+            state,
+            CrystalBallEvent {
+                event_id: next_id(state, "event"),
+                timestamp: now_timestamp(),
+                event_type: "subagent.reclaimed".to_string(),
+                source_actor: "Kaizen".to_string(),
+                source_agent_id: "kaizen".to_string(),
+                target_actor: job.agent_id.clone(),
+                target_agent_id: job.agent_id.clone(),
+                task_id: job.task_id.clone(),
+                message: format!(
+                    "Recovered stale worker job {} for {} and returned it to the queue.",
+                    job.job_id, job.agent_id
+                ),
+                visibility: "operator".to_string(),
+            },
+        )
+        .await;
+        sync_agent_runtime_status(state, &job.agent_id).await;
+    }
+
+    for lease in leases {
+        sync_agent_runtime_status(state, &lease.agent_id).await;
+        let state_clone = state.clone();
+        tokio::spawn(async move {
+            execute_worker_job(state_clone, lease).await;
+        });
+    }
+}
+
+fn start_background_worker_runner(state: AppState) {
+    tokio::spawn(async move {
+        loop {
+            worker_runner_tick(&state).await;
+            tokio::time::sleep(std::time::Duration::from_secs(WORKER_POLL_SECS)).await;
+        }
+    });
+}
+
+fn build_worker_system_prompt(base_prompt: &str, agent: &SubAgent, job: &WorkerJob) -> String {
+    format!(
+        "{base_prompt}\n\n\
+You are {name}, a staff worker inside Kaizen MAX.\n\
+Kaizen is the CEO-orchestrator and has delegated real work to you.\n\
+Branch: {branch}\n\
+Mission: {mission}\n\
+Role objective: {objective}\n\
+Current job id: {job_id}\n\
+\n\
+Behave like a capable employee giving a real execution update back to Kaizen.\n\
+Do not pretend external work happened if you could not verify or execute it.\n\
+If you are blocked by missing tools, access, files, or credentials, state that plainly.\n\
+If you can make progress, say what you completed, what you are doing next, and what Kaizen should know.\n\
+Start your reply with exactly one status line: `STATUS: completed` or `STATUS: blocked`.\n\
+After that, provide the update in concise, concrete, operational language."
+        ,
+        name = agent.name,
+        branch = agent.branch_id,
+        mission = agent.mission_id,
+        objective = agent.objective,
+        job_id = job.job_id
+    )
+}
+
+async fn set_worker_progress(
+    state: &AppState,
+    lease: &WorkerJobLease,
+    status: WorkerJobStatus,
+    step: &str,
+    message: &str,
+) {
+    {
+        let mut runtime = state.worker_runtime.write().await;
+        runtime.heartbeat(
+            &lease.job_id,
+            &lease.worker_instance_id,
+            status,
+            step,
+            message,
+            &now_timestamp(),
+        );
+    }
+    let _ = persist_worker_runtime(state).await;
+
+    if let Some(agent) = state.agents.read().await.get(&lease.agent_id).cloned() {
+        push_event(
+            state,
+            CrystalBallEvent {
+                event_id: next_id(state, "event"),
+                timestamp: now_timestamp(),
+                event_type: "subagent.progress".to_string(),
+                source_actor: agent.name.clone(),
+                source_agent_id: agent.id.clone(),
+                target_actor: "Kaizen".to_string(),
+                target_agent_id: "kaizen".to_string(),
+                task_id: agent.task_id.clone(),
+                message: format!("{}: {}", step, message),
+                visibility: "operator".to_string(),
+            },
+        )
+        .await;
+    }
+}
+
+fn worker_search_terms(job: &WorkerJob, agent: &SubAgent) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    let stopwords = [
+        "tell", "prepare", "short", "execution", "update", "state", "blockers", "about", "there",
+        "their", "please", "should", "could", "would", "start", "continue", "working", "before",
+        "tomorrow", "morning", "agent", "kaizen", "staff", "worker", "mission", "branch",
+    ];
+
+    for raw in format!("{} {} {}", job.instruction, agent.objective, job.mission_id).split_whitespace() {
+        let term = raw
+            .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '.' && ch != '-')
+            .to_ascii_lowercase();
+        if term.len() < 4 || stopwords.contains(&term.as_str()) {
+            continue;
+        }
+        if seen.insert(term.clone()) {
+            out.push(term);
+        }
+        if out.len() >= 6 {
+            break;
+        }
+    }
+
+    out
+}
+
+async fn worker_workspace_context(state: &AppState, job: &WorkerJob, agent: &SubAgent) -> String {
+    let terms = worker_search_terms(job, agent);
+    if terms.is_empty() {
+        return "No useful local search terms could be derived from the assignment.".to_string();
+    }
+
+    let pattern = terms.join("|");
+    let output = Command::new("rg")
+        .arg("-n")
+        .arg("-i")
+        .arg("--max-count")
+        .arg("12")
+        .arg("--glob")
+        .arg("!node_modules/**")
+        .arg("--glob")
+        .arg("!target/**")
+        .arg("--glob")
+        .arg("!.git/**")
+        .arg(pattern)
+        .arg(state.workspace_root.as_ref())
+        .output()
+        .await;
+
+    match output {
+        Ok(result) if result.status.success() => {
+            let text = String::from_utf8_lossy(&result.stdout).trim().to_string();
+            if text.is_empty() {
+                format!(
+                    "Searched the workspace for {:?} but found no local matches.",
+                    terms
+                )
+            } else {
+                let excerpt = text.lines().take(10).collect::<Vec<_>>().join("\n");
+                format!(
+                    "Workspace search terms: {:?}\nMatched local context:\n{}",
+                    terms, excerpt
+                )
+            }
+        }
+        Ok(result) => {
+            let stderr = String::from_utf8_lossy(&result.stderr).trim().to_string();
+            if stderr.is_empty() {
+                format!(
+                    "Searched the workspace for {:?} but found no local matches.",
+                    terms
+                )
+            } else {
+                format!("Workspace scan failed: {}", stderr)
+            }
+        }
+        Err(err) => format!("Workspace scan unavailable: {}", err),
+    }
+}
+
+fn worker_artifact_path(state: &AppState, job_id: &str) -> PathBuf {
+    state
+        .workspace_root
+        .join("data")
+        .join("worker_artifacts")
+        .join(format!("{job_id}.md"))
+}
+
+fn persist_worker_artifact(
+    state: &AppState,
+    job: &WorkerJob,
+    agent: &SubAgent,
+    local_context: &str,
+    status: WorkerJobStatus,
+    reply: &str,
+) -> Result<PathBuf, String> {
+    let path = worker_artifact_path(state, &job.job_id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| {
+            format!(
+                "Failed to create worker artifact directory {}: {err}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let body = format!(
+        "# Worker Run\n\n\
+Job: `{job_id}`\n\
+Agent: `{agent_name}`\n\
+Branch: `{branch}`\n\
+Mission: `{mission}`\n\
+Status: `{status}`\n\n\
+## Instruction\n\n{instruction}\n\n\
+## Local Context\n\n```text\n{local_context}\n```\n\n\
+## Worker Update\n\n{reply}\n",
+        job_id = job.job_id,
+        agent_name = agent.name,
+        branch = agent.branch_id,
+        mission = agent.mission_id,
+        status = match status {
+            WorkerJobStatus::Completed => "completed",
+            WorkerJobStatus::Blocked => "blocked",
+            WorkerJobStatus::Failed => "failed",
+            _ => "running",
+        },
+        instruction = job.instruction,
+        local_context = local_context,
+        reply = reply
+    );
+    std::fs::write(&path, body)
+        .map_err(|err| format!("Failed to write worker artifact {}: {err}", path.display()))?;
+    Ok(path)
+}
+
+async fn execute_worker_job(state: AppState, lease: WorkerJobLease) {
+    let Some(job) = ({
+        let runtime = state.worker_runtime.read().await;
+        runtime.get_job(&lease.job_id)
+    }) else {
+        return;
+    };
+
+    let Some(agent) = ({
+        let registry = state.agents.read().await;
+        registry.get(&lease.agent_id).cloned()
+    }) else {
+        let now = now_timestamp();
+        {
+            let mut runtime = state.worker_runtime.write().await;
+            runtime.fail_job(
+                &lease.job_id,
+                &lease.worker_instance_id,
+                &now,
+                "Agent no longer exists.".to_string(),
+            );
+        }
+        let _ = persist_worker_runtime(&state).await;
+        return;
+    };
+
+    {
+        let mut runtime = state.worker_runtime.write().await;
+        runtime.start_job(
+            &lease.job_id,
+            &lease.worker_instance_id,
+            &now_timestamp(),
+            "starting",
+            "Worker is preparing the assignment.",
+        );
+    }
+    let _ = persist_worker_runtime(&state).await;
+    sync_agent_runtime_status(&state, &lease.agent_id).await;
+
+    push_event(
+        &state,
+        CrystalBallEvent {
+            event_id: next_id(&state, "event"),
+            timestamp: now_timestamp(),
+            event_type: "subagent.job_started".to_string(),
+            source_actor: "Kaizen".to_string(),
+            source_agent_id: "kaizen".to_string(),
+            target_actor: agent.name.clone(),
+            target_agent_id: agent.id.clone(),
+            task_id: agent.task_id.clone(),
+            message: format!("{} started background job {}", agent.name, job.job_id),
+            visibility: "operator".to_string(),
+        },
+    )
+    .await;
+
+    let heartbeat_state = state.clone();
+    let heartbeat_job_id = lease.job_id.clone();
+    let heartbeat_worker_id = lease.worker_instance_id.clone();
+    let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let heartbeat_task = tokio::spawn(async move {
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(WORKER_HEARTBEAT_SECS));
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    let now = now_timestamp();
+                    {
+                        let mut runtime = heartbeat_state.worker_runtime.write().await;
+                        runtime.heartbeat(
+                            &heartbeat_job_id,
+                            &heartbeat_worker_id,
+                            WorkerJobStatus::Running,
+                            "working",
+                            "Worker is executing the delegated assignment.",
+                            &now,
+                        );
+                    }
+                    let _ = persist_worker_runtime(&heartbeat_state).await;
+                }
+                _ = &mut stop_rx => {
+                    break;
+                }
+            }
+        }
+    });
+
+    let result = run_single_worker_cycle(&state, &lease, &agent, &job).await;
+    let _ = stop_tx.send(());
+    let _ = heartbeat_task.await;
+
+    match result {
+        Ok((job_status, reply)) => {
+            let expected_version = conversation_version(&state, &agent.id).await;
+            append_assistant_to_conversation(&state, &agent.id, &reply, expected_version).await;
+
+            let now = now_timestamp();
+            if job_status == WorkerJobStatus::Blocked {
+                {
+                    let mut runtime = state.worker_runtime.write().await;
+                    runtime.block_job(&lease.job_id, &lease.worker_instance_id, &now, reply.clone());
+                }
+            } else {
+                {
+                    let mut runtime = state.worker_runtime.write().await;
+                    runtime.complete_job(&lease.job_id, &lease.worker_instance_id, &now, reply.clone());
+                }
+            }
+            let _ = persist_worker_runtime(&state).await;
+            sync_agent_runtime_status(&state, &agent.id).await;
+
+            push_event(
+                &state,
+                CrystalBallEvent {
+                    event_id: next_id(&state, "event"),
+                    timestamp: now_timestamp(),
+                    event_type: if job_status == WorkerJobStatus::Blocked {
+                        "subagent.job_blocked".to_string()
+                    } else {
+                        "subagent.job_completed".to_string()
+                    },
+                    source_actor: agent.name.clone(),
+                    source_agent_id: agent.id.clone(),
+                    target_actor: "Kaizen".to_string(),
+                    target_agent_id: "kaizen".to_string(),
+                    task_id: agent.task_id.clone(),
+                    message: if reply.len() > 220 {
+                        format!("{}...", &reply[..220])
+                    } else {
+                        reply
+                    },
+                    visibility: "operator".to_string(),
+                },
+            )
+            .await;
+        }
+        Err(err) => {
+            let expected_version = conversation_version(&state, &agent.id).await;
+            append_assistant_to_conversation(&state, &agent.id, &err, expected_version).await;
+
+            let now = now_timestamp();
+            {
+                let mut runtime = state.worker_runtime.write().await;
+                runtime.block_job(&lease.job_id, &lease.worker_instance_id, &now, err.clone());
+            }
+            let _ = persist_worker_runtime(&state).await;
+            sync_agent_runtime_status(&state, &agent.id).await;
+
+            push_event(
+                &state,
+                CrystalBallEvent {
+                    event_id: next_id(&state, "event"),
+                    timestamp: now_timestamp(),
+                    event_type: "subagent.job_blocked".to_string(),
+                    source_actor: agent.name.clone(),
+                    source_agent_id: agent.id.clone(),
+                    target_actor: "Kaizen".to_string(),
+                    target_agent_id: "kaizen".to_string(),
+                    task_id: agent.task_id.clone(),
+                    message: err,
+                    visibility: "operator".to_string(),
+                },
+            )
+            .await;
+        }
+    }
+}
+
+async fn run_single_worker_cycle(
+    state: &AppState,
+    lease: &WorkerJobLease,
+    agent: &SubAgent,
+    job: &WorkerJob,
+) -> Result<(WorkerJobStatus, String), String> {
+    set_worker_progress(
+        state,
+        lease,
+        WorkerJobStatus::Running,
+        "planning",
+        "Worker is planning the assignment.",
+    )
+    .await;
+
+    let local_context = worker_workspace_context(state, job, agent).await;
+
+    set_worker_progress(
+        state,
+        lease,
+        WorkerJobStatus::Running,
+        "context_scan",
+        "Worker scanned the local workspace for supporting context.",
+    )
+    .await;
+
+    let history = get_conversation(state, &agent.id).await;
+    let mut messages = history;
+    messages.push(InferenceChatMessage {
+        role: "user".to_string(),
+        content: format!(
+            "Assigned job:\n{}\n\nDo one background execution cycle now.\nReply in this format:\nSTATUS: completed|blocked\n\n1. current progress\n2. concrete output or findings\n3. next step\n4. blocker if any\n\nDo not invent external facts, leads, emails sent, or files created if you did not actually do them.",
+            job.instruction
+        ),
+        attachments: vec![],
+    });
+    messages.push(InferenceChatMessage {
+        role: "user".to_string(),
+        content: format!(
+            "Local execution context gathered by the runner:\n{}",
+            local_context
+        ),
+        attachments: vec![],
+    });
+
+    set_worker_progress(
+        state,
+        lease,
+        WorkerJobStatus::Running,
+        "compose_update",
+        "Worker is composing the execution update.",
+    )
+    .await;
+
+    let (provider, model, mut credential) = resolve_inference(state, None, None)
+        .await
+        .map_err(|(_, reason)| reason)?;
+    let req = InferenceRequest {
+        provider,
+        model,
+        system_prompt: build_worker_system_prompt(state.system_prompt.as_ref(), agent, job),
+        messages,
+        max_tokens: 700,
+        temperature: 0.4,
+    };
+
+    let inference_result = state.inference.complete(&credential, &req).await;
+    credential.wipe();
+
+    match inference_result {
+        Ok(resp) => {
+            let reply = resp.content.trim().to_string();
+            if reply.is_empty() {
+                Err("I started the assignment but could not produce a usable update yet.".to_string())
+            } else {
+                let (status, mut cleaned) = parse_worker_reply(&reply);
+                if let Ok(path) = persist_worker_artifact(state, job, agent, &local_context, status, &cleaned) {
+                    cleaned.push_str(&format!(
+                        "\n\nArtifact: {}",
+                        path.display()
+                    ));
+                }
+                Ok((status, cleaned))
+            }
+        }
+        Err(err) => Err(format!(
+            "I picked up the assignment but got blocked while executing it: {}",
+            err
+        )),
+    }
+}
+
+fn parse_worker_reply(reply: &str) -> (WorkerJobStatus, String) {
+    let trimmed = reply.trim();
+    let mut lines = trimmed.lines();
+    let Some(first_line) = lines.next() else {
+        return (WorkerJobStatus::Completed, trimmed.to_string());
+    };
+
+    let normalized = first_line.trim().to_ascii_lowercase();
+    let status = if normalized == "status: blocked" {
+        WorkerJobStatus::Blocked
+    } else {
+        WorkerJobStatus::Completed
+    };
+
+    let remainder = lines.collect::<Vec<_>>().join("\n").trim().to_string();
+    if normalized.starts_with("status:") && !remainder.is_empty() {
+        (status, remainder)
+    } else {
+        (status, trimmed.to_string())
+    }
 }
 
 async fn try_openclaw_fallback_reply(
@@ -2255,6 +2971,16 @@ struct BranchTopologyNode {
     total_workers: usize,
     active_workers: usize,
     blocked_workers: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListWorkerJobsQuery {
+    #[serde(default = "default_worker_job_limit")]
+    limit: usize,
+}
+
+fn default_worker_job_limit() -> usize {
+    50
 }
 
 fn normalize_scope_id(raw: &str) -> String {
@@ -3607,6 +4333,21 @@ async fn list_events(
     Json(merged[start..].to_vec())
 }
 
+async fn list_worker_jobs(
+    State(state): State<AppState>,
+    Query(query): Query<ListWorkerJobsQuery>,
+) -> Json<Vec<WorkerJob>> {
+    let runtime = state.worker_runtime.read().await;
+    Json(runtime.list_recent_jobs(query.limit.clamp(1, 200)))
+}
+
+async fn list_worker_heartbeats(
+    State(state): State<AppState>,
+) -> Json<Vec<kaizen_gateway::worker_runtime::WorkerHeartbeat>> {
+    let runtime = state.worker_runtime.read().await;
+    Json(runtime.list_heartbeats())
+}
+
 #[tokio::main]
 async fn main() {
     // Initialize tracing
@@ -3669,6 +4410,8 @@ async fn main() {
 
     let agent_state_path = agent_registry_path();
     let conversation_state_path = conversation_store_path();
+    let worker_state_path = worker_runtime_path();
+    let workspace_root = workspace_root_path();
     let initial_agents =
         match AgentRegistry::load_from_path(agent_state_path.as_path(), settings.max_subagents as usize)
         {
@@ -3683,6 +4426,17 @@ async fn main() {
             }
         };
     let initial_conversations = load_conversations(conversation_state_path.as_path());
+    let initial_worker_runtime = match WorkerRuntimeState::load_from_path(worker_state_path.as_path()) {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            tracing::warn!(
+                "Failed to load worker runtime from {}: {}",
+                worker_state_path.display(),
+                err
+            );
+            WorkerRuntimeState::new()
+        }
+    };
 
     let state = AppState {
         settings: Arc::new(RwLock::new(settings.clone())),
@@ -3697,10 +4451,15 @@ async fn main() {
         system_prompt: Arc::new(system_prompt),
         conversations: Arc::new(RwLock::new(initial_conversations)),
         conversation_state_path: Arc::new(conversation_state_path),
+        worker_runtime: Arc::new(RwLock::new(initial_worker_runtime)),
+        worker_state_path: Arc::new(worker_state_path),
+        workspace_root: Arc::new(workspace_root),
         conversation_versions: Arc::new(RwLock::new(HashMap::new())),
         pending_gemini_oauth: Arc::new(RwLock::new(None)),
         next_id: Arc::new(AtomicU64::new(1)),
     };
+
+    start_background_worker_runner(state.clone());
 
     let mode = resolve_bind_mode();
     let host = resolve_bind_host();
@@ -3780,6 +4539,8 @@ async fn main() {
         .route("/api/gates/conditions", patch(patch_gate_conditions))
         .route("/api/gates/advance", post(advance_gates))
         .route("/api/events", get(list_events))
+        .route("/api/worker/jobs", get(list_worker_jobs))
+        .route("/api/worker/heartbeats", get(list_worker_heartbeats))
         // GitHub integration endpoints
         .route("/api/github/status", get(github_status))
         .route("/api/github/repos", get(github_repos))

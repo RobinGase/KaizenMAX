@@ -94,6 +94,61 @@ pub struct BranchTopologyNode {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum WorkerJobStatus {
+    Pending,
+    Claimed,
+    Running,
+    Completed,
+    Blocked,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerJob {
+    pub job_id: String,
+    pub agent_id: String,
+    pub branch_id: String,
+    pub mission_id: String,
+    pub task_id: String,
+    pub instruction: String,
+    pub requested_by: String,
+    pub source_conversation: String,
+    pub status: WorkerJobStatus,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(default)]
+    pub started_at: Option<String>,
+    #[serde(default)]
+    pub finished_at: Option<String>,
+    #[serde(default)]
+    pub attempt_count: u32,
+    #[serde(default)]
+    pub worker_instance_id: Option<String>,
+    #[serde(default)]
+    pub current_step: Option<String>,
+    #[serde(default)]
+    pub progress_message: Option<String>,
+    #[serde(default)]
+    pub result: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerHeartbeat {
+    pub agent_id: String,
+    pub job_id: String,
+    pub worker_instance_id: String,
+    pub status: WorkerJobStatus,
+    pub current_step: String,
+    pub progress_message: String,
+    pub last_heartbeat_at: String,
+    pub heartbeat_seq: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentStatus {
     Idle,
     Active,
