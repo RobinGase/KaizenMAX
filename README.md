@@ -1,74 +1,157 @@
 # Kaizen MAX
 
-Kaizen MAX is a Windows-first operator cockpit for AI-assisted engineering.
+Kaizen MAX is a cross-platform AI operations desktop for Windows and Linux. It gives one operator a native control surface for planning, delegating, and reviewing work across branches, missions, and workers.
 
-- Runtime: Rust (`Kaizen`)
-- Primary agent: `Kaizen`
-- Sub-agent policy: user-controlled only
-- Setup model: UI-first
+`main` is the active release branch.
 
-## Operator Quick Start
+<p align="center">
+  <img src="docs/assets/screenshots/office-2d.png" alt="Kaizen MAX office 2D view" width="100%" />
+</p>
 
-1. Start the stack:
-   - `scripts/start-max.bat`
-   - or `scripts/start-max.ps1`
-2. The native desktop Mission Control UI opens (`Tauri v2 + Leptos`).
-3. Open `Integrations`
-4. Configure inference:
-    - `zeroclaw` routes through the configured `inference_provider`
-    - default local path: `codex-cli` with ChatGPT OAuth (`codex login`)
-    - OpenAI / Anthropic / NVIDIA: `*_API_KEY`
-    - Gemini: `GEMINI_API_KEY` / `GOOGLE_API_KEY`, or set `GOOGLE_OAUTH_CLIENT_ID` + `GOOGLE_CLOUD_PROJECT` and click `Connect OAuth`
-    - Gemini CLI: install `gemini` and complete its local login once
-    - Codex CLI: install `codex` and complete `codex login` once
-    - OpenClaw fallback: install `openclaw`; Zeroclaw will use allowed OpenClaw tools when a local Zeroclaw tool is missing
-5. Send a message in Kaizen chat
+<p align="center"><strong>Office 2D</strong>: branch-level orchestration, worker status, and mission flow in one operator view.</p>
 
-## Crystal Ball Bridge (Optional)
+## Highlights
 
-All setup is in `Integrations` and `Settings`:
+- Kaizen as the primary operator conversation
+- `Branch -> Mission -> Worker` orchestration model
+- detachable worker chats and a detachable 2D office board
+- provider routing through Zeroclaw
+- Crystal Ball event logging with optional Mattermost publishing
+- local desktop release checks against `origin/main`
 
-1. Set Mattermost URL and Channel ID
-2. Set `MATTERMOST_TOKEN` in the environment
-3. Toggle `Enable Crystal Ball Bridge`
-4. Run `Validate` and `Smoke`
+## Product Views
 
-## Security Notes
+### Mission
 
-- Crystal Ball events are redacted before archive and bridge publication
-- Optional `ADMIN_API_TOKEN` can enforce auth on sensitive settings/gates/secrets endpoints
-- Remote bind mode requires explicit security acknowledgement and edge TLS/mTLS/auth
+![Kaizen MAX mission view](docs/assets/screenshots/mission-page.png)
 
-## Local Auth (Current)
+### Integrations
 
-Vault has been extracted to standalone repo: `D:\KaizenInnovations\Kai-Vault`
+![Kaizen MAX integrations view](docs/assets/screenshots/integrations-page.png)
 
-Current build runs without vault:
-- OpenAI / Anthropic / NVIDIA use env vars (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `NVIDIA_API_KEY`)
-- Gemini supports:
-  - API key env vars (`GEMINI_API_KEY` or `GOOGLE_API_KEY`)
-  - app-managed Google OAuth (`GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_CLOUD_PROJECT`, optional `GOOGLE_OAUTH_CLIENT_SECRET`)
-  - Google ADC OAuth fallback (`gcloud auth application-default login` + `GOOGLE_CLOUD_PROJECT`)
-- Codex CLI supports local login state, including ChatGPT OAuth (`codex login`, stored in `~/.codex/auth.json`)
-- App-managed Gemini OAuth stores tokens locally at `data/oauth/gemini_tokens.json` by default
-- `zeroclaw` is the provider/auth control plane and routes to the configured provider
-- Default zeroclaw route is `codex-cli` (`gpt-5.4`) so the local app works without vault or API keys on a logged-in Codex CLI setup
-- OpenClaw fallback is enabled by default when `openclaw` is available on PATH
-- Current OpenClaw fallback tools: `sessions`, `browser`, `scheduler`, `health`
-- Current explicit chat syntax: `/openclaw sessions`, `/openclaw browser status`, `/openclaw browser open https://example.com`, `/openclaw cron list`
+## Platform Scope
 
-## Minimal Requirements
+Kaizen MAX is being built as a cross-platform desktop product for Windows and Linux.
 
-- Windows 10/11
-- Rust stable toolchain (`cargo`)
-- `trunk` (`cargo install trunk`) for Rust-native frontend builds
+Current repo ergonomics are still more mature on Windows because the checked-in launcher and updater scripts are PowerShell and batch based, but the core runtime and Tauri desktop architecture are not intended to stay Windows-only.
 
-The legacy React frontend is retired on the `RustTestBranch` rewrite path.
+## Core Capabilities
 
-## Verify Build
+### 1. Operator-led execution
 
-- Core tests: run `cargo test` in `core/`
-- UI checks: run `cargo check --workspace` in `ui-rust-native/`
-- UI dev launch: run `cargo tauri dev` in `ui-rust-native/`
+Kaizen is the main executive-style agent the operator talks to for:
 
-For full architecture and rollout details, see `implementation_plan.md`.
+- planning and prioritization
+- delegation to named workers
+- branch and mission coordination
+- review of event and gate state
+
+### 2. Team orchestration
+
+The runtime is structured around:
+
+- `Branch`
+- `Mission`
+- `Worker`
+
+Workers persist across restarts together with their conversation history and execution context.
+
+### 3. Zeroclaw runtime
+
+Zeroclaw is the runtime control plane for:
+
+- active provider selection
+- model routing
+- provider readiness
+- tool visibility
+
+The default route today is `codex-cli`, which keeps the local system usable when Codex CLI is already authenticated.
+
+### 4. OpenClaw fallback
+
+When available on the machine, Kaizen MAX can fall back to selected OpenClaw tools instead of failing a missing local tool path outright.
+
+Fallback coverage is explicit and limited. It is not full OpenClaw parity.
+
+### 5. Local desktop updates
+
+The installed desktop app can compare the local checkout to `origin/main`, notify the operator when a newer release is available, and apply updates when the worktree is clean.
+
+## Runtime and Auth
+
+### Supported runtime paths
+
+- `codex-cli`
+- `openai`
+- `anthropic`
+- `gemini`
+- `nvidia`
+- `gemini-cli`
+
+### Current auth modes
+
+- Codex CLI: local ChatGPT OAuth via `codex login`
+- OpenAI / Anthropic / NVIDIA: API keys
+- Gemini:
+  - API key
+  - app-managed Google OAuth
+  - Google ADC fallback
+- Gemini CLI: local CLI login
+
+## Quick Start
+
+### Launch
+
+Use one of:
+
+- `scripts\\launch-kaizen-max.ps1`
+- `scripts\\start-max.ps1`
+- the Desktop shortcut if you created one
+
+### First-use setup
+
+1. Launch the desktop app.
+2. Open `Integrations`.
+3. Connect or confirm the provider Zeroclaw should use.
+4. Return to `Mission`.
+5. Start working through Kaizen chat.
+
+## Build and Validation
+
+### Core
+
+- `cd core`
+- `cargo test`
+
+### Desktop frontend
+
+- `cd ui-rust-native`
+- `cargo check --target wasm32-unknown-unknown --manifest-path frontend/Cargo.toml`
+- `cargo tauri build`
+
+## Repository Layout
+
+- `core/` - gateway, orchestration, inference, persistence, events
+- `ui-rust-native/` - Rust-native Mission Control desktop app
+- `scripts/` - launcher, updater, validation helpers
+- `config/` - settings defaults and schema
+- `contexts/` - prompts and runtime policy templates
+- `docs/` - focused technical and planning docs
+
+## Documentation
+
+- [ARCHITECTURE.md](ARCHITECTURE.md)
+- [STRUCTURE.md](STRUCTURE.md)
+- [ROADMAP.md](ROADMAP.md)
+- [docs/phase5_operator_readability_and_branches_plan.md](docs/phase5_operator_readability_and_branches_plan.md)
+- [docs/subagent-forward-plan.md](docs/subagent-forward-plan.md)
+
+## Current Boundaries
+
+- OpenClaw fallback is selective, not full parity
+- Gmail and lead tooling are not fully implemented yet
+- image attachments flow through the chat transport, but true image understanding still depends on the active provider path
+
+## License and Ownership
+
+This repository is the active Kaizen MAX product line and the Rust-native Mission Control desktop is the primary frontend.
