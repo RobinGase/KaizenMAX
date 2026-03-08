@@ -566,6 +566,26 @@ fn worker_runtime_summary(agent_id: &str, jobs: &[WorkerJob], heartbeats: &[Work
     })
 }
 
+fn worker_result_preview(job: &WorkerJob) -> Option<String> {
+    let text = job
+        .result
+        .as_ref()
+        .or(job.error.as_ref())
+        .map(|value| value.trim().to_string())?;
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn worker_artifact_label(job: &WorkerJob) -> Option<String> {
+    let text = worker_result_preview(job)?;
+    text.lines()
+        .find(|line| line.trim_start().starts_with("Artifact:"))
+        .map(|line| line.trim().to_string())
+}
+
 #[derive(Clone, PartialEq)]
 struct PendingChatImage {
     name: String,
@@ -952,6 +972,16 @@ fn MissionTabView(app_state: AppState) -> impl IntoView {
             (queued, running, blocked)
         }
     });
+    let active_worker_result = create_memo(move |_| {
+        active_worker_job
+            .get()
+            .and_then(|job| worker_result_preview(&job))
+    });
+    let active_worker_artifact = create_memo(move |_| {
+        active_worker_job
+            .get()
+            .and_then(|job| worker_artifact_label(&job))
+    });
 
     let refresh_main_history: Rc<dyn Fn()> = Rc::new(move || {
         if is_sending.get_untracked() || is_streaming_reply.get_untracked() {
@@ -1302,6 +1332,27 @@ fn MissionTabView(app_state: AppState) -> impl IntoView {
                                 </div>
                             }
                             .into_view()
+                        }
+                    }}
+                    {move || {
+                        if active_chat_key.get() == "kaizen" {
+                            ().into_view()
+                        } else if let Some(result) = active_worker_result.get() {
+                            let artifact = active_worker_artifact.get();
+                            view! {
+                                <div class="worker-result-card">
+                                    <div class="worker-result-head">
+                                        <span class="worker-result-title">"Latest Run"</span>
+                                        {artifact.map(|line| {
+                                            view! { <span class="worker-result-artifact">{line}</span> }
+                                        })}
+                                    </div>
+                                    <pre class="worker-result-body">{result}</pre>
+                                </div>
+                            }
+                            .into_view()
+                        } else {
+                            ().into_view()
                         }
                     }}
                 </div>

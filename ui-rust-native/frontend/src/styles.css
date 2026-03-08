@@ -545,6 +545,45 @@ button.agent-meta {
   font-size: 11px;
 }
 
+.worker-result-card {
+  margin-top: 12px;
+  border: 1px solid var(--mc-border);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.worker-result-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.worker-result-title {
+  color: #ffffff;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.worker-result-artifact {
+  color: var(--mc-muted);
+  font-size: 10px;
+  font-family: var(--font-mono);
+}
+
+.worker-result-body {
+  margin: 10px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #d9d9d9;
+  font-size: 11px;
+  line-height: 1.55;
+  font-family: var(--font-mono);
+}
+
 .chat-log {
   position: relative;
   z-index: 1;
