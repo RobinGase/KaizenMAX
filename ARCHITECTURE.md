@@ -1,45 +1,147 @@
 # Kaizen MAX Architecture
 
-## Scope
-This document defines the fresh-start architecture after retiring the legacy Dioxus and legacy web UI surfaces.
+## Overview
 
-## System Layout
-- `core/`: Rust Axum backend for orchestration, chat inference, agent lifecycle, gates, settings, secrets vault, and Crystal Ball events.
-- `ui-rust-native/`: Tauri host with Rust-native frontend pipeline (primary desktop app).
-- `tools/Nex_Alignment/`: external governance framework used for planning, audit discipline, and release checkpoints.
+Kaizen MAX is split into two primary runtime layers:
 
-## Runtime Boundaries
-- Mission Control frontend talks to Tauri command bridge.
-- Tauri Rust layer proxies requests to `core/` HTTP API (`KAIZEN_CORE_URL`, default `http://127.0.0.1:9100`).
-- Core remains the source of truth for domain state and transitions.
-- Window orchestration for detachable chats is owned by Tauri Rust (`open/focus/close/restore` by `agent-{id}` labels).
+- `core/`: the Rust gateway and domain runtime
+- `ui-rust-native/`: the Rust-native Mission Control desktop app
 
-## Frontend Domains
-- Mission: chat, model/mode controls, agent operations.
-- Branch Manager: company branch -> mission -> worker visualization and controls.
-- Workflow Gates: conditions patching and transition attempts.
-- Activity: event timeline and Crystal Ball validation/smoke/audit.
-- Workspace: GitHub connectivity and repo selection state.
-- Providers & Secrets: vault status, secrets CRUD/test/use, OAuth status/disconnect.
-- System Settings: runtime and safety configuration patching.
+The desktop UI is the operator surface. The gateway is the source of truth.
 
-## API Contract Strategy
-- Reuse existing backend routes in `core/src/main.rs`.
-- Keep typed frontend interfaces under `ui-rust-native/frontend/src/models/types.rs`.
-- Keep transport and command bridge logic inside the Rust-native frontend/Tauri host.
+## Runtime Model
 
-## Reliability and Security Baseline
-- Health polling + explicit error toasts in UI.
-- Admin token handling in UI with optional Bearer forwarding for protected endpoints.
-- No secrets persisted in frontend local storage except explicitly entered admin token.
-- Secret reveal action requires explicit user confirmation.
+### Desktop
 
-## Build and Launch
-- UI dev: `cargo tauri dev` in `ui-rust-native/`.
-- Core dev: `cargo run` in `core/` or `scripts/start-max.ps1 -CoreOnly`.
-- Combined pipeline: `scripts/start-max.ps1` starts core + Mission Control UI.
+The desktop app is built with:
 
-## Evolution Path
-- Keep backend contract stable while iterating UI.
-- Add streaming chat bridge as next increment after baseline tab coverage is stable.
-- Add deeper governance hooks from Nex_Alignment into CI and release checklist.
+- Tauri v2 host
+- Leptos frontend
+- local launcher and repo-based updater
+
+The desktop owns:
+
+- detachable agent windows
+- detachable office window
+- release update checks and apply flow
+- local shell-to-core request bridge
+
+### Gateway
+
+The gateway owns:
+
+- Zeroclaw runtime state
+- provider resolution
+- conversation history
+- branch, mission, and worker registry
+- Crystal Ball events
+- Mattermost publishing
+- gate state and workflow policy
+
+## Key Domain Boundaries
+
+### 1. Zeroclaw
+
+Zeroclaw is the main runtime control plane. It is responsible for:
+
+- active provider selection
+- model routing
+- provider readiness
+- tool inventory exposure
+
+It is not just a cosmetic alias anymore, but it is also not full standalone OpenClaw parity yet.
+
+### 2. Providers
+
+Providers are treated as execution backends behind Zeroclaw.
+
+Current supported paths:
+
+- `codex-cli`
+- `openai`
+- `anthropic`
+- `gemini`
+- `nvidia`
+- `gemini-cli`
+
+### 3. OpenClaw fallback
+
+OpenClaw is integrated as a fallback tool bridge, not as the primary runtime.
+
+Current intent:
+
+- prefer local Zeroclaw behavior
+- fall back to OpenClaw only for allowed tool paths
+- keep the UI honest about which tools are ready, borrowed, or still planned
+
+### 4. Orchestration
+
+Kaizen is the top-level operator agent.
+
+Workers are persistent named entities with:
+
+- `branch_id`
+- `mission_id`
+- `task_id`
+- status
+- conversation history
+
+The main Kaizen chat can dispatch work to named workers and record that delegation through Crystal Ball.
+
+## Persistence
+
+Current local persistence is file-backed under `data/`.
+
+Important persisted state:
+
+- agent registry
+- conversation history
+- Gemini OAuth tokens
+- event archive
+
+## Windowing Model
+
+The desktop app supports:
+
+- main shell
+- detached worker chat windows
+- detached office window
+
+Detached window state is queried from Tauri instead of being inferred by frontend-only state.
+
+## Chat Model
+
+Chat supports:
+
+- streaming replies
+- main Kaizen chat
+- direct worker chat
+- image attachments in the request transport
+
+Current important limitation:
+
+- image transport is implemented
+- true image understanding depends on the active provider path
+- CLI-based routes like `codex-cli` still behave more like metadata-aware text paths than full multimodal vision paths
+
+## Crystal Ball and Mattermost
+
+Crystal Ball is the system event spine.
+
+It records:
+
+- requests
+- responses
+- delegation
+- gate transitions
+- lifecycle actions
+
+Mattermost is an optional outbound publication target for Crystal Ball events.
+
+## Release Model
+
+This repo is the release source.
+
+- `main` is the release branch
+- the desktop updater compares the local checkout against `origin/main`
+- update apply is blocked when the local checkout is dirty or not on `main`

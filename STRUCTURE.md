@@ -1,33 +1,63 @@
 # Repository Structure
 
-## Top-Level Map
-- `core/` - Rust backend runtime and API surface.
-- `ui-rust-native/` - active desktop frontend (Tauri v2 + Leptos).
-- `scripts/` - launch, validation, and smoke automation.
-- `config/` - defaults and schema for runtime settings.
-- `contexts/` - policies and prompt templates.
-- `tools/Nex_Alignment/` - external governance toolkit (submodule).
-- `docs/` - focused technical docs.
+## Top Level
 
-## Frontend Structure (`ui-rust-native/`)
-- `frontend/src/app.rs` - Mission Control shell and workflows.
-- `frontend/src/models/types.rs` - typed API/domain models.
-- `frontend/src/styles.css` - Rust-native visual system styling.
-- `src-tauri/src/commands.rs` - backend proxy command handlers.
-- `src-tauri/src/lib.rs` - Tauri app bootstrap and state wiring.
+- `core/` - Rust gateway, orchestration runtime, inference, persistence, events
+- `ui-rust-native/` - primary desktop frontend and Tauri host
+- `scripts/` - launcher, updater, validation helpers
+- `config/` - settings defaults and schema
+- `contexts/` - prompts and runtime policy templates
+- `docs/` - technical notes and planning material
+- `protocol/` - protocol-facing notes
+- `compat/` - compatibility notes
+- `tools/` - internal tool-area docs and external governance material
 
-## Branching and Legacy Policy
-- Active implementation branch: `v2-mission-control`.
-- Legacy archive branch: `legacy/ui-dioxus-v1-20260221`.
-- Legacy archive tag: `legacy-ui-dioxus-v1-20260221`.
+## Core Runtime
 
-## Artifact Hygiene
-- Build outputs and logs are ignored via `.gitignore`.
-- Legacy UI code is removed from active branch and preserved only via legacy branch/tag.
-- Validation artifacts remain under `logs/` when generated locally.
+Important areas inside `core/`:
 
-## Docs Ownership
-- `VISION.md` - product intent and success criteria.
-- `ARCHITECTURE.md` - component boundaries and runtime contracts.
-- `STRUCTURE.md` - repository map and conventions.
-- `ROADMAP.md` - phased execution and acceptance gates.
+- `src/main.rs` - API surface and runtime wiring
+- `src/inference.rs` - provider inference adapters and streaming
+- `src/provider_auth.rs` - provider auth resolution
+- `src/zeroclaw_runtime.rs` - Zeroclaw runtime contract
+- `src/openclaw_bridge.rs` - OpenClaw fallback bridge
+- `src/agents.rs` - branch, mission, and worker registry
+- `src/settings.rs` - runtime settings model
+
+## Desktop App
+
+Important areas inside `ui-rust-native/`:
+
+- `frontend/src/app.rs` - Mission Control UI shell and workflows
+- `frontend/src/models/types.rs` - typed frontend models
+- `frontend/src/styles.css` - main desktop styling
+- `src-tauri/src/commands.rs` - desktop command bridge
+- `src-tauri/src/lib.rs` - Tauri app bootstrap
+
+## Runtime Data
+
+Local runtime state is stored under `data/`.
+
+This includes:
+
+- worker registry snapshots
+- conversation history
+- OAuth token state
+- event archive data
+
+## Screenshots and Public Assets
+
+- `docs/assets/screenshots/` - README and repo-front-page screenshots
+- `ui-rust-native/frontend/assets/branding/` - product branding used by the desktop app
+
+## Branching
+
+- `main` is the active release line
+- archived or experimental work should live on named side branches
+- the old Solid/Tauri frontend is no longer part of `main`
+
+## Local-Only Vendor Area
+
+- `_vendor/` is currently a local assessment area and not part of the shipped runtime
+
+If `_vendor/` is kept, it should remain intentionally separate from production code paths.
