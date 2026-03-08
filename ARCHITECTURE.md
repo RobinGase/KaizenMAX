@@ -7,9 +7,9 @@ Kaizen MAX is split into two primary runtime layers:
 - `core/`: the Rust gateway and domain runtime
 - `ui-rust-native/`: the Rust-native Mission Control desktop app
 
-The desktop UI is the operator surface. The gateway is the source of truth.
+The desktop application is the operator surface. The gateway owns the runtime state.
 
-## Runtime Model
+## Runtime Layers
 
 ### Desktop
 
@@ -21,7 +21,8 @@ The desktop app is built with:
 
 The desktop owns:
 
-- detachable agent windows
+- main Mission Control shell
+- detachable worker chat windows
 - detachable office window
 - release update checks and apply flow
 - local shell-to-core request bridge
@@ -31,29 +32,32 @@ The desktop owns:
 The gateway owns:
 
 - Zeroclaw runtime state
-- provider resolution
+- provider resolution and model routing
 - conversation history
 - branch, mission, and worker registry
+- background worker runner and heartbeats
 - Crystal Ball events
-- Mattermost publishing
+- optional Mattermost publishing
 - gate state and workflow policy
+- native tool execution
 
-## Key Domain Boundaries
+## Zeroclaw
 
-### 1. Zeroclaw
+Zeroclaw is the main runtime control plane.
 
-Zeroclaw is the main runtime control plane. It is responsible for:
+It is responsible for:
 
 - active provider selection
 - model routing
 - provider readiness
-- tool inventory exposure
+- native tool status
+- worker tool-step execution state
 
-It is not just a cosmetic alias anymore, but it is also not full standalone OpenClaw parity yet.
+Zeroclaw is not a cosmetic alias. It is also not yet full OpenClaw parity.
 
-### 2. Providers
+## Providers
 
-Providers are treated as execution backends behind Zeroclaw.
+Providers are treated as inference backends behind Zeroclaw.
 
 Current supported paths:
 
@@ -64,17 +68,31 @@ Current supported paths:
 - `nvidia`
 - `gemini-cli`
 
-### 3. OpenClaw fallback
+## Native Tool Runtime
 
-OpenClaw is integrated as a fallback tool bridge, not as the primary runtime.
+Current native Zeroclaw tools:
+
+- `gmail`
+- `reports`
+- `leads`
+
+Current tool behavior:
+
+- Gmail uses app-managed Google OAuth and supports draft/send flows.
+- Reports export structured CSV and XLSX artifacts under `data/worker_artifacts/`.
+- Leads research fetches target sites, extracts public contact context, and exports structured artifacts.
+
+## OpenClaw Compatibility
+
+OpenClaw remains a selective fallback bridge for chosen tool paths.
 
 Current intent:
 
-- prefer local Zeroclaw behavior
-- fall back to OpenClaw only for allowed tool paths
-- keep the UI honest about which tools are ready, borrowed, or still planned
+- prefer native Zeroclaw capabilities first
+- use OpenClaw only where compatibility is explicitly allowed
+- keep UI status honest about what is native, what is borrowed, and what is not implemented
 
-### 4. Orchestration
+## Orchestration
 
 Kaizen is the top-level operator agent.
 
@@ -85,8 +103,20 @@ Workers are persistent named entities with:
 - `task_id`
 - status
 - conversation history
+- runtime job history
 
-The main Kaizen chat can dispatch work to named workers and record that delegation through Crystal Ball.
+The main Kaizen chat can dispatch work to named workers and the background runner can execute delegated work independently of the request/response path.
+
+## Worker Runtime
+
+The worker runtime currently includes:
+
+- persistent job queue
+- worker claim/lease model
+- heartbeat tracking
+- tool-step persistence
+- artifact persistence
+- completion and blocked-state reporting back into worker conversations and Crystal Ball
 
 ## Persistence
 
@@ -96,8 +126,10 @@ Important persisted state:
 
 - agent registry
 - conversation history
-- Gemini OAuth tokens
+- worker runtime snapshot
+- Gmail and Gemini OAuth tokens
 - event archive
+- exported worker artifacts
 
 ## Windowing Model
 
@@ -116,32 +148,33 @@ Chat supports:
 - streaming replies
 - main Kaizen chat
 - direct worker chat
-- image attachments in the request transport
+- image attachments in request transport
 
-Current important limitation:
+Important limitation:
 
 - image transport is implemented
-- true image understanding depends on the active provider path
-- CLI-based routes like `codex-cli` still behave more like metadata-aware text paths than full multimodal vision paths
+- true image understanding still depends on the active provider path
+- CLI-based routes such as `codex-cli` remain more text-centric than a fully multimodal API provider
 
-## Crystal Ball and Mattermost
+## Observability
 
-Crystal Ball is the system event spine.
+Crystal Ball is the event spine.
 
 It records:
 
 - requests
 - responses
 - delegation
+- worker progress
 - gate transitions
 - lifecycle actions
 
-Mattermost is an optional outbound publication target for Crystal Ball events.
+Mattermost is an optional outbound publication target for those events.
 
 ## Release Model
 
-This repo is the release source.
+This repository is the release source.
 
-- `main` is the release branch
+- `main` is the public release branch
 - the desktop updater compares the local checkout against `origin/main`
 - update apply is blocked when the local checkout is dirty or not on `main`

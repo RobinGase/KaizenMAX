@@ -1,44 +1,59 @@
 # Kaizen MAX Vision
 
 ## Purpose
-Kaizen MAX is the operator-grade mission control for running, reviewing, and shipping multi-agent work with hard governance, not a generic chat shell.
+
+Kaizen MAX is an operator-grade desktop for running, reviewing, and shipping multi-agent work with clear runtime state, persistent staff, and practical governance.
+
+It is not intended to be a generic chat shell.
 
 ## North Star
-Deliver a native desktop Mission Control where a user can plan, execute, review, and deploy through gates with full observability and reproducible outcomes.
 
-## Fresh Start Objectives
-- Replace legacy frontend surfaces with a clean Tauri v2 Mission Control.
-- Preserve and extend the Rust core as system-of-record for orchestration, gates, settings, credentials, and Crystal Ball events.
-- Keep the desktop stack Rust-native and remove Node from the default development/runtime path.
+Deliver a native Mission Control where one operator can:
 
-## User Value
-- **Operator**: sees system state at a glance, can drive every critical action without shell hopping.
-- **Builder**: can run end-to-end tasks, verify gates, and iterate quickly with model and mode controls.
-- **Reviewer**: can inspect event history, gate decisions, and safety posture before progression.
+- plan work
+- delegate to persistent workers
+- monitor background execution
+- review outputs and artifacts
+- move work through gates with full observability
 
 ## Product Principles
-- Ship vertical slices that are testable end-to-end.
-- Keep destructive actions explicit and reversible where possible.
-- Treat observability as a product feature, not an add-on.
-- Prefer deterministic flows and typed contracts over implicit behavior.
 
-## Governance and Nex_Alignment
-- `tools/Nex_Alignment` is integrated as an external governance toolkit, not runtime core.
-- Every major architecture or risk decision is tracked through documented checkpoints.
-- Release readiness requires passing engineering checks and governance checks.
+- ship vertical slices that work end to end
+- keep runtime state explicit and inspectable
+- prefer typed contracts over hidden behavior
+- make operator decisions clear and reversible where possible
+- keep community-facing documentation clean and public-safe
 
-## Definition of Done for V2 Baseline
-- All Mission Control tabs load and execute their mapped backend actions.
-- All primary buttons have a working handler and user feedback path.
-- Launch + validation scripts run against the new architecture.
-- Root docs are current and usable by new contributors on day one.
+## Operator Value
 
-## P0 Interaction Requirements
-- Agent chats support three modes: docked, floating, and detached native windows.
-- Detached windows move across monitors, stay synchronized with orchestrator state, and restore safely after restart.
-- Mission workspace supports resizable panes and readable chat width constraints.
+- **Operator**: sees company state, worker state, and tool readiness in one place
+- **Builder**: can run real work through Kaizen, workers, and native tools without shell hopping
+- **Reviewer**: can inspect events, artifacts, and gate state before approving progression
 
-## Operating Model Vision
-- Kaizen orchestrator acts as manager over company branches.
-- Branches contain missions, missions coordinate workers, and workers collaborate in parallel with explicit handoffs.
-- The interface must make parallel execution, bottlenecks, and gate readiness obvious at a glance.
+## Product Direction
+
+Kaizen MAX is built around:
+
+- a Rust gateway as the source of truth
+- a Rust-native desktop Mission Control
+- Zeroclaw as the runtime control plane
+- native tools for business and operational work
+
+## Operating Model
+
+- Kaizen acts as the executive orchestrator
+- branches contain missions
+- missions coordinate workers
+- workers can execute background jobs and return artifacts
+
+The interface should make delegation, bottlenecks, blocked work, and output quality obvious at a glance.
+
+## Delivery Standard
+
+A feature is only complete when:
+
+- the UI path works
+- the backend path works
+- runtime state persists correctly
+- the result is testable
+- the public documentation is current

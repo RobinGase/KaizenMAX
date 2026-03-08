@@ -2,68 +2,64 @@
 
 ## Current Product Direction
 
-Kaizen MAX is now centered on the Rust-native desktop and the Rust gateway.
+Kaizen MAX is centered on the Rust-native desktop and the Rust gateway.
 
-The current roadmap is about turning that base into a stable operator product, not starting another frontend rewrite.
+The roadmap is focused on a usable operator product with persistent orchestration and native tooling, not on adding another frontend stack.
 
-## Phase 1 - Completed Foundation
+## Completed Foundation
 
 - Rust-native desktop app established as the primary UI
 - repo-based launcher and updater working on Windows
-- Zeroclaw runtime introduced as the top-level control plane
-- Codex CLI path working as the default local route
-- persistent workers, branches, and conversations added
+- Zeroclaw introduced as the runtime control plane
+- persistent workers, branches, conversations, and heartbeats added
+- detachable worker chats and detachable office view shipped
 
-## Phase 2 - Completed Operator Usability Baseline
+## Completed Native Tool Baseline
 
-- streaming chat in the desktop app
-- detachable worker chat windows
-- detachable office window support
-- resizeable panes and office workbench
-- simpler integrations flow centered on Zeroclaw
+- native Gmail OAuth support added
+- native report export added
+- native lead research export added
+- worker jobs can now execute tool steps and persist artifacts
+- Integrations reflects real native tool readiness instead of placeholder text
 
-## Phase 3 - Current Hardening Track
+## Current Hardening Track
 
 ### Product reliability
 
 - tighten launcher and updater behavior
-- expand smoke coverage for desktop window behavior
-- keep repo/docs aligned with the shipped product
+- expand smoke coverage for desktop and background worker behavior
+- keep public docs aligned with the shipped product
 
 ### Orchestration quality
 
-- improve Kaizen's executive reasoning and delegation quality
-- keep worker naming, branch structure, and routing stable across restarts
-- strengthen Crystal Ball and Mattermost operational flow
+- improve Kaizen delegation and worker follow-up quality
+- strengthen blocked/completed reporting for long-running work
+- improve Crystal Ball and Mattermost operational visibility
 
 ### Attachment and context handling
 
-- ship true multimodal routing when images are attached
-- make provider fallback behavior more transparent
+- ship stronger multimodal routing when images are attached
+- make provider-dependent image handling more transparent
 - preserve useful context without bloating local state
 
-## Phase 4 - Zeroclaw Tool Expansion
+## Next Native Tool Slices
 
-- implement local Zeroclaw tools instead of leaving them as planned markers
-- expand beyond chat into shell, files, browser, and scheduler
-- decide which capabilities stay local and which remain OpenClaw fallback paths
+- richer lead extraction and structured company/contact summaries
+- Gmail handoff directly from researched leads
+- CRM integrations
+- native browser and scheduler tools
+- shell and file tools under Zeroclaw
 
-## Phase 5 - Business Tooling
-
-- Gmail send/read
-- lead capture
-- CRM integration
-- operator-friendly tool setup inside the desktop app
-
-## Phase 6 - Release Discipline
+## Release Discipline
 
 - stronger desktop and backend smoke suites
 - release notes tied to `main`
-- tighter documentation around deployment, rollback, and support
+- tighter deployment and rollback guidance
+- cleaner public and private documentation separation
 
 ## Immediate Priorities
 
-- commit and ship the current Rust-native UX pass
-- finish live Mattermost validation with real credentials
-- improve Office screenshots and public docs
-- decide the next Zeroclaw tool slice
+- finish Mattermost live validation with real credentials
+- strengthen worker UI around artifacts and progress history
+- improve multimodal routing for image-attached requests
+- continue replacing compatibility-only tool paths with native Zeroclaw capabilities

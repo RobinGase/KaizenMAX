@@ -67,4 +67,11 @@ core/v1_no_bearer_body.json
 core/profiles/
 nul
 
+# ----- Private local docs -----
+MIDNIGHT_DELIVERY_HEARTBEAT.md
+MIDNIGHT_DELIVERY_PLAN.md
+implementation_plan.md
+docs/phase5_operator_readability_and_branches_plan.md
+docs/subagent-forward-plan.md
+
 # ----- Scratch / tool config -----

@@ -1,23 +1,25 @@
 # Kaizen MAX
 
-Kaizen MAX is a cross-platform AI operations desktop for Windows and Linux. It gives one operator a native control surface for planning, delegating, and reviewing work across branches, missions, and workers.
+Kaizen MAX is a Rust-first desktop control surface for AI-assisted operations. It combines a native desktop interface, a Rust gateway, persistent worker orchestration, and a practical tool runtime under Zeroclaw.
 
-`main` is the active release branch.
+`main` is the public release branch.
 
 <p align="center">
-  <img src="docs/assets/screenshots/office-2d.png" alt="Kaizen MAX office 2D view" width="100%" />
+  <img src="docs/assets/screenshots/office-2d.png" alt="Kaizen MAX office view" width="100%" />
 </p>
 
-<p align="center"><strong>Office 2D</strong>: branch-level orchestration, worker status, and mission flow in one operator view.</p>
+<p align="center"><strong>Office View</strong>: branches, missions, workers, and runtime status in one operator surface.</p>
 
-## Highlights
+## What It Does
 
-- Kaizen as the primary operator conversation
-- `Branch -> Mission -> Worker` orchestration model
-- detachable worker chats and a detachable 2D office board
+- executive-style Kaizen chat for planning, delegation, and review
+- persistent `Branch -> Mission -> Worker` orchestration
+- detachable worker chats and detachable office view
+- background worker runner with heartbeats and job state
 - provider routing through Zeroclaw
+- native tool runtime for Gmail, reports, and lead research
 - Crystal Ball event logging with optional Mattermost publishing
-- local desktop release checks against `origin/main`
+- release update checks against `origin/main`
 
 ## Product Views
 
@@ -29,57 +31,46 @@ Kaizen MAX is a cross-platform AI operations desktop for Windows and Linux. It g
 
 ![Kaizen MAX integrations view](docs/assets/screenshots/integrations-page.png)
 
-## Platform Scope
+### Office
 
-Kaizen MAX is being built as a cross-platform desktop product for Windows and Linux.
+![Kaizen MAX office view](docs/assets/screenshots/office-2d.png)
 
-Current repo ergonomics are still more mature on Windows because the checked-in launcher and updater scripts are PowerShell and batch based, but the core runtime and Tauri desktop architecture are not intended to stay Windows-only.
+## Architecture Summary
 
-## Core Capabilities
+Kaizen MAX has two main runtime layers:
 
-### 1. Operator-led execution
+- `core/`: Rust gateway, orchestration runtime, persistence, events, tools, inference
+- `ui-rust-native/`: Rust-native desktop application built with Tauri and Leptos
 
-Kaizen is the main executive-style agent the operator talks to for:
+The desktop UI is the operator surface. The gateway is the source of truth.
 
-- planning and prioritization
-- delegation to named workers
-- branch and mission coordination
-- review of event and gate state
-
-### 2. Team orchestration
-
-The runtime is structured around:
-
-- `Branch`
-- `Mission`
-- `Worker`
-
-Workers persist across restarts together with their conversation history and execution context.
-
-### 3. Zeroclaw runtime
+## Zeroclaw
 
 Zeroclaw is the runtime control plane for:
 
-- active provider selection
+- provider selection
 - model routing
 - provider readiness
-- tool visibility
+- native tool status
+- worker tool execution
 
-The default route today is `codex-cli`, which keeps the local system usable when Codex CLI is already authenticated.
+Zeroclaw is no longer just a provider alias. It now exposes native business tools and worker execution state. OpenClaw remains a limited compatibility bridge, not the primary runtime.
 
-### 4. OpenClaw fallback
+## Native Tools
 
-When available on the machine, Kaizen MAX can fall back to selected OpenClaw tools instead of failing a missing local tool path outright.
+Current native Zeroclaw tools:
 
-Fallback coverage is explicit and limited. It is not full OpenClaw parity.
+- `gmail`: app-managed Google OAuth for Gmail draft/send flows
+- `reports`: CSV and XLSX artifact export under `data/worker_artifacts/`
+- `leads`: website-level lead research with structured exports
 
-### 5. Local desktop updates
+Current transitional tool paths:
 
-The installed desktop app can compare the local checkout to `origin/main`, notify the operator when a newer release is available, and apply updates when the worktree is clean.
+- selected OpenClaw fallback tools for missing local capabilities
 
-## Runtime and Auth
+## Runtime Paths
 
-### Supported runtime paths
+Supported inference paths:
 
 - `codex-cli`
 - `openai`
@@ -88,14 +79,12 @@ The installed desktop app can compare the local checkout to `origin/main`, notif
 - `nvidia`
 - `gemini-cli`
 
-### Current auth modes
+Current auth modes:
 
-- Codex CLI: local ChatGPT OAuth via `codex login`
+- Codex CLI: local browser login via `codex login`
 - OpenAI / Anthropic / NVIDIA: API keys
-- Gemini:
-  - API key
-  - app-managed Google OAuth
-  - Google ADC fallback
+- Gemini: app-managed Google OAuth, API key, or ADC fallback
+- Gmail: app-managed Google OAuth
 - Gemini CLI: local CLI login
 
 ## Quick Start
@@ -106,15 +95,15 @@ Use one of:
 
 - `scripts\\launch-kaizen-max.ps1`
 - `scripts\\start-max.ps1`
-- the Desktop shortcut if you created one
+- the desktop shortcut if you created one
 
 ### First-use setup
 
 1. Launch the desktop app.
 2. Open `Integrations`.
-3. Connect or confirm the provider Zeroclaw should use.
-4. Return to `Mission`.
-5. Start working through Kaizen chat.
+3. Connect the provider Zeroclaw should use.
+4. Connect Gmail if you want native mail actions.
+5. Return to `Mission` and work through Kaizen chat.
 
 ## Build and Validation
 
@@ -131,27 +120,29 @@ Use one of:
 
 ## Repository Layout
 
-- `core/` - gateway, orchestration, inference, persistence, events
+- `core/` - gateway, orchestration, persistence, tools, events, inference
 - `ui-rust-native/` - Rust-native Mission Control desktop app
-- `scripts/` - launcher, updater, validation helpers
+- `scripts/` - launcher and updater scripts
 - `config/` - settings defaults and schema
 - `contexts/` - prompts and runtime policy templates
-- `docs/` - focused technical and planning docs
+- `docs/` - public screenshots and technical notes
+- `protocol/` - protocol-facing notes
+- `compat/` - compatibility notes
 
-## Documentation
+## Public Documentation
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)
 - [STRUCTURE.md](STRUCTURE.md)
 - [ROADMAP.md](ROADMAP.md)
-- [docs/phase5_operator_readability_and_branches_plan.md](docs/phase5_operator_readability_and_branches_plan.md)
-- [docs/subagent-forward-plan.md](docs/subagent-forward-plan.md)
+- [VISION.md](VISION.md)
 
 ## Current Boundaries
 
-- OpenClaw fallback is selective, not full parity
-- Gmail and lead tooling are not fully implemented yet
+- OpenClaw compatibility is selective, not full parity
+- Gmail works through app-managed OAuth, but still depends on Google credentials you provide
 - image attachments flow through the chat transport, but true image understanding still depends on the active provider path
+- business tooling is active, but CRM integrations are not implemented yet
 
-## License and Ownership
+## Privacy and Repo Hygiene
 
-This repository is the active Kaizen MAX product line and the Rust-native Mission Control desktop is the primary frontend.
+This public branch is intended to contain product code and public-facing documentation only. Local planning notes, private delivery docs, runtime state, tokens, and machine-specific files are kept out of version control.

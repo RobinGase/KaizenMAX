@@ -2,26 +2,29 @@
 
 ## Top Level
 
-- `core/` - Rust gateway, orchestration runtime, inference, persistence, events
+- `core/` - Rust gateway, orchestration runtime, inference, persistence, events, native tools
 - `ui-rust-native/` - primary desktop frontend and Tauri host
-- `scripts/` - launcher, updater, validation helpers
+- `scripts/` - launcher, updater, and local validation helpers
 - `config/` - settings defaults and schema
 - `contexts/` - prompts and runtime policy templates
-- `docs/` - technical notes and planning material
+- `docs/` - public screenshots and public technical notes
 - `protocol/` - protocol-facing notes
 - `compat/` - compatibility notes
-- `tools/` - internal tool-area docs and external governance material
+- `tools/` - external or reference material kept separate from runtime code
 
 ## Core Runtime
 
 Important areas inside `core/`:
 
-- `src/main.rs` - API surface and runtime wiring
+- `src/main.rs` - API surface, orchestration runtime wiring, worker execution
 - `src/inference.rs` - provider inference adapters and streaming
 - `src/provider_auth.rs` - provider auth resolution
 - `src/zeroclaw_runtime.rs` - Zeroclaw runtime contract
-- `src/openclaw_bridge.rs` - OpenClaw fallback bridge
+- `src/zeroclaw_tools.rs` - native tool registry and execution
+- `src/openclaw_bridge.rs` - selective OpenClaw compatibility bridge
+- `src/worker_runtime.rs` - worker jobs, heartbeats, tool steps, runtime persistence
 - `src/agents.rs` - branch, mission, and worker registry
+- `src/oauth_store.rs` - app-managed OAuth token storage
 - `src/settings.rs` - runtime settings model
 
 ## Desktop App
@@ -42,22 +45,23 @@ This includes:
 
 - worker registry snapshots
 - conversation history
+- worker runtime state
 - OAuth token state
 - event archive data
+- exported worker artifacts
 
 ## Screenshots and Public Assets
 
-- `docs/assets/screenshots/` - README and repo-front-page screenshots
-- `ui-rust-native/frontend/assets/branding/` - product branding used by the desktop app
+- `docs/assets/screenshots/` - README and public repo screenshots
+- `ui-rust-native/frontend/assets/branding/` - desktop branding assets
 
 ## Branching
 
-- `main` is the active release line
+- `main` is the public release line
 - archived or experimental work should live on named side branches
-- the old Solid/Tauri frontend is no longer part of `main`
+- private planning notes should stay local and out of version control
 
-## Local-Only Vendor Area
+## Local-Only Areas
 
-- `_vendor/` is currently a local assessment area and not part of the shipped runtime
-
-If `_vendor/` is kept, it should remain intentionally separate from production code paths.
+- `_vendor/` is a local assessment area and not part of the shipped runtime
+- local planning markdown and runtime state should stay outside the public branch surface
