@@ -27,17 +27,22 @@ use kaizen_gateway::{
     inference::{
         self, AnthropicStreamEvent, ChatAttachment as InferenceChatAttachment,
         ChatMessage as InferenceChatMessage, InferenceClient, InferenceCredential,
-        InferenceProvider, InferenceRequest, LiveInferenceEvent,
-        OpenAIStreamChunk,
+        InferenceProvider, InferenceRequest, LiveInferenceEvent, OpenAIStreamChunk,
     },
-    openclaw_bridge,
-    oauth_store,
+    oauth_store, openclaw_bridge,
     provider_auth::{self, ProviderAuthStatus},
     settings::{KaizenSettings, SettingsPatch},
-    worker_runtime::{WorkerJob, WorkerJobLease, WorkerJobStatus, WorkerRuntimeState},
+    worker_runtime::{
+        WorkerJob, WorkerJobLease, WorkerJobStatus, WorkerRuntimeState, WorkerToolStepStatus,
+    },
     zeroclaw_runtime::{self, ZeroclawProviderOption, ZeroclawRuntimeStatus, ZeroclawToolStatus},
+    zeroclaw_tools::{
+        self, GmailComposeRequest, ToolConnectResponse, ToolRunRequest, ToolRunResponse,
+        ZeroclawToolConfigResponse,
+    },
 };
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, json};
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
@@ -85,6 +90,7 @@ struct AppState {
     /// inference responses cannot repopulate cleared histories.
     conversation_versions: Arc<RwLock<HashMap<String, u64>>>,
     pending_gemini_oauth: Arc<RwLock<Option<oauth_store::PendingGeminiOAuth>>>,
+    pending_gmail_oauth: Arc<RwLock<Option<oauth_store::PendingGmailOAuth>>>,
     next_id: Arc<AtomicU64>,
 }
 
@@ -1123,7 +1129,10 @@ fn looks_like_staff_dispatch(message: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
-fn collect_orchestrator_targets(message: &str, registry: &AgentRegistry) -> Vec<OrchestratorTarget> {
+fn collect_orchestrator_targets(
+    message: &str,
+    registry: &AgentRegistry,
+) -> Vec<OrchestratorTarget> {
     let lower = message.to_ascii_lowercase();
     let normalized = normalize_scope_id(message);
     let mut targets = Vec::new();
@@ -1239,7 +1248,9 @@ async fn try_staff_dispatch_reply(
 
     let mut queue_failures = Vec::new();
     for agent in &dispatched {
-        let ack = match enqueue_worker_job(state, agent, user_message, "Kaizen", conversation_key).await {
+        let ack = match enqueue_worker_job(state, agent, user_message, "Kaizen", conversation_key)
+            .await
+        {
             Ok(job) => format!(
                 "Kaizen briefed {} on the work in {}/{} and queued job {}.",
                 agent.name, agent.branch_id, agent.mission_id, job.job_id
@@ -1374,7 +1385,12 @@ async fn sync_agent_runtime_status(state: &AppState, agent_id: &str) {
             AgentStatus::Active
         } else if runtime
             .latest_job_for_agent(agent_id)
-            .map(|job| matches!(job.status, WorkerJobStatus::Blocked | WorkerJobStatus::Failed))
+            .map(|job| {
+                matches!(
+                    job.status,
+                    WorkerJobStatus::Blocked | WorkerJobStatus::Failed
+                )
+            })
             .unwrap_or(false)
         {
             AgentStatus::Blocked
@@ -1409,7 +1425,11 @@ async fn sync_agent_runtime_status(state: &AppState, agent_id: &str) {
 
     if should_persist {
         if let Err(err) = persist_agent_registry(state).await {
-            tracing::warn!("Failed to persist synced agent status for {}: {}", agent_id, err);
+            tracing::warn!(
+                "Failed to persist synced agent status for {}: {}",
+                agent_id,
+                err
+            );
         }
     }
 }
@@ -1449,8 +1469,12 @@ async fn worker_runner_tick(state: &AppState) {
     let (reclaimed, leases) = {
         let mut runtime = state.worker_runtime.write().await;
         let reclaimed = runtime.reclaim_stale_jobs(now_ts, WORKER_STALE_AFTER_SECS, &now);
-        let leases =
-            runtime.claim_pending_jobs(WORKER_MAX_PARALLEL_JOBS, now_ts, WORKER_STALE_AFTER_SECS, &now);
+        let leases = runtime.claim_pending_jobs(
+            WORKER_MAX_PARALLEL_JOBS,
+            now_ts,
+            WORKER_STALE_AFTER_SECS,
+            &now,
+        );
         (reclaimed, leases)
     };
 
@@ -1516,8 +1540,7 @@ Do not pretend external work happened if you could not verify or execute it.\n\
 If you are blocked by missing tools, access, files, or credentials, state that plainly.\n\
 If you can make progress, say what you completed, what you are doing next, and what Kaizen should know.\n\
 Start your reply with exactly one status line: `STATUS: completed` or `STATUS: blocked`.\n\
-After that, provide the update in concise, concrete, operational language."
-        ,
+After that, provide the update in concise, concrete, operational language.",
         name = agent.name,
         branch = agent.branch_id,
         mission = agent.mission_id,
@@ -1526,12 +1549,212 @@ After that, provide the update in concise, concrete, operational language."
     )
 }
 
+fn worker_requests_reports(job: &WorkerJob) -> bool {
+    let text = job.instruction.to_ascii_lowercase();
+    [
+        "sheet",
+        "spreadsheet",
+        "csv",
+        "xlsx",
+        "report",
+        "lead list",
+        "prospect list",
+        "make a list",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+}
+
+fn worker_requests_gmail(job: &WorkerJob) -> bool {
+    let text = job.instruction.to_ascii_lowercase();
+    ["email", "gmail", "inbox", "draft", "send mail", "reply to"]
+        .iter()
+        .any(|needle| text.contains(needle))
+}
+
+fn extract_email_addresses(text: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut addresses = Vec::new();
+    for token in text.split_whitespace() {
+        let candidate = token
+            .trim_matches(|ch: char| {
+                !ch.is_ascii_alphanumeric()
+                    && ch != '@'
+                    && ch != '.'
+                    && ch != '_'
+                    && ch != '-'
+                    && ch != '+'
+            })
+            .trim();
+        if candidate.contains('@')
+            && candidate.contains('.')
+            && !candidate.starts_with('@')
+            && !candidate.ends_with('@')
+        {
+            let normalized = candidate.to_ascii_lowercase();
+            if seen.insert(normalized.clone()) {
+                addresses.push(normalized);
+            }
+        }
+    }
+    addresses
+}
+
+fn json_payload_from_text(text: &str) -> &str {
+    let trimmed = text.trim();
+    if let Some(stripped) = trimmed.strip_prefix("```json") {
+        return stripped.trim().trim_end_matches("```").trim();
+    }
+    if let Some(stripped) = trimmed.strip_prefix("```") {
+        return stripped.trim().trim_end_matches("```").trim();
+    }
+    trimmed
+}
+
+async fn complete_worker_text(
+    state: &AppState,
+    system_prompt: String,
+    messages: Vec<InferenceChatMessage>,
+    max_tokens: u32,
+    temperature: f32,
+) -> Result<String, String> {
+    let (provider, model, mut credential) = resolve_inference(state, None, None)
+        .await
+        .map_err(|(_, reason)| reason)?;
+    let req = InferenceRequest {
+        provider,
+        model,
+        system_prompt,
+        messages,
+        max_tokens,
+        temperature,
+    };
+    let response = state.inference.complete(&credential, &req).await;
+    credential.wipe();
+    let response = response.map_err(|error| error.to_string())?;
+    let content = response.content.trim().to_string();
+    if content.is_empty() {
+        Err("The model returned an empty response.".to_string())
+    } else {
+        Ok(content)
+    }
+}
+
+async fn build_report_rows(
+    state: &AppState,
+    agent: &SubAgent,
+    job: &WorkerJob,
+    local_context: &str,
+) -> Result<Vec<Map<String, serde_json::Value>>, String> {
+    let prompt = format!(
+        "Create a JSON array of report rows for this delegated assignment.\n\
+Return JSON only. No markdown.\n\
+Each row must be an object.\n\
+If there is not enough verified information, still return one row with a truthful status like needs_research or missing_context.\n\
+Prefer columns such as item, company, contact, status, notes, source.\n\n\
+Instruction:\n{}\n\nLocal context:\n{}",
+        job.instruction, local_context
+    );
+    let content = complete_worker_text(
+        state,
+        format!(
+            "You are {}. Produce structured business report rows for Kaizen. Only return valid JSON.",
+            agent.name
+        ),
+        vec![InferenceChatMessage {
+            role: "user".to_string(),
+            content: prompt,
+            attachments: vec![],
+        }],
+        700,
+        0.2,
+    )
+    .await?;
+
+    let parsed: serde_json::Value = serde_json::from_str(json_payload_from_text(&content))
+        .map_err(|error| format!("Report rows were not valid JSON: {error}"))?;
+    let rows = parsed
+        .as_array()
+        .ok_or_else(|| "Report rows response was not a JSON array.".to_string())?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        let object = row
+            .as_object()
+            .cloned()
+            .ok_or_else(|| "Each report row must be a JSON object.".to_string())?;
+        out.push(object);
+    }
+    if out.is_empty() {
+        return Err("Report generation produced no rows.".to_string());
+    }
+    Ok(out)
+}
+
+async fn build_gmail_compose_request(
+    state: &AppState,
+    agent: &SubAgent,
+    job: &WorkerJob,
+    local_context: &str,
+    recipients: &[String],
+) -> Result<GmailComposeRequest, String> {
+    let prompt = format!(
+        "Draft a Gmail message for this delegated assignment.\n\
+Return JSON only with this exact shape:\n\
+{{\"subject\":\"...\",\"body\":\"...\"}}\n\
+Be concise, professional, and human.\n\
+Do not claim actions already happened if they did not.\n\n\
+Recipients: {:?}\n\
+Instruction:\n{}\n\nLocal context:\n{}",
+        recipients, job.instruction, local_context
+    );
+    let content = complete_worker_text(
+        state,
+        format!(
+            "You are {} drafting a real business email for Kaizen. Return valid JSON only.",
+            agent.name
+        ),
+        vec![InferenceChatMessage {
+            role: "user".to_string(),
+            content: prompt,
+            attachments: vec![],
+        }],
+        700,
+        0.3,
+    )
+    .await?;
+    let parsed: serde_json::Value = serde_json::from_str(json_payload_from_text(&content))
+        .map_err(|error| format!("Email draft was not valid JSON: {error}"))?;
+    let subject = parsed
+        .get("subject")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Drafted email is missing a subject.".to_string())?;
+    let body = parsed
+        .get("body")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Drafted email is missing a body.".to_string())?;
+
+    Ok(GmailComposeRequest {
+        to: recipients.to_vec(),
+        cc: Vec::new(),
+        bcc: Vec::new(),
+        subject: subject.to_string(),
+        body: body.to_string(),
+    })
+}
+
 async fn set_worker_progress(
     state: &AppState,
     lease: &WorkerJobLease,
     status: WorkerJobStatus,
     step: &str,
     message: &str,
+    current_tool: Option<&str>,
+    current_action: Option<&str>,
 ) {
     {
         let mut runtime = state.worker_runtime.write().await;
@@ -1541,6 +1764,8 @@ async fn set_worker_progress(
             status,
             step,
             message,
+            current_tool,
+            current_action,
             &now_timestamp(),
         );
     }
@@ -1570,12 +1795,37 @@ fn worker_search_terms(job: &WorkerJob, agent: &SubAgent) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     let stopwords = [
-        "tell", "prepare", "short", "execution", "update", "state", "blockers", "about", "there",
-        "their", "please", "should", "could", "would", "start", "continue", "working", "before",
-        "tomorrow", "morning", "agent", "kaizen", "staff", "worker", "mission", "branch",
+        "tell",
+        "prepare",
+        "short",
+        "execution",
+        "update",
+        "state",
+        "blockers",
+        "about",
+        "there",
+        "their",
+        "please",
+        "should",
+        "could",
+        "would",
+        "start",
+        "continue",
+        "working",
+        "before",
+        "tomorrow",
+        "morning",
+        "agent",
+        "kaizen",
+        "staff",
+        "worker",
+        "mission",
+        "branch",
     ];
 
-    for raw in format!("{} {} {}", job.instruction, agent.objective, job.mission_id).split_whitespace() {
+    for raw in
+        format!("{} {} {}", job.instruction, agent.objective, job.mission_id).split_whitespace()
+    {
         let term = raw
             .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '.' && ch != '-')
             .to_ascii_lowercase();
@@ -1777,6 +2027,8 @@ async fn execute_worker_job(state: AppState, lease: WorkerJobLease) {
                             WorkerJobStatus::Running,
                             "working",
                             "Worker is executing the delegated assignment.",
+                            None,
+                            None,
                             &now,
                         );
                     }
@@ -1802,12 +2054,22 @@ async fn execute_worker_job(state: AppState, lease: WorkerJobLease) {
             if job_status == WorkerJobStatus::Blocked {
                 {
                     let mut runtime = state.worker_runtime.write().await;
-                    runtime.block_job(&lease.job_id, &lease.worker_instance_id, &now, reply.clone());
+                    runtime.block_job(
+                        &lease.job_id,
+                        &lease.worker_instance_id,
+                        &now,
+                        reply.clone(),
+                    );
                 }
             } else {
                 {
                     let mut runtime = state.worker_runtime.write().await;
-                    runtime.complete_job(&lease.job_id, &lease.worker_instance_id, &now, reply.clone());
+                    runtime.complete_job(
+                        &lease.job_id,
+                        &lease.worker_instance_id,
+                        &now,
+                        reply.clone(),
+                    );
                 }
             }
             let _ = persist_worker_runtime(&state).await;
@@ -1882,6 +2144,8 @@ async fn run_single_worker_cycle(
         WorkerJobStatus::Running,
         "planning",
         "Worker is planning the assignment.",
+        None,
+        None,
     )
     .await;
 
@@ -1893,8 +2157,281 @@ async fn run_single_worker_cycle(
         WorkerJobStatus::Running,
         "context_scan",
         "Worker scanned the local workspace for supporting context.",
+        None,
+        None,
     )
     .await;
+
+    let mut summary_lines = Vec::<String>::new();
+    let mut blocked_reasons = Vec::<String>::new();
+
+    if worker_requests_reports(job) {
+        set_worker_progress(
+            state,
+            lease,
+            WorkerJobStatus::Running,
+            "tool_reports",
+            "Worker is generating a structured report artifact.",
+            Some("reports"),
+            Some("export"),
+        )
+        .await;
+
+        let started_at = now_timestamp();
+        let tool_step = {
+            let mut runtime = state.worker_runtime.write().await;
+            runtime.begin_tool_step(
+                &lease.job_id,
+                "reports",
+                "export",
+                "Generate a structured report artifact for the delegated assignment.",
+                &started_at,
+            )
+        };
+        let _ = persist_worker_runtime(state).await;
+
+        let report_rows: Result<Vec<Map<String, serde_json::Value>>, String> =
+            build_report_rows(state, agent, job, &local_context).await;
+        match report_rows {
+            Ok(rows) => {
+                let file_stem = format!("{}-{}", agent.name.replace(' ', "-"), lease.job_id);
+                let tool_result = zeroclaw_tools::run_tool(
+                    &state.settings.read().await.clone(),
+                    state.workspace_root.as_ref(),
+                    "reports",
+                    ToolRunRequest {
+                        action: "export".to_string(),
+                        args: json!({
+                            "file_stem": file_stem,
+                            "rows": rows,
+                        }),
+                    },
+                )
+                .await;
+
+                match tool_result {
+                    Ok(result) => {
+                        summary_lines.push(result.message.clone());
+                        let finished_at = now_timestamp();
+                        {
+                            let mut runtime = state.worker_runtime.write().await;
+                            if let Some(step) = tool_step.as_ref() {
+                                runtime.finish_tool_step(
+                                    &lease.job_id,
+                                    &step.tool_step_id,
+                                    WorkerToolStepStatus::Completed,
+                                    Some(result.message.clone()),
+                                    result.artifact_paths.clone(),
+                                    None,
+                                    &finished_at,
+                                );
+                            }
+                            runtime.record_artifacts(
+                                &lease.job_id,
+                                &result.artifact_paths,
+                                &finished_at,
+                            );
+                        }
+                        let _ = persist_worker_runtime(state).await;
+                    }
+                    Err(error) => {
+                        let finished_at = now_timestamp();
+                        {
+                            let mut runtime = state.worker_runtime.write().await;
+                            if let Some(step) = tool_step.as_ref() {
+                                runtime.finish_tool_step(
+                                    &lease.job_id,
+                                    &step.tool_step_id,
+                                    WorkerToolStepStatus::Failed,
+                                    None,
+                                    Vec::new(),
+                                    Some(error.clone()),
+                                    &finished_at,
+                                );
+                            }
+                        }
+                        let _ = persist_worker_runtime(state).await;
+                        blocked_reasons.push(format!("Report export failed: {}", error));
+                    }
+                }
+            }
+            Err(error) => {
+                let finished_at = now_timestamp();
+                {
+                    let mut runtime = state.worker_runtime.write().await;
+                    if let Some(step) = tool_step.as_ref() {
+                        runtime.finish_tool_step(
+                            &lease.job_id,
+                            &step.tool_step_id,
+                            WorkerToolStepStatus::Blocked,
+                            None,
+                            Vec::new(),
+                            Some(error.clone()),
+                            &finished_at,
+                        );
+                    }
+                }
+                let _ = persist_worker_runtime(state).await;
+                blocked_reasons.push(format!("Report planning blocked: {}", error));
+            }
+        }
+    }
+
+    if worker_requests_gmail(job) {
+        set_worker_progress(
+            state,
+            lease,
+            WorkerJobStatus::Running,
+            "tool_gmail",
+            "Worker is preparing the Gmail action.",
+            Some("gmail"),
+            Some("draft_or_send"),
+        )
+        .await;
+
+        let recipients =
+            extract_email_addresses(&format!("{}\n{}", job.instruction, local_context));
+        let gmail_status =
+            zeroclaw_tools::gmail_tool_config(&state.settings.read().await.clone()).await;
+        let started_at = now_timestamp();
+        let tool_step = {
+            let mut runtime = state.worker_runtime.write().await;
+            runtime.begin_tool_step(
+                &lease.job_id,
+                "gmail",
+                if job.instruction.to_ascii_lowercase().contains("send") {
+                    "send"
+                } else {
+                    "draft"
+                },
+                "Prepare an email draft or send action for the delegated assignment.",
+                &started_at,
+            )
+        };
+        let _ = persist_worker_runtime(state).await;
+
+        if !gmail_status.connected {
+            let reason = gmail_status.message;
+            let finished_at = now_timestamp();
+            {
+                let mut runtime = state.worker_runtime.write().await;
+                if let Some(step) = tool_step.as_ref() {
+                    runtime.finish_tool_step(
+                        &lease.job_id,
+                        &step.tool_step_id,
+                        WorkerToolStepStatus::Blocked,
+                        None,
+                        Vec::new(),
+                        Some(reason.clone()),
+                        &finished_at,
+                    );
+                }
+            }
+            let _ = persist_worker_runtime(state).await;
+            blocked_reasons.push(format!("Gmail is not connected: {}", reason));
+        } else if recipients.is_empty() {
+            let reason =
+                "No recipient email addresses were present in the assignment or local context."
+                    .to_string();
+            let finished_at = now_timestamp();
+            {
+                let mut runtime = state.worker_runtime.write().await;
+                if let Some(step) = tool_step.as_ref() {
+                    runtime.finish_tool_step(
+                        &lease.job_id,
+                        &step.tool_step_id,
+                        WorkerToolStepStatus::Blocked,
+                        None,
+                        Vec::new(),
+                        Some(reason.clone()),
+                        &finished_at,
+                    );
+                }
+            }
+            let _ = persist_worker_runtime(state).await;
+            blocked_reasons.push(reason);
+        } else {
+            match build_gmail_compose_request(state, agent, job, &local_context, &recipients).await
+            {
+                Ok(compose) => {
+                    let action = if job.instruction.to_ascii_lowercase().contains("send") {
+                        "send"
+                    } else {
+                        "draft"
+                    };
+                    match zeroclaw_tools::run_tool(
+                        &state.settings.read().await.clone(),
+                        state.workspace_root.as_ref(),
+                        "gmail",
+                        ToolRunRequest {
+                            action: action.to_string(),
+                            args: serde_json::to_value(&compose).unwrap_or(serde_json::Value::Null),
+                        },
+                    )
+                    .await
+                    {
+                        Ok(result) => {
+                            summary_lines.push(result.message.clone());
+                            let finished_at = now_timestamp();
+                            {
+                                let mut runtime = state.worker_runtime.write().await;
+                                if let Some(step) = tool_step.as_ref() {
+                                    runtime.finish_tool_step(
+                                        &lease.job_id,
+                                        &step.tool_step_id,
+                                        WorkerToolStepStatus::Completed,
+                                        Some(result.message.clone()),
+                                        Vec::new(),
+                                        None,
+                                        &finished_at,
+                                    );
+                                }
+                            }
+                            let _ = persist_worker_runtime(state).await;
+                        }
+                        Err(error) => {
+                            let finished_at = now_timestamp();
+                            {
+                                let mut runtime = state.worker_runtime.write().await;
+                                if let Some(step) = tool_step.as_ref() {
+                                    runtime.finish_tool_step(
+                                        &lease.job_id,
+                                        &step.tool_step_id,
+                                        WorkerToolStepStatus::Failed,
+                                        None,
+                                        Vec::new(),
+                                        Some(error.clone()),
+                                        &finished_at,
+                                    );
+                                }
+                            }
+                            let _ = persist_worker_runtime(state).await;
+                            blocked_reasons.push(format!("Gmail action failed: {}", error));
+                        }
+                    }
+                }
+                Err(error) => {
+                    let finished_at = now_timestamp();
+                    {
+                        let mut runtime = state.worker_runtime.write().await;
+                        if let Some(step) = tool_step.as_ref() {
+                            runtime.finish_tool_step(
+                                &lease.job_id,
+                                &step.tool_step_id,
+                                WorkerToolStepStatus::Blocked,
+                                None,
+                                Vec::new(),
+                                Some(error.clone()),
+                                &finished_at,
+                            );
+                        }
+                    }
+                    let _ = persist_worker_runtime(state).await;
+                    blocked_reasons.push(format!("Email drafting blocked: {}", error));
+                }
+            }
+        }
+    }
 
     let history = get_conversation(state, &agent.id).await;
     let mut messages = history;
@@ -1914,6 +2451,23 @@ async fn run_single_worker_cycle(
         ),
         attachments: vec![],
     });
+    if !summary_lines.is_empty() {
+        messages.push(InferenceChatMessage {
+            role: "user".to_string(),
+            content: format!(
+                "Native tool outputs gathered by the runner:\n- {}",
+                summary_lines.join("\n- ")
+            ),
+            attachments: vec![],
+        });
+    }
+    if !blocked_reasons.is_empty() {
+        messages.push(InferenceChatMessage {
+            role: "user".to_string(),
+            content: format!("Known tool blockers:\n- {}", blocked_reasons.join("\n- ")),
+            attachments: vec![],
+        });
+    }
 
     set_worker_progress(
         state,
@@ -1921,36 +2475,41 @@ async fn run_single_worker_cycle(
         WorkerJobStatus::Running,
         "compose_update",
         "Worker is composing the execution update.",
+        None,
+        None,
     )
     .await;
 
-    let (provider, model, mut credential) = resolve_inference(state, None, None)
-        .await
-        .map_err(|(_, reason)| reason)?;
-    let req = InferenceRequest {
-        provider,
-        model,
-        system_prompt: build_worker_system_prompt(state.system_prompt.as_ref(), agent, job),
+    match complete_worker_text(
+        state,
+        build_worker_system_prompt(state.system_prompt.as_ref(), agent, job),
         messages,
-        max_tokens: 700,
-        temperature: 0.4,
-    };
-
-    let inference_result = state.inference.complete(&credential, &req).await;
-    credential.wipe();
-
-    match inference_result {
-        Ok(resp) => {
-            let reply = resp.content.trim().to_string();
+        700,
+        0.4,
+    )
+    .await
+    {
+        Ok(reply) => {
             if reply.is_empty() {
-                Err("I started the assignment but could not produce a usable update yet.".to_string())
+                Err(
+                    "I started the assignment but could not produce a usable update yet."
+                        .to_string(),
+                )
             } else {
-                let (status, mut cleaned) = parse_worker_reply(&reply);
-                if let Ok(path) = persist_worker_artifact(state, job, agent, &local_context, status, &cleaned) {
-                    cleaned.push_str(&format!(
-                        "\n\nArtifact: {}",
-                        path.display()
-                    ));
+                let (status, cleaned) = parse_worker_reply(&reply);
+                if let Ok(path) =
+                    persist_worker_artifact(state, job, agent, &local_context, status, &cleaned)
+                {
+                    let artifact = path.display().to_string();
+                    {
+                        let mut runtime = state.worker_runtime.write().await;
+                        runtime.record_artifacts(
+                            &lease.job_id,
+                            std::slice::from_ref(&artifact),
+                            &now_timestamp(),
+                        );
+                    }
+                    let _ = persist_worker_runtime(state).await;
                 }
                 Ok((status, cleaned))
             }
@@ -2603,7 +3162,8 @@ async fn chat_stream(
             yield Result::<Event, Infallible>::Ok(done_event);
         };
 
-        let sse = Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)));
+        let sse = Sse::new(stream)
+            .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)));
         return Ok(sse.into_response());
     }
 
@@ -2632,7 +3192,8 @@ async fn chat_stream(
             yield Result::<Event, Infallible>::Ok(done_event);
         };
 
-        let sse = Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)));
+        let sse = Sse::new(stream)
+            .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)));
         return Ok(sse.into_response());
     }
 
@@ -2746,7 +3307,9 @@ async fn chat_stream(
             }
         };
 
-        return Ok(Sse::new(stream).keep_alive(KeepAlive::default()).into_response());
+        return Ok(Sse::new(stream)
+            .keep_alive(KeepAlive::default())
+            .into_response());
     }
 
     let raw_response = state
@@ -2917,7 +3480,9 @@ async fn chat_stream(
         }
     };
 
-    Ok(Sse::new(stream).keep_alive(KeepAlive::default()).into_response())
+    Ok(Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response())
 }
 
 #[derive(Debug, Deserialize)]
@@ -3836,7 +4401,9 @@ async fn zeroclaw_runtime_status(
 ) -> Result<Json<ZeroclawRuntimeStatus>, (StatusCode, String)> {
     require_admin_access(&state, &headers, "GET /api/zeroclaw/status")?;
     let settings = state.settings.read().await.clone();
-    Ok(Json(zeroclaw_runtime::collect_runtime_status(&settings).await))
+    Ok(Json(
+        zeroclaw_runtime::collect_runtime_status(&settings, state.workspace_root.as_ref()).await,
+    ))
 }
 
 async fn zeroclaw_provider_options(
@@ -3846,7 +4413,7 @@ async fn zeroclaw_provider_options(
     require_admin_access(&state, &headers, "GET /api/zeroclaw/providers")?;
     let settings = state.settings.read().await.clone();
     Ok(Json(
-        zeroclaw_runtime::collect_provider_options(&settings).await,
+        zeroclaw_runtime::collect_provider_options(&settings, state.workspace_root.as_ref()).await,
     ))
 }
 
@@ -3856,7 +4423,71 @@ async fn zeroclaw_tool_statuses(
 ) -> Result<Json<Vec<ZeroclawToolStatus>>, (StatusCode, String)> {
     require_admin_access(&state, &headers, "GET /api/zeroclaw/tools")?;
     let settings = state.settings.read().await.clone();
-    Ok(Json(zeroclaw_runtime::collect_tool_statuses(&settings).await))
+    Ok(Json(
+        zeroclaw_runtime::collect_tool_statuses(&settings, state.workspace_root.as_ref()).await,
+    ))
+}
+
+async fn zeroclaw_tool_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ZeroclawToolConfigResponse>, (StatusCode, String)> {
+    require_admin_access(&state, &headers, "GET /api/zeroclaw/tools/config")?;
+    let settings = state.settings.read().await.clone();
+    Ok(Json(
+        zeroclaw_tools::collect_tool_config(&settings, state.workspace_root.as_ref()).await,
+    ))
+}
+
+async fn zeroclaw_tool_connect(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(tool_id): Path<String>,
+) -> Result<Json<ToolConnectResponse>, (StatusCode, String)> {
+    require_admin_access(&state, &headers, "POST /api/zeroclaw/tools/{tool}/connect")?;
+    let normalized = tool_id.trim().to_ascii_lowercase();
+    let response = match normalized.as_str() {
+        "gmail" => {
+            let (pending, redirect_url) =
+                oauth_store::start_gmail_oauth(default_gmail_oauth_redirect_uri())
+                    .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+            *state.pending_gmail_oauth.write().await = Some(pending);
+            ToolConnectResponse {
+                tool_id: "gmail".to_string(),
+                started: true,
+                redirect_url: Some(redirect_url),
+                message: "Gmail OAuth started. Finish the login in your browser.".to_string(),
+            }
+        }
+        "reports" | "sheets" => ToolConnectResponse {
+            tool_id: "reports".to_string(),
+            started: false,
+            redirect_url: None,
+            message: "Reports are ready locally and do not need an account connection.".to_string(),
+        },
+        other => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                format!("Unknown Zeroclaw tool '{}'.", other),
+            ));
+        }
+    };
+    Ok(Json(response))
+}
+
+async fn zeroclaw_tool_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(tool_id): Path<String>,
+    Json(request): Json<ToolRunRequest>,
+) -> Result<Json<ToolRunResponse>, (StatusCode, String)> {
+    require_admin_access(&state, &headers, "POST /api/zeroclaw/tools/{tool}/run")?;
+    let settings = state.settings.read().await.clone();
+    let response =
+        zeroclaw_tools::run_tool(&settings, state.workspace_root.as_ref(), &tool_id, request)
+            .await
+            .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    Ok(Json(response))
 }
 
 // ---- OAuth Framework Endpoints ----
@@ -3891,13 +4522,14 @@ fn canonical_oauth_provider(provider: &str) -> String {
         "openai" | "gpt" | "codex" => "openai".to_string(),
         "anthropic" | "claude" => "anthropic".to_string(),
         "gemini" | "google" | "googleai" => "gemini".to_string(),
+        "gmail" | "googlemail" | "mail" => "gmail".to_string(),
         "nvidia" | "nim" => "nvidia".to_string(),
         other => other.to_string(),
     }
 }
 
 fn oauth_supported(provider: &str) -> bool {
-    matches!(provider, "gemini")
+    matches!(provider, "gemini" | "gmail")
 }
 
 async fn oauth_status(
@@ -3930,6 +4562,31 @@ async fn oauth_status(
                     refresh_token_configured: false,
                     message: format!(
                         "Stored Gemini OAuth session could not be read. Disconnect and reconnect Gemini OAuth. Details: {error}"
+                    ),
+                }));
+            }
+        }
+    } else if provider == "gmail" {
+        match oauth_store::stored_gmail_oauth_status() {
+            Ok(stored) => {
+                return Ok(Json(OAuthStatusResponse {
+                    provider,
+                    supported: true,
+                    connected: stored.connected(),
+                    access_token_configured: stored.access_token_present,
+                    refresh_token_configured: stored.refresh_token_present,
+                    message: stored.message,
+                }));
+            }
+            Err(error) => {
+                return Ok(Json(OAuthStatusResponse {
+                    provider,
+                    supported: true,
+                    connected: false,
+                    access_token_configured: false,
+                    refresh_token_configured: false,
+                    message: format!(
+                        "Stored Gmail OAuth session could not be read. Disconnect and reconnect Gmail OAuth. Details: {error}"
                     ),
                 }));
             }
@@ -3979,6 +4636,13 @@ async fn oauth_status(
                 "Gemini OAuth is available. Set GOOGLE_OAUTH_CLIENT_ID (or KAIZEN_GEMINI_OAUTH_CLIENT_ID) and GOOGLE_CLOUD_PROJECT, then click Connect OAuth.".to_string(),
             ),
         }
+    } else if provider == "gmail" {
+        (
+            false,
+            false,
+            false,
+            "Gmail OAuth is available. Set GOOGLE_OAUTH_CLIENT_ID (or KAIZEN_GMAIL_OAUTH_CLIENT_ID) and click Connect Gmail.".to_string(),
+        )
     } else {
         (
             supported && provider_status.can_chat,
@@ -4024,11 +4688,25 @@ async fn oauth_start(
         ));
     }
 
-    let (pending, redirect_url) =
-        oauth_store::start_gemini_oauth(default_gemini_oauth_redirect_uri())
-            .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
-    let state_token = pending.state_token.clone();
-    *state.pending_gemini_oauth.write().await = Some(pending);
+    let (state_token, redirect_url) = match provider.as_str() {
+        "gemini" => {
+            let (pending, redirect_url) =
+                oauth_store::start_gemini_oauth(default_gemini_oauth_redirect_uri())
+                    .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+            let state_token = pending.state_token.clone();
+            *state.pending_gemini_oauth.write().await = Some(pending);
+            (state_token, redirect_url)
+        }
+        "gmail" => {
+            let (pending, redirect_url) =
+                oauth_store::start_gmail_oauth(default_gmail_oauth_redirect_uri())
+                    .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+            let state_token = pending.state_token.clone();
+            *state.pending_gmail_oauth.write().await = Some(pending);
+            (state_token, redirect_url)
+        }
+        _ => unreachable!(),
+    };
 
     Ok(Json(OAuthStartResponse {
         provider,
@@ -4043,12 +4721,17 @@ async fn oauth_callback(
     Query(params): Query<OAuthCallbackQuery>,
 ) -> impl IntoResponse {
     let provider = canonical_oauth_provider(&provider);
+    let provider_label = if provider == "gmail" {
+        "Gmail"
+    } else {
+        "Gemini"
+    };
 
     if !oauth_supported(&provider) {
         return (
             StatusCode::BAD_REQUEST,
             Html(oauth_callback_page(
-                "Gemini OAuth not available",
+                &format!("{} OAuth not available", provider_label),
                 &format!(
                     "OAuth callback is not supported for provider '{}'.",
                     provider
@@ -4067,7 +4750,7 @@ async fn oauth_callback(
         return (
             StatusCode::BAD_REQUEST,
             Html(oauth_callback_page(
-                "Gemini OAuth failed",
+                &format!("{} OAuth failed", provider_label),
                 &format!("Google returned '{}': {}.", error_code, description),
                 false,
             )),
@@ -4086,7 +4769,7 @@ async fn oauth_callback(
             return (
                 StatusCode::BAD_REQUEST,
                 Html(oauth_callback_page(
-                    "Gemini OAuth failed",
+                    &format!("{} OAuth failed", provider_label),
                     "Google callback did not include the OAuth state token.",
                     false,
                 )),
@@ -4106,7 +4789,7 @@ async fn oauth_callback(
             return (
                 StatusCode::BAD_REQUEST,
                 Html(oauth_callback_page(
-                    "Gemini OAuth failed",
+                    &format!("{} OAuth failed", provider_label),
                     "Google callback did not include an authorization code.",
                     false,
                 )),
@@ -4115,82 +4798,165 @@ async fn oauth_callback(
         }
     };
 
-    let pending = {
-        let mut slot = state.pending_gemini_oauth.write().await;
-        let Some(existing) = slot.as_ref() else {
-            return (
-                StatusCode::BAD_REQUEST,
-                Html(oauth_callback_page(
-                    "Gemini OAuth expired",
-                    "No pending Gemini OAuth login was found. Start the login flow again from Mission Control.",
-                    false,
-                )),
-            )
-                .into_response();
-        };
+    match provider.as_str() {
+        "gemini" => {
+            let pending = {
+                let mut slot = state.pending_gemini_oauth.write().await;
+                let Some(existing) = slot.as_ref() else {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Html(oauth_callback_page(
+                            "Gemini OAuth expired",
+                            "No pending Gemini OAuth login was found. Start the login flow again from Mission Control.",
+                            false,
+                        )),
+                    )
+                        .into_response();
+                };
 
-        if existing.is_stale() {
-            *slot = None;
-            return (
-                StatusCode::BAD_REQUEST,
-                Html(oauth_callback_page(
-                    "Gemini OAuth expired",
-                    "The pending Gemini OAuth state expired. Start the login flow again from Mission Control.",
-                    false,
-                )),
-            )
-                .into_response();
+                if existing.is_stale() {
+                    *slot = None;
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Html(oauth_callback_page(
+                            "Gemini OAuth expired",
+                            "The pending Gemini OAuth state expired. Start the login flow again from Mission Control.",
+                            false,
+                        )),
+                    )
+                        .into_response();
+                }
+
+                if existing.state_token != state_token {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Html(oauth_callback_page(
+                            "Gemini OAuth rejected",
+                            "The Gemini OAuth state token did not match the pending login request.",
+                            false,
+                        )),
+                    )
+                        .into_response();
+                }
+
+                slot.take().expect("pending Gemini OAuth state disappeared")
+            };
+
+            match oauth_store::exchange_gemini_code(&pending, code.as_str()).await {
+                Ok(tokens) => match oauth_store::save_gemini_tokens(&tokens) {
+                    Ok(path) => (
+                        StatusCode::OK,
+                        Html(oauth_callback_page(
+                            "Gemini OAuth connected",
+                            &format!(
+                                "Gemini OAuth completed successfully for Google project '{}'. Tokens were stored at '{}'. You can close this window and return to Mission Control.",
+                                tokens.project_id,
+                                path.display()
+                            ),
+                            true,
+                        )),
+                    )
+                        .into_response(),
+                    Err(error) => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Html(oauth_callback_page(
+                            "Gemini OAuth save failed",
+                            &format!("Token exchange succeeded, but storing the Gemini OAuth tokens failed: {}.", error),
+                            false,
+                        )),
+                    )
+                        .into_response(),
+                },
+                Err(error) => (
+                    StatusCode::BAD_REQUEST,
+                    Html(oauth_callback_page(
+                        "Gemini OAuth exchange failed",
+                        &format!("Google authorization completed, but exchanging the code failed: {}.", error),
+                        false,
+                    )),
+                )
+                    .into_response(),
+            }
         }
+        "gmail" => {
+            let pending = {
+                let mut slot = state.pending_gmail_oauth.write().await;
+                let Some(existing) = slot.as_ref() else {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Html(oauth_callback_page(
+                            "Gmail OAuth expired",
+                            "No pending Gmail OAuth login was found. Start the login flow again from Mission Control.",
+                            false,
+                        )),
+                    )
+                        .into_response();
+                };
 
-        if existing.state_token != state_token {
-            return (
-                StatusCode::BAD_REQUEST,
-                Html(oauth_callback_page(
-                    "Gemini OAuth rejected",
-                    "The Gemini OAuth state token did not match the pending login request.",
-                    false,
-                )),
-            )
-                .into_response();
+                if existing.is_stale() {
+                    *slot = None;
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Html(oauth_callback_page(
+                            "Gmail OAuth expired",
+                            "The pending Gmail OAuth state expired. Start the login flow again from Mission Control.",
+                            false,
+                        )),
+                    )
+                        .into_response();
+                }
+
+                if existing.state_token != state_token {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Html(oauth_callback_page(
+                            "Gmail OAuth rejected",
+                            "The Gmail OAuth state token did not match the pending login request.",
+                            false,
+                        )),
+                    )
+                        .into_response();
+                }
+
+                slot.take().expect("pending Gmail OAuth state disappeared")
+            };
+
+            match oauth_store::exchange_gmail_code(&pending, code.as_str()).await {
+                Ok(tokens) => match oauth_store::save_gmail_tokens(&tokens) {
+                    Ok(path) => (
+                        StatusCode::OK,
+                        Html(oauth_callback_page(
+                            "Gmail OAuth connected",
+                            &format!(
+                                "Gmail OAuth completed successfully. Tokens were stored at '{}'. You can close this window and return to Mission Control.",
+                                path.display()
+                            ),
+                            true,
+                        )),
+                    )
+                        .into_response(),
+                    Err(error) => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Html(oauth_callback_page(
+                            "Gmail OAuth save failed",
+                            &format!("Token exchange succeeded, but storing the Gmail OAuth tokens failed: {}.", error),
+                            false,
+                        )),
+                    )
+                        .into_response(),
+                },
+                Err(error) => (
+                    StatusCode::BAD_REQUEST,
+                    Html(oauth_callback_page(
+                        "Gmail OAuth exchange failed",
+                        &format!("Google authorization completed, but exchanging the code failed: {}.", error),
+                        false,
+                    )),
+                )
+                    .into_response(),
+            }
         }
-
-        slot.take().expect("pending Gemini OAuth state disappeared")
-    };
-
-    match oauth_store::exchange_gemini_code(&pending, code.as_str()).await {
-        Ok(tokens) => match oauth_store::save_gemini_tokens(&tokens) {
-            Ok(path) => (
-                StatusCode::OK,
-                Html(oauth_callback_page(
-                    "Gemini OAuth connected",
-                    &format!(
-                        "Gemini OAuth completed successfully for Google project '{}'. Tokens were stored at '{}'. You can close this window and return to Mission Control.",
-                        tokens.project_id,
-                        path.display()
-                    ),
-                    true,
-                )),
-            )
-                .into_response(),
-            Err(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Html(oauth_callback_page(
-                    "Gemini OAuth save failed",
-                    &format!("Token exchange succeeded, but storing the Gemini OAuth tokens failed: {}.", error),
-                    false,
-                )),
-            )
-                .into_response(),
-        },
-        Err(error) => (
-            StatusCode::BAD_REQUEST,
-            Html(oauth_callback_page(
-                "Gemini OAuth exchange failed",
-                &format!("Google authorization completed, but exchanging the code failed: {}.", error),
-                false,
-            )),
-        )
-            .into_response(),
+        _ => unreachable!(),
     }
 }
 
@@ -4212,11 +4978,23 @@ async fn oauth_refresh(
         ));
     }
 
-    let tokens = oauth_store::refresh_stored_gemini_tokens()
-        .await
-        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
-    oauth_store::save_gemini_tokens(&tokens)
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    match provider.as_str() {
+        "gemini" => {
+            let tokens = oauth_store::refresh_stored_gemini_tokens()
+                .await
+                .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+            oauth_store::save_gemini_tokens(&tokens)
+                .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+        }
+        "gmail" => {
+            let tokens = oauth_store::refresh_stored_gmail_tokens()
+                .await
+                .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+            oauth_store::save_gmail_tokens(&tokens)
+                .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+        }
+        _ => unreachable!(),
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -4239,9 +5017,19 @@ async fn oauth_disconnect(
         ));
     }
 
-    *state.pending_gemini_oauth.write().await = None;
-    oauth_store::clear_gemini_tokens()
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    match provider.as_str() {
+        "gemini" => {
+            *state.pending_gemini_oauth.write().await = None;
+            oauth_store::clear_gemini_tokens()
+                .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+        }
+        "gmail" => {
+            *state.pending_gmail_oauth.write().await = None;
+            oauth_store::clear_gmail_tokens()
+                .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+        }
+        _ => unreachable!(),
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -4249,6 +5037,13 @@ async fn oauth_disconnect(
 fn default_gemini_oauth_redirect_uri() -> String {
     format!(
         "http://127.0.0.1:{}/api/oauth/gemini/callback",
+        resolve_bind_port()
+    )
+}
+
+fn default_gmail_oauth_redirect_uri() -> String {
+    format!(
+        "http://127.0.0.1:{}/api/oauth/gmail/callback",
         resolve_bind_port()
     )
 }
@@ -4412,31 +5207,33 @@ async fn main() {
     let conversation_state_path = conversation_store_path();
     let worker_state_path = worker_runtime_path();
     let workspace_root = workspace_root_path();
-    let initial_agents =
-        match AgentRegistry::load_from_path(agent_state_path.as_path(), settings.max_subagents as usize)
-        {
-            Ok(registry) => registry,
-            Err(err) => {
-                tracing::warn!(
-                    "Failed to load persisted agent registry from {}: {}",
-                    agent_state_path.display(),
-                    err
-                );
-                AgentRegistry::new(settings.max_subagents as usize)
-            }
-        };
-    let initial_conversations = load_conversations(conversation_state_path.as_path());
-    let initial_worker_runtime = match WorkerRuntimeState::load_from_path(worker_state_path.as_path()) {
-        Ok(runtime) => runtime,
+    let initial_agents = match AgentRegistry::load_from_path(
+        agent_state_path.as_path(),
+        settings.max_subagents as usize,
+    ) {
+        Ok(registry) => registry,
         Err(err) => {
             tracing::warn!(
-                "Failed to load worker runtime from {}: {}",
-                worker_state_path.display(),
+                "Failed to load persisted agent registry from {}: {}",
+                agent_state_path.display(),
                 err
             );
-            WorkerRuntimeState::new()
+            AgentRegistry::new(settings.max_subagents as usize)
         }
     };
+    let initial_conversations = load_conversations(conversation_state_path.as_path());
+    let initial_worker_runtime =
+        match WorkerRuntimeState::load_from_path(worker_state_path.as_path()) {
+            Ok(runtime) => runtime,
+            Err(err) => {
+                tracing::warn!(
+                    "Failed to load worker runtime from {}: {}",
+                    worker_state_path.display(),
+                    err
+                );
+                WorkerRuntimeState::new()
+            }
+        };
 
     let state = AppState {
         settings: Arc::new(RwLock::new(settings.clone())),
@@ -4456,6 +5253,7 @@ async fn main() {
         workspace_root: Arc::new(workspace_root),
         conversation_versions: Arc::new(RwLock::new(HashMap::new())),
         pending_gemini_oauth: Arc::new(RwLock::new(None)),
+        pending_gmail_oauth: Arc::new(RwLock::new(None)),
         next_id: Arc::new(AtomicU64::new(1)),
     };
 
@@ -4549,6 +5347,12 @@ async fn main() {
         .route("/api/zeroclaw/status", get(zeroclaw_runtime_status))
         .route("/api/zeroclaw/providers", get(zeroclaw_provider_options))
         .route("/api/zeroclaw/tools", get(zeroclaw_tool_statuses))
+        .route("/api/zeroclaw/tools/config", get(zeroclaw_tool_config))
+        .route("/api/zeroclaw/tools/{tool}", post(zeroclaw_tool_run))
+        .route(
+            "/api/zeroclaw/tools/{tool}/connect",
+            post(zeroclaw_tool_connect),
+        )
         // OAuth endpoints
         .route("/api/oauth/{provider}/start", get(oauth_start))
         .route("/api/oauth/{provider}/status", get(oauth_status))

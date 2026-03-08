@@ -73,6 +73,22 @@
       "default": "",
       "description": "Mattermost channel ID used for Crystal Ball bridge messages."
     },
+    "zeroclaw_gmail_enabled": {
+      "type": "boolean",
+      "default": true,
+      "description": "Enable native Zeroclaw Gmail workflows for worker jobs and manual tool actions."
+    },
+    "zeroclaw_report_export_dir": {
+      "type": "string",
+      "default": "data/worker_artifacts",
+      "description": "Directory where Zeroclaw report and sheet artifacts are written."
+    },
+    "zeroclaw_report_default_format": {
+      "type": "string",
+      "enum": ["csv", "xlsx"],
+      "default": "xlsx",
+      "description": "Default report export format used by native Zeroclaw report workflows."
+    },
     "selected_github_repo": {
       "type": "string",
       "default": "",

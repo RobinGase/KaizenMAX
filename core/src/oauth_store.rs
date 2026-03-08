@@ -18,11 +18,17 @@ pub const GOOGLE_PROJECT_ENV_HINTS: [&str; 3] = [
 const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const GEMINI_OAUTH_STORE_ENV: &str = "KAIZEN_GEMINI_OAUTH_STORE_PATH";
+const GMAIL_OAUTH_STORE_ENV: &str = "KAIZEN_GMAIL_OAUTH_STORE_PATH";
 const TOKEN_REFRESH_SKEW_SECS: u64 = 60;
 const OAUTH_STATE_TTL_SECS: u64 = 10 * 60;
 const GEMINI_SCOPES: [&str; 2] = [
     "https://www.googleapis.com/auth/cloud-platform",
     "https://www.googleapis.com/auth/generative-language.retriever",
+];
+const GMAIL_SCOPES: [&str; 3] = [
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/gmail.compose",
+    "https://www.googleapis.com/auth/gmail.send",
 ];
 
 #[derive(Debug, Clone)]
@@ -69,6 +75,52 @@ pub struct StoredGeminiOAuthStatus {
 }
 
 impl StoredGeminiOAuthStatus {
+    pub fn connected(&self) -> bool {
+        self.access_token_ready || self.refresh_token_ready
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GmailOAuthConfig {
+    pub client_id: String,
+    pub client_secret: Option<String>,
+    pub redirect_uri: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingGmailOAuth {
+    pub state_token: String,
+    pub code_verifier: String,
+    pub config: GmailOAuthConfig,
+    pub created_at_epoch_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GmailOAuthTokens {
+    pub access_token: String,
+    #[serde(default)]
+    pub refresh_token: Option<String>,
+    #[serde(default)]
+    pub expires_at_epoch_secs: Option<u64>,
+    #[serde(default)]
+    pub token_type: Option<String>,
+    #[serde(default)]
+    pub scope: Option<String>,
+    pub updated_at_epoch_secs: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredGmailOAuthStatus {
+    pub present: bool,
+    pub access_token_present: bool,
+    pub access_token_ready: bool,
+    pub refresh_token_present: bool,
+    pub refresh_token_ready: bool,
+    pub expires_at_epoch_secs: Option<u64>,
+    pub message: String,
+}
+
+impl StoredGmailOAuthStatus {
     pub fn connected(&self) -> bool {
         self.access_token_ready || self.refresh_token_ready
     }
@@ -136,7 +188,66 @@ impl PendingGeminiOAuth {
     }
 }
 
+impl PendingGmailOAuth {
+    pub fn new(config: GmailOAuthConfig) -> Self {
+        Self {
+            state_token: random_urlsafe_bytes(24),
+            code_verifier: random_urlsafe_bytes(48),
+            config,
+            created_at_epoch_secs: now_epoch_secs(),
+        }
+    }
+
+    pub fn is_stale(&self) -> bool {
+        now_epoch_secs()
+            > self
+                .created_at_epoch_secs
+                .saturating_add(OAUTH_STATE_TTL_SECS)
+    }
+
+    pub fn authorize_url(&self) -> Result<String, String> {
+        let scope = GMAIL_SCOPES.join(" ");
+        let code_challenge = pkce_code_challenge(&self.code_verifier);
+        let url = Url::parse_with_params(
+            GOOGLE_AUTH_URL,
+            &[
+                ("client_id", self.config.client_id.as_str()),
+                ("redirect_uri", self.config.redirect_uri.as_str()),
+                ("response_type", "code"),
+                ("scope", scope.as_str()),
+                ("access_type", "offline"),
+                ("prompt", "consent"),
+                ("include_granted_scopes", "true"),
+                ("state", self.state_token.as_str()),
+                ("code_challenge", code_challenge.as_str()),
+                ("code_challenge_method", "S256"),
+            ],
+        )
+        .map_err(|error| format!("Failed to build Gmail OAuth authorize URL: {error}"))?;
+
+        Ok(url.to_string())
+    }
+}
+
 impl GeminiOAuthTokens {
+    fn access_token_present(&self) -> bool {
+        !self.access_token.trim().is_empty()
+    }
+
+    fn refresh_token_present(&self) -> bool {
+        self.refresh_token
+            .as_deref()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+    }
+
+    fn access_token_ready(&self) -> bool {
+        self.access_token_present()
+            && !token_expiring_within(self.expires_at_epoch_secs, TOKEN_REFRESH_SKEW_SECS)
+    }
+}
+
+impl GmailOAuthTokens {
     fn access_token_present(&self) -> bool {
         !self.access_token.trim().is_empty()
     }
@@ -159,6 +270,15 @@ pub fn start_gemini_oauth(
 ) -> Result<(PendingGeminiOAuth, String), String> {
     let config = resolve_gemini_oauth_config(default_redirect_uri)?;
     let pending = PendingGeminiOAuth::new(config);
+    let redirect_url = pending.authorize_url()?;
+    Ok((pending, redirect_url))
+}
+
+pub fn start_gmail_oauth(
+    default_redirect_uri: String,
+) -> Result<(PendingGmailOAuth, String), String> {
+    let config = resolve_gmail_oauth_config(default_redirect_uri)?;
+    let pending = PendingGmailOAuth::new(config);
     let redirect_url = pending.authorize_url()?;
     Ok((pending, redirect_url))
 }
@@ -198,6 +318,27 @@ pub fn resolve_gemini_oauth_config(
     })
 }
 
+pub fn resolve_gmail_oauth_config(
+    default_redirect_uri: String,
+) -> Result<GmailOAuthConfig, String> {
+    let client_id = google_oauth_client_id().ok_or_else(|| {
+        "Gmail OAuth needs GOOGLE_OAUTH_CLIENT_ID (or KAIZEN_GMAIL_OAUTH_CLIENT_ID / KAIZEN_GMAIL_CLIENT_ID).".to_string()
+    })?;
+
+    let client_secret = google_oauth_client_secret();
+    let redirect_uri = std::env::var("KAIZEN_GMAIL_OAUTH_REDIRECT_URI")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(default_redirect_uri);
+
+    Ok(GmailOAuthConfig {
+        client_id,
+        client_secret,
+        redirect_uri,
+    })
+}
+
 pub fn google_project_id_from_env() -> Option<String> {
     first_present_env(GOOGLE_PROJECT_ENV_HINTS).map(|(_, value)| value)
 }
@@ -223,6 +364,30 @@ pub fn load_gemini_tokens() -> Result<Option<GeminiOAuthTokens>, String> {
         let parsed = serde_json::from_str::<GeminiOAuthTokens>(&text).map_err(|error| {
             format!(
                 "Failed to parse Gemini OAuth store '{}': {error}",
+                candidate.display()
+            )
+        })?;
+        return Ok(Some(parsed));
+    }
+
+    Ok(None)
+}
+
+pub fn load_gmail_tokens() -> Result<Option<GmailOAuthTokens>, String> {
+    for candidate in gmail_oauth_store_candidates() {
+        if !candidate.exists() {
+            continue;
+        }
+
+        let text = fs::read_to_string(&candidate).map_err(|error| {
+            format!(
+                "Failed to read Gmail OAuth store '{}': {error}",
+                candidate.display()
+            )
+        })?;
+        let parsed = serde_json::from_str::<GmailOAuthTokens>(&text).map_err(|error| {
+            format!(
+                "Failed to parse Gmail OAuth store '{}': {error}",
                 candidate.display()
             )
         })?;
@@ -279,6 +444,44 @@ pub fn stored_gemini_oauth_status() -> Result<StoredGeminiOAuthStatus, String> {
     })
 }
 
+pub fn stored_gmail_oauth_status() -> Result<StoredGmailOAuthStatus, String> {
+    let Some(tokens) = load_gmail_tokens()? else {
+        return Ok(StoredGmailOAuthStatus {
+            present: false,
+            access_token_present: false,
+            access_token_ready: false,
+            refresh_token_present: false,
+            refresh_token_ready: false,
+            expires_at_epoch_secs: None,
+            message: "No app-managed Gmail OAuth tokens are stored.".to_string(),
+        });
+    };
+
+    let access_token_present = tokens.access_token_present();
+    let access_token_ready = tokens.access_token_ready();
+    let refresh_token_present = tokens.refresh_token_present();
+    let refresh_token_ready = refresh_token_present && google_oauth_client_id().is_some();
+    let message = if access_token_ready {
+        "App-managed Gmail OAuth is connected.".to_string()
+    } else if refresh_token_ready {
+        "Stored Gmail OAuth token has expired and will refresh automatically.".to_string()
+    } else if refresh_token_present {
+        "Stored Gmail OAuth refresh token exists, but GOOGLE_OAUTH_CLIENT_ID is missing, so automatic refresh is unavailable.".to_string()
+    } else {
+        "Stored Gmail OAuth access token is expired and no refresh token is available. Disconnect and reconnect Gmail OAuth.".to_string()
+    };
+
+    Ok(StoredGmailOAuthStatus {
+        present: true,
+        access_token_present,
+        access_token_ready,
+        refresh_token_present,
+        refresh_token_ready,
+        expires_at_epoch_secs: tokens.expires_at_epoch_secs,
+        message,
+    })
+}
+
 pub fn save_gemini_tokens(tokens: &GeminiOAuthTokens) -> Result<PathBuf, String> {
     let path = gemini_oauth_store_write_path();
     if let Some(parent) = path.parent() {
@@ -309,6 +512,36 @@ pub fn save_gemini_tokens(tokens: &GeminiOAuthTokens) -> Result<PathBuf, String>
     Ok(path)
 }
 
+pub fn save_gmail_tokens(tokens: &GmailOAuthTokens) -> Result<PathBuf, String> {
+    let path = gmail_oauth_store_write_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "Failed to create Gmail OAuth store directory '{}': {error}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let json = serde_json::to_string_pretty(tokens)
+        .map_err(|error| format!("Failed to encode Gmail OAuth store JSON: {error}"))?;
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, json).map_err(|error| {
+        format!(
+            "Failed to write Gmail OAuth tmp file '{}': {error}",
+            tmp.display()
+        )
+    })?;
+    fs::rename(&tmp, &path).map_err(|error| {
+        format!(
+            "Failed to move Gmail OAuth store into place '{}': {error}",
+            path.display()
+        )
+    })?;
+
+    Ok(path)
+}
+
 pub fn clear_gemini_tokens() -> Result<bool, String> {
     let mut removed_any = false;
     for candidate in gemini_oauth_store_candidates() {
@@ -318,6 +551,24 @@ pub fn clear_gemini_tokens() -> Result<bool, String> {
         fs::remove_file(&candidate).map_err(|error| {
             format!(
                 "Failed to remove Gemini OAuth store '{}': {error}",
+                candidate.display()
+            )
+        })?;
+        removed_any = true;
+    }
+
+    Ok(removed_any)
+}
+
+pub fn clear_gmail_tokens() -> Result<bool, String> {
+    let mut removed_any = false;
+    for candidate in gmail_oauth_store_candidates() {
+        if !candidate.exists() {
+            continue;
+        }
+        fs::remove_file(&candidate).map_err(|error| {
+            format!(
+                "Failed to remove Gmail OAuth store '{}': {error}",
                 candidate.display()
             )
         })?;
@@ -361,6 +612,39 @@ pub async fn exchange_gemini_code(
     })
 }
 
+pub async fn exchange_gmail_code(
+    pending: &PendingGmailOAuth,
+    code: &str,
+) -> Result<GmailOAuthTokens, String> {
+    let code = code.trim();
+    if code.is_empty() {
+        return Err("Gmail OAuth callback did not include an authorization code.".to_string());
+    }
+
+    let mut form: Vec<(&str, String)> = vec![
+        ("client_id", pending.config.client_id.clone()),
+        ("code", code.to_string()),
+        ("code_verifier", pending.code_verifier.clone()),
+        ("grant_type", "authorization_code".to_string()),
+        ("redirect_uri", pending.config.redirect_uri.clone()),
+    ];
+    if let Some(client_secret) = pending.config.client_secret.clone() {
+        form.push(("client_secret", client_secret));
+    }
+
+    let response = google_token_request(form).await?;
+    Ok(GmailOAuthTokens {
+        access_token: response.access_token.trim().to_string(),
+        refresh_token: normalize_optional(response.refresh_token),
+        expires_at_epoch_secs: response
+            .expires_in
+            .map(|ttl| now_epoch_secs().saturating_add(ttl)),
+        token_type: normalize_optional(response.token_type),
+        scope: normalize_optional(response.scope),
+        updated_at_epoch_secs: now_epoch_secs(),
+    })
+}
+
 pub async fn refresh_stored_gemini_tokens() -> Result<GeminiOAuthTokens, String> {
     let tokens = load_gemini_tokens()?
         .ok_or_else(|| "No app-managed Gemini OAuth tokens are stored.".to_string())?;
@@ -384,6 +668,32 @@ pub async fn load_or_refresh_gemini_tokens() -> Result<Option<GeminiOAuthTokens>
 
     Err(
         "Stored Gemini OAuth access token is expired and no refresh token is available. Disconnect and reconnect Gemini OAuth.".to_string(),
+    )
+}
+
+pub async fn refresh_stored_gmail_tokens() -> Result<GmailOAuthTokens, String> {
+    let tokens = load_gmail_tokens()?
+        .ok_or_else(|| "No app-managed Gmail OAuth tokens are stored.".to_string())?;
+    refresh_gmail_tokens(&tokens).await
+}
+
+pub async fn load_or_refresh_gmail_tokens() -> Result<Option<GmailOAuthTokens>, String> {
+    let Some(tokens) = load_gmail_tokens()? else {
+        return Ok(None);
+    };
+
+    if tokens.access_token_ready() {
+        return Ok(Some(tokens));
+    }
+
+    if tokens.refresh_token_present() {
+        let refreshed = refresh_gmail_tokens(&tokens).await?;
+        save_gmail_tokens(&refreshed)?;
+        return Ok(Some(refreshed));
+    }
+
+    Err(
+        "Stored Gmail OAuth access token is expired and no refresh token is available. Disconnect and reconnect Gmail OAuth.".to_string(),
     )
 }
 
@@ -419,6 +729,42 @@ async fn refresh_gemini_tokens(existing: &GeminiOAuthTokens) -> Result<GeminiOAu
         token_type: normalize_optional(response.token_type).or_else(|| existing.token_type.clone()),
         scope: normalize_optional(response.scope).or_else(|| existing.scope.clone()),
         project_id: existing.project_id.clone(),
+        updated_at_epoch_secs: now_epoch_secs(),
+    })
+}
+
+async fn refresh_gmail_tokens(existing: &GmailOAuthTokens) -> Result<GmailOAuthTokens, String> {
+    let client_id = google_oauth_client_id().ok_or_else(|| {
+        "Stored Gmail OAuth refresh token exists, but GOOGLE_OAUTH_CLIENT_ID is missing."
+            .to_string()
+    })?;
+
+    let refresh_token = existing
+        .refresh_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Stored Gmail OAuth tokens do not include a refresh token.".to_string())?;
+
+    let mut form: Vec<(&str, String)> = vec![
+        ("client_id", client_id),
+        ("grant_type", "refresh_token".to_string()),
+        ("refresh_token", refresh_token.to_string()),
+    ];
+    if let Some(client_secret) = google_oauth_client_secret() {
+        form.push(("client_secret", client_secret));
+    }
+
+    let response = google_token_request(form).await?;
+    Ok(GmailOAuthTokens {
+        access_token: response.access_token.trim().to_string(),
+        refresh_token: normalize_optional(response.refresh_token)
+            .or_else(|| existing.refresh_token.clone()),
+        expires_at_epoch_secs: response
+            .expires_in
+            .map(|ttl| now_epoch_secs().saturating_add(ttl)),
+        token_type: normalize_optional(response.token_type).or_else(|| existing.token_type.clone()),
+        scope: normalize_optional(response.scope).or_else(|| existing.scope.clone()),
         updated_at_epoch_secs: now_epoch_secs(),
     })
 }
@@ -486,6 +832,22 @@ fn gemini_oauth_store_candidates() -> Vec<PathBuf> {
     candidates
 }
 
+fn gmail_oauth_store_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Ok(path) = std::env::var(GMAIL_OAUTH_STORE_ENV) {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            candidates.push(PathBuf::from(trimmed));
+        }
+    }
+
+    candidates.push(PathBuf::from("../data/oauth/gmail_tokens.json"));
+    candidates.push(PathBuf::from("data/oauth/gmail_tokens.json"));
+
+    candidates
+}
+
 fn gemini_oauth_store_write_path() -> PathBuf {
     if let Ok(path) = std::env::var(GEMINI_OAUTH_STORE_ENV) {
         let trimmed = path.trim();
@@ -507,6 +869,27 @@ fn gemini_oauth_store_write_path() -> PathBuf {
     workspace_path
 }
 
+fn gmail_oauth_store_write_path() -> PathBuf {
+    if let Ok(path) = std::env::var(GMAIL_OAUTH_STORE_ENV) {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+
+    let workspace_path = PathBuf::from("../data/oauth/gmail_tokens.json");
+    if workspace_path.exists() || path_parent_exists(workspace_path.as_path()) {
+        return workspace_path;
+    }
+
+    let local_path = PathBuf::from("data/oauth/gmail_tokens.json");
+    if local_path.exists() || path_parent_exists(local_path.as_path()) {
+        return local_path;
+    }
+
+    workspace_path
+}
+
 fn path_parent_exists(path: &Path) -> bool {
     path.parent().map(|parent| parent.exists()).unwrap_or(false)
 }
@@ -519,6 +902,24 @@ fn gemini_oauth_client_id() -> Option<String> {
 fn gemini_oauth_client_secret() -> Option<String> {
     first_present_env([
         "KAIZEN_GEMINI_OAUTH_CLIENT_SECRET",
+        "GOOGLE_OAUTH_CLIENT_SECRET",
+    ])
+    .map(|(_, value)| value)
+}
+
+fn google_oauth_client_id() -> Option<String> {
+    first_present_env([
+        "KAIZEN_GMAIL_OAUTH_CLIENT_ID",
+        "KAIZEN_GMAIL_CLIENT_ID",
+        "GOOGLE_OAUTH_CLIENT_ID",
+    ])
+    .map(|(_, value)| value)
+}
+
+fn google_oauth_client_secret() -> Option<String> {
+    first_present_env([
+        "KAIZEN_GMAIL_OAUTH_CLIENT_SECRET",
+        "KAIZEN_GMAIL_CLIENT_SECRET",
         "GOOGLE_OAUTH_CLIENT_SECRET",
     ])
     .map(|(_, value)| value)

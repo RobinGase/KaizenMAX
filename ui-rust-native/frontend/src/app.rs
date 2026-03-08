@@ -547,7 +547,10 @@ fn latest_worker_job_for_agent(agent_id: &str, jobs: &[WorkerJob]) -> Option<Wor
         .cloned()
 }
 
-fn live_heartbeat_for_agent(agent_id: &str, heartbeats: &[WorkerHeartbeat]) -> Option<WorkerHeartbeat> {
+fn live_heartbeat_for_agent(
+    agent_id: &str,
+    heartbeats: &[WorkerHeartbeat],
+) -> Option<WorkerHeartbeat> {
     heartbeats
         .iter()
         .filter(|heartbeat| heartbeat.agent_id == agent_id)
@@ -555,7 +558,11 @@ fn live_heartbeat_for_agent(agent_id: &str, heartbeats: &[WorkerHeartbeat]) -> O
         .cloned()
 }
 
-fn worker_runtime_summary(agent_id: &str, jobs: &[WorkerJob], heartbeats: &[WorkerHeartbeat]) -> Option<String> {
+fn worker_runtime_summary(
+    agent_id: &str,
+    jobs: &[WorkerJob],
+    heartbeats: &[WorkerHeartbeat],
+) -> Option<String> {
     if let Some(heartbeat) = live_heartbeat_for_agent(agent_id, heartbeats) {
         return Some(heartbeat.progress_message);
     }
@@ -579,11 +586,20 @@ fn worker_result_preview(job: &WorkerJob) -> Option<String> {
     }
 }
 
+fn latest_worker_tool_step(job: &WorkerJob) -> Option<WorkerToolStep> {
+    job.tool_steps
+        .iter()
+        .max_by(|left, right| left.started_at.cmp(&right.started_at))
+        .cloned()
+}
+
 fn worker_artifact_label(job: &WorkerJob) -> Option<String> {
-    let text = worker_result_preview(job)?;
-    text.lines()
-        .find(|line| line.trim_start().starts_with("Artifact:"))
-        .map(|line| line.trim().to_string())
+    job.artifact_paths
+        .iter()
+        .rev()
+        .find(|path| path.ends_with(".csv") || path.ends_with(".xlsx"))
+        .or_else(|| job.artifact_paths.last())
+        .map(|path| format!("Artifact: {}", path))
 }
 
 #[derive(Clone, PartialEq)]
@@ -608,7 +624,9 @@ async fn file_to_pending_image(file: web_sys::File) -> Result<PendingChatImage, 
     } else {
         file.type_()
     };
-    let buffer = JsFuture::from(file.array_buffer()).await.map_err(js_error)?;
+    let buffer = JsFuture::from(file.array_buffer())
+        .await
+        .map_err(js_error)?;
     let bytes = js_sys::Uint8Array::new(&buffer);
     let mut raw = vec![0; bytes.length() as usize];
     bytes.copy_to(&mut raw);
@@ -959,7 +977,12 @@ fn MissionTabView(app_state: AppState) -> impl IntoView {
             let jobs = app_state.worker_jobs.get();
             let queued = jobs
                 .iter()
-                .filter(|job| matches!(job.status, WorkerJobStatus::Pending | WorkerJobStatus::Claimed))
+                .filter(|job| {
+                    matches!(
+                        job.status,
+                        WorkerJobStatus::Pending | WorkerJobStatus::Claimed
+                    )
+                })
                 .count();
             let running = jobs
                 .iter()
@@ -967,7 +990,12 @@ fn MissionTabView(app_state: AppState) -> impl IntoView {
                 .count();
             let blocked = jobs
                 .iter()
-                .filter(|job| matches!(job.status, WorkerJobStatus::Blocked | WorkerJobStatus::Failed))
+                .filter(|job| {
+                    matches!(
+                        job.status,
+                        WorkerJobStatus::Blocked | WorkerJobStatus::Failed
+                    )
+                })
                 .count();
             (queued, running, blocked)
         }
@@ -1139,14 +1167,14 @@ fn MissionTabView(app_state: AppState) -> impl IntoView {
                     agent_id.clone(),
                     attachments.clone(),
                     |token| {
-                    streamed_text.push_str(&token);
-                    let partial = streamed_text.clone();
-                    set_messages.update(|rows| {
-                        if let Some(last) = rows.last_mut() {
-                            last.content = partial.clone();
-                        }
-                    });
-                },
+                        streamed_text.push_str(&token);
+                        let partial = streamed_text.clone();
+                        set_messages.update(|rows| {
+                            if let Some(last) = rows.last_mut() {
+                                last.content = partial.clone();
+                            }
+                        });
+                    },
                 )
                 .await;
 
@@ -1312,12 +1340,30 @@ fn MissionTabView(app_state: AppState) -> impl IntoView {
                                 .map(|beat| beat.current_step.clone())
                                 .or_else(|| job.current_step.clone())
                                 .unwrap_or_else(|| "idle".to_string());
+                            let tool_line = heartbeat
+                                .as_ref()
+                                .and_then(|beat| {
+                                    beat.current_tool.as_ref().map(|tool| {
+                                        let action = beat
+                                            .current_action
+                                            .clone()
+                                            .unwrap_or_else(|| "working".to_string());
+                                        format!("{} / {}", tool, action)
+                                    })
+                                })
+                                .or_else(|| {
+                                    latest_worker_tool_step(&job)
+                                        .map(|step| format!("{} / {}", step.tool_id, step.action))
+                                });
                             view! {
                                 <div class="runtime-strip">
                                     <span class=format!("runtime-pill {}", worker_job_status_class(&job.status))>
                                         {worker_job_status_label(&job.status)}
                                     </span>
                                     <span class="runtime-step">{step}</span>
+                                    {tool_line.clone().map(|tool| {
+                                        view! { <span class="runtime-step">{tool}</span> }
+                                    })}
                                     <span class="runtime-copy">{summary}</span>
                                 </div>
                             }
@@ -1631,7 +1677,9 @@ fn BranchesTabView(
                 })
                 .await
                 {
-                    Ok(branch) => set_branch_notice.set(format!("Created branch '{}'.", branch.name)),
+                    Ok(branch) => {
+                        set_branch_notice.set(format!("Created branch '{}'.", branch.name))
+                    }
                     Err(err) => set_branch_notice.set(err),
                 }
                 let _ = app_state.refresh_topology().await;
@@ -1674,7 +1722,9 @@ fn BranchesTabView(
                 })
                 .await
                 {
-                    Ok(mission) => set_branch_notice.set(format!("Created mission '{}'.", mission.name)),
+                    Ok(mission) => {
+                        set_branch_notice.set(format!("Created mission '{}'.", mission.name))
+                    }
                     Err(err) => set_branch_notice.set(err),
                 }
                 let _ = app_state.refresh_topology().await;
@@ -3573,6 +3623,7 @@ fn IntegrationsTabView(app_state: AppState) -> impl IntoView {
     let (provider_statuses, set_provider_statuses) =
         create_signal(Vec::<ProviderAuthStatusResponse>::new());
     let (runtime_status, set_runtime_status) = create_signal(None::<ZeroclawRuntimeStatusResponse>);
+    let (tool_config, set_tool_config) = create_signal(None::<ZeroclawToolConfigResponse>);
     let (_current_settings, set_current_settings) = create_signal(None::<KaizenSettings>);
     let (oauth_statuses, set_oauth_statuses) =
         create_signal(HashMap::<String, OAuthStatusResponse>::new());
@@ -3663,11 +3714,23 @@ fn IntegrationsTabView(app_state: AppState) -> impl IntoView {
                     Err(err) => issues.push(format!("Zeroclaw runtime: {}", err)),
                 }
 
+                match core_request::<ZeroclawToolConfigResponse>(CoreRequestInput {
+                    method: "GET".to_string(),
+                    path: "/api/zeroclaw/tools/config".to_string(),
+                    body: None,
+                    admin_token: token.clone(),
+                })
+                .await
+                {
+                    Ok(config) => set_tool_config.set(Some(config)),
+                    Err(err) => issues.push(format!("Zeroclaw tools: {}", err)),
+                }
+
                 match core_request::<OAuthStatusResponse>(CoreRequestInput {
                     method: "GET".to_string(),
                     path: "/api/oauth/gemini/status".to_string(),
                     body: None,
-                    admin_token: token,
+                    admin_token: token.clone(),
                 })
                 .await
                 {
@@ -3675,6 +3738,20 @@ fn IntegrationsTabView(app_state: AppState) -> impl IntoView {
                         next_oauth_statuses.insert("gemini".to_string(), status);
                     }
                     Err(err) => issues.push(format!("Gemini OAuth: {}", err)),
+                }
+
+                match core_request::<OAuthStatusResponse>(CoreRequestInput {
+                    method: "GET".to_string(),
+                    path: "/api/oauth/gmail/status".to_string(),
+                    body: None,
+                    admin_token: token,
+                })
+                .await
+                {
+                    Ok(status) => {
+                        next_oauth_statuses.insert("gmail".to_string(), status);
+                    }
+                    Err(err) => issues.push(format!("Gmail OAuth: {}", err)),
                 }
 
                 set_oauth_statuses.set(next_oauth_statuses);
@@ -3831,6 +3908,7 @@ fn IntegrationsTabView(app_state: AppState) -> impl IntoView {
 
     let refresh_integrations_top = Rc::clone(&refresh_integrations);
     let gemini_oauth = create_memo(move |_| oauth_statuses.get().get("gemini").cloned());
+    let gmail_oauth = create_memo(move |_| oauth_statuses.get().get("gmail").cloned());
     let codex_status = create_memo(move |_| {
         provider_statuses
             .get()
@@ -3896,7 +3974,124 @@ fn IntegrationsTabView(app_state: AppState) -> impl IntoView {
                     }
                     Err(err) => {
                         set_integration_notice.set(String::new());
-                        set_integration_error.set(format!("Could not save Zeroclaw route: {}", err));
+                        set_integration_error
+                            .set(format!("Could not save Zeroclaw route: {}", err));
+                    }
+                }
+                set_integration_busy.set(false);
+                (refresh_integrations)();
+            });
+        }
+    });
+
+    let start_gmail_oauth: Rc<dyn Fn()> = Rc::new({
+        let app_state = app_state.clone();
+        let schedule_oauth_poll = Rc::clone(&schedule_oauth_poll);
+        let refresh_integrations = Rc::clone(&refresh_integrations);
+        move || {
+            if integration_busy.get() {
+                return;
+            }
+
+            set_integration_busy.set(true);
+            let app_state = app_state.clone();
+            let schedule_oauth_poll = Rc::clone(&schedule_oauth_poll);
+            let refresh_integrations = Rc::clone(&refresh_integrations);
+            wasm_bindgen_futures::spawn_local(async move {
+                match core_request::<ToolConnectResponse>(CoreRequestInput {
+                    method: "POST".to_string(),
+                    path: "/api/zeroclaw/tools/gmail/connect".to_string(),
+                    body: Some(json!({})),
+                    admin_token: app_state.admin_token_opt(),
+                })
+                .await
+                {
+                    Ok(start) => {
+                        if let Some(redirect_url) = start.redirect_url.clone() {
+                            let open_result = open_external_browser(redirect_url.clone()).await;
+                            if open_result.is_err() {
+                                if let Some(window) = web_sys::window() {
+                                    let _ = window.open_with_url(&redirect_url);
+                                }
+                            }
+                        }
+                        set_integration_error.set(String::new());
+                        set_integration_notice.set(start.message);
+                        (schedule_oauth_poll)();
+                    }
+                    Err(err) => {
+                        set_integration_notice.set(String::new());
+                        set_integration_error.set(format!("Gmail connect failed: {}", err));
+                    }
+                }
+                set_integration_busy.set(false);
+                (refresh_integrations)();
+            });
+        }
+    });
+
+    let refresh_gmail_oauth: Rc<dyn Fn()> = Rc::new({
+        let app_state = app_state.clone();
+        let refresh_integrations = Rc::clone(&refresh_integrations);
+        move || {
+            if integration_busy.get() {
+                return;
+            }
+
+            set_integration_busy.set(true);
+            let app_state = app_state.clone();
+            let refresh_integrations = Rc::clone(&refresh_integrations);
+            wasm_bindgen_futures::spawn_local(async move {
+                match core_request::<Value>(CoreRequestInput {
+                    method: "POST".to_string(),
+                    path: "/api/oauth/gmail/refresh".to_string(),
+                    body: None,
+                    admin_token: app_state.admin_token_opt(),
+                })
+                .await
+                {
+                    Ok(_) => {
+                        set_integration_error.set(String::new());
+                        set_integration_notice.set("Gmail token refreshed.".to_string());
+                    }
+                    Err(err) => {
+                        set_integration_notice.set(String::new());
+                        set_integration_error.set(format!("Gmail refresh failed: {}", err));
+                    }
+                }
+                set_integration_busy.set(false);
+                (refresh_integrations)();
+            });
+        }
+    });
+
+    let disconnect_gmail_oauth: Rc<dyn Fn()> = Rc::new({
+        let app_state = app_state.clone();
+        let refresh_integrations = Rc::clone(&refresh_integrations);
+        move || {
+            if integration_busy.get() {
+                return;
+            }
+
+            set_integration_busy.set(true);
+            let app_state = app_state.clone();
+            let refresh_integrations = Rc::clone(&refresh_integrations);
+            wasm_bindgen_futures::spawn_local(async move {
+                match core_request::<Value>(CoreRequestInput {
+                    method: "DELETE".to_string(),
+                    path: "/api/oauth/gmail".to_string(),
+                    body: None,
+                    admin_token: app_state.admin_token_opt(),
+                })
+                .await
+                {
+                    Ok(_) => {
+                        set_integration_error.set(String::new());
+                        set_integration_notice.set("Gmail disconnected.".to_string());
+                    }
+                    Err(err) => {
+                        set_integration_notice.set(String::new());
+                        set_integration_error.set(format!("Gmail disconnect failed: {}", err));
                     }
                 }
                 set_integration_busy.set(false);
@@ -3968,6 +4163,9 @@ fn IntegrationsTabView(app_state: AppState) -> impl IntoView {
     let start_gemini_oauth_card = Rc::clone(&start_gemini_oauth);
     let refresh_gemini_oauth_card = Rc::clone(&refresh_gemini_oauth);
     let disconnect_gemini_oauth_card = Rc::clone(&disconnect_gemini_oauth);
+    let start_gmail_oauth_card = Rc::clone(&start_gmail_oauth);
+    let refresh_gmail_oauth_card = Rc::clone(&refresh_gmail_oauth);
+    let disconnect_gmail_oauth_card = Rc::clone(&disconnect_gmail_oauth);
     let start_gemini_cli_auth_card = Rc::clone(&start_gemini_cli_auth);
 
     view! {
@@ -4127,6 +4325,79 @@ fn IntegrationsTabView(app_state: AppState) -> impl IntoView {
                                 .into_view()
                         } else {
                             view! { <div class="muted">"Codex status is loading."</div> }.into_view()
+                        }
+                    }}
+                </article>
+
+                <article class="card">
+                    <h3>"Gmail"</h3>
+                    {move || {
+                        let gmail_config = tool_config.get().map(|config| config.gmail);
+                        let gmail_oauth_state = gmail_oauth.get();
+                        let start_gmail_oauth_click = Rc::clone(&start_gmail_oauth_card);
+                        let refresh_gmail_oauth_click = Rc::clone(&refresh_gmail_oauth_card);
+                        let disconnect_gmail_oauth_click = Rc::clone(&disconnect_gmail_oauth_card);
+                        if let Some(config) = gmail_config {
+                            view! {
+                                <div class="list-stack">
+                                    <div>{if config.connected { "Connected." } else { "Not connected yet." }}</div>
+                                    <div>{config.message}</div>
+                                    <div class="toolbar-inline">
+                                        <button
+                                            class="action-btn"
+                                            prop:disabled=move || integration_busy.get() || !config.enabled
+                                            on:click=move |_| (start_gmail_oauth_click)()
+                                        >
+                                            "Connect Gmail"
+                                        </button>
+                                        {move || {
+                                            if gmail_oauth_state.clone().map(|oauth| oauth.connected).unwrap_or(false) {
+                                                let refresh_button = Rc::clone(&refresh_gmail_oauth_click);
+                                                let disconnect_button = Rc::clone(&disconnect_gmail_oauth_click);
+                                                view! {
+                                                    <div class="toolbar-inline">
+                                                        <button
+                                                            class="action-btn subtle"
+                                                            prop:disabled=move || integration_busy.get()
+                                                            on:click=move |_| (refresh_button)()
+                                                        >
+                                                            "Refresh"
+                                                        </button>
+                                                        <button
+                                                            class="action-btn danger"
+                                                            prop:disabled=move || integration_busy.get()
+                                                            on:click=move |_| (disconnect_button)()
+                                                        >
+                                                            "Disconnect"
+                                                        </button>
+                                                    </div>
+                                                }.into_view()
+                                            } else {
+                                                ().into_view()
+                                            }
+                                        }}
+                                    </div>
+                                </div>
+                            }.into_view()
+                        } else {
+                            view! { <div class="muted">"Gmail status is loading."</div> }.into_view()
+                        }
+                    }}
+                </article>
+
+                <article class="card">
+                    <h3>"Reports"</h3>
+                    {move || {
+                        if let Some(config) = tool_config.get().map(|config| config.reports) {
+                            view! {
+                                <div class="list-stack">
+                                    <div>{config.message}</div>
+                                    <div>{format!("Default format: {}", config.default_format.to_uppercase())}</div>
+                                    <div>{format!("Export location: {}", config.export_dir)}</div>
+                                </div>
+                            }.into_view()
+                        } else {
+                            view! { <div class="muted">"Report tool status is loading."</div> }.into_view()
                         }
                     }}
                 </article>
@@ -5102,14 +5373,14 @@ pub fn DetachedChatView() -> impl IntoView {
                     Some(id.clone()),
                     attachments.clone(),
                     |token| {
-                    streamed_text.push_str(&token);
-                    let partial = streamed_text.clone();
-                    set_messages.update(|rows| {
-                        if let Some(last) = rows.last_mut() {
-                            last.content = partial.clone();
-                        }
-                    });
-                },
+                        streamed_text.push_str(&token);
+                        let partial = streamed_text.clone();
+                        set_messages.update(|rows| {
+                            if let Some(last) = rows.last_mut() {
+                                last.content = partial.clone();
+                            }
+                        });
+                    },
                 )
                 .await;
 

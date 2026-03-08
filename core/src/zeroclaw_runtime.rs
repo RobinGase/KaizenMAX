@@ -3,9 +3,10 @@ use crate::{
     openclaw_bridge,
     provider_auth::{self, ProviderAuthStatus},
     settings::KaizenSettings,
+    zeroclaw_tools,
 };
 use serde::Serialize;
-use std::collections::HashMap;
+use std::{collections::HashMap, path::Path};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -52,7 +53,10 @@ pub struct ZeroclawRuntimeStatus {
     pub tools: Vec<ZeroclawToolStatus>,
 }
 
-pub async fn collect_runtime_status(settings: &KaizenSettings) -> ZeroclawRuntimeStatus {
+pub async fn collect_runtime_status(
+    settings: &KaizenSettings,
+    workspace_root: &Path,
+) -> ZeroclawRuntimeStatus {
     let bridge_status = openclaw_bridge::status().await;
     let provider_rows = provider_auth::collect_provider_auth_statuses(settings).await;
     let provider_map: HashMap<_, _> = provider_rows
@@ -107,19 +111,30 @@ pub async fn collect_runtime_status(settings: &KaizenSettings) -> ZeroclawRuntim
         message,
         providers,
         tools: build_tool_statuses(
+            settings,
+            workspace_root,
             provider_map.get(active_provider.as_str()).copied(),
             provider_map.get("github").copied(),
             &bridge_status,
-        ),
+        )
+        .await,
     }
 }
 
-pub async fn collect_provider_options(settings: &KaizenSettings) -> Vec<ZeroclawProviderOption> {
-    collect_runtime_status(settings).await.providers
+pub async fn collect_provider_options(
+    settings: &KaizenSettings,
+    workspace_root: &Path,
+) -> Vec<ZeroclawProviderOption> {
+    collect_runtime_status(settings, workspace_root)
+        .await
+        .providers
 }
 
-pub async fn collect_tool_statuses(settings: &KaizenSettings) -> Vec<ZeroclawToolStatus> {
-    collect_runtime_status(settings).await.tools
+pub async fn collect_tool_statuses(
+    settings: &KaizenSettings,
+    workspace_root: &Path,
+) -> Vec<ZeroclawToolStatus> {
+    collect_runtime_status(settings, workspace_root).await.tools
 }
 
 fn build_provider_option(
@@ -140,17 +155,20 @@ fn build_provider_option(
     }
 }
 
-fn build_tool_statuses(
+async fn build_tool_statuses(
+    settings: &KaizenSettings,
+    workspace_root: &Path,
     active_provider: Option<&ProviderAuthStatus>,
     _github: Option<&ProviderAuthStatus>,
     bridge_status: &openclaw_bridge::OpenClawBridgeStatus,
 ) -> Vec<ZeroclawToolStatus> {
-    let chat_ready = active_provider.map(|status| status.can_chat).unwrap_or(false);
+    let chat_ready = active_provider
+        .map(|status| status.can_chat)
+        .unwrap_or(false);
     let chat_message = active_provider
         .map(short_provider_message)
         .unwrap_or_else(|| "Pick a provider for Zeroclaw first.".to_string());
-
-    vec![
+    let mut tools = vec![
         ZeroclawToolStatus {
             id: "chat".to_string(),
             label: "Chat".to_string(),
@@ -165,9 +183,20 @@ fn build_tool_statuses(
         openclaw_tool("browser", "Browser", "core", bridge_status, false),
         openclaw_tool("scheduler", "Scheduler", "core", bridge_status, false),
         openclaw_tool("sessions", "Sessions", "ops", bridge_status, false),
-        planned_tool("gmail", "Gmail", "business"),
-        planned_tool("leads", "Leads", "business"),
-    ]
+    ];
+    for tool in zeroclaw_tools::collect_native_tool_statuses(settings, workspace_root).await {
+        tools.push(ZeroclawToolStatus {
+            id: tool.id,
+            label: tool.label,
+            category: tool.category,
+            available: tool.available,
+            connected: tool.connected,
+            status: tool.status,
+            message: tool.message,
+        });
+    }
+    tools.push(planned_tool("leads", "Leads", "business"));
+    tools
 }
 
 fn planned_tool(id: &str, label: &str, category: &str) -> ZeroclawToolStatus {
@@ -189,10 +218,9 @@ fn openclaw_tool(
     bridge_status: &openclaw_bridge::OpenClawBridgeStatus,
     requires_gateway: bool,
 ) -> ZeroclawToolStatus {
-    let allowed = bridge_status
-        .allowed_tools
-        .iter()
-        .any(|tool| tool.eq_ignore_ascii_case(id) || (id == "scheduler" && tool.eq_ignore_ascii_case("cron")));
+    let allowed = bridge_status.allowed_tools.iter().any(|tool| {
+        tool.eq_ignore_ascii_case(id) || (id == "scheduler" && tool.eq_ignore_ascii_case("cron"))
+    });
     let available = bridge_status.enabled && bridge_status.cli_available && allowed;
     let connected = available && (!requires_gateway || bridge_status.gateway_reachable);
     let status = if connected {
@@ -261,7 +289,14 @@ fn short_provider_message(status: &ProviderAuthStatus) -> String {
 }
 
 fn ordered_provider_ids() -> [&'static str; 6] {
-    ["codex-cli", "gemini", "openai", "anthropic", "nvidia", "gemini-cli"]
+    [
+        "codex-cli",
+        "gemini",
+        "openai",
+        "anthropic",
+        "nvidia",
+        "gemini-cli",
+    ]
 }
 
 fn provider_label(id: &str) -> &'static str {

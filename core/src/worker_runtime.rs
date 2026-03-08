@@ -19,6 +19,34 @@ pub enum WorkerJobStatus {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerToolStepStatus {
+    Running,
+    Completed,
+    Blocked,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerToolStep {
+    pub tool_step_id: String,
+    pub job_id: String,
+    pub tool_id: String,
+    pub action: String,
+    pub status: WorkerToolStepStatus,
+    pub started_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+    pub input_summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_summary: Option<String>,
+    #[serde(default)]
+    pub artifact_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerJob {
     pub job_id: String,
@@ -48,6 +76,10 @@ pub struct WorkerJob {
     pub result: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default)]
+    pub artifact_paths: Vec<String>,
+    #[serde(default)]
+    pub tool_steps: Vec<WorkerToolStep>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +92,10 @@ pub struct WorkerHeartbeat {
     pub progress_message: String,
     pub last_heartbeat_at: String,
     pub heartbeat_seq: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_tool: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_action: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,8 +170,12 @@ impl WorkerRuntimeState {
         let json = serde_json::to_string_pretty(&snapshot)
             .map_err(|err| format!("Failed to serialize worker runtime: {err}"))?;
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, json)
-            .map_err(|err| format!("Failed to write worker runtime tmp {}: {err}", tmp.display()))?;
+        std::fs::write(&tmp, json).map_err(|err| {
+            format!(
+                "Failed to write worker runtime tmp {}: {err}",
+                tmp.display()
+            )
+        })?;
         std::fs::rename(&tmp, path)
             .map_err(|err| format!("Failed to persist worker runtime {}: {err}", path.display()))?;
         Ok(())
@@ -143,12 +183,16 @@ impl WorkerRuntimeState {
 
     pub fn recover_inflight(&mut self) {
         for job in &mut self.jobs {
-            if matches!(job.status, WorkerJobStatus::Claimed | WorkerJobStatus::Running) {
+            if matches!(
+                job.status,
+                WorkerJobStatus::Claimed | WorkerJobStatus::Running
+            ) {
                 job.status = WorkerJobStatus::Pending;
                 job.worker_instance_id = None;
                 job.current_step = Some("recovered".to_string());
-                job.progress_message =
-                    Some("Recovered after runtime restart; waiting to be picked up again.".to_string());
+                job.progress_message = Some(
+                    "Recovered after runtime restart; waiting to be picked up again.".to_string(),
+                );
                 job.started_at = None;
             }
         }
@@ -187,6 +231,8 @@ impl WorkerRuntimeState {
             progress_message: Some("Queued for background execution.".to_string()),
             result: None,
             error: None,
+            artifact_paths: Vec::new(),
+            tool_steps: Vec::new(),
         };
         self.jobs.push(job.clone());
         job
@@ -250,7 +296,10 @@ impl WorkerRuntimeState {
             };
             if let Some(job) = self.jobs.iter_mut().find(|job| {
                 job.job_id == heartbeat.job_id
-                    && matches!(job.status, WorkerJobStatus::Claimed | WorkerJobStatus::Running)
+                    && matches!(
+                        job.status,
+                        WorkerJobStatus::Claimed | WorkerJobStatus::Running
+                    )
             }) {
                 job.status = WorkerJobStatus::Pending;
                 job.worker_instance_id = None;
@@ -274,16 +323,18 @@ impl WorkerRuntimeState {
     ) -> Vec<WorkerJobLease> {
         let mut busy_agents = HashMap::new();
         for job in &self.jobs {
-            if matches!(job.status, WorkerJobStatus::Claimed | WorkerJobStatus::Running) {
+            if matches!(
+                job.status,
+                WorkerJobStatus::Claimed | WorkerJobStatus::Running
+            ) {
                 busy_agents.insert(job.agent_id.clone(), true);
             }
         }
 
-        for agent in self
-            .heartbeats
-            .keys()
-            .filter(|agent_id| self.active_heartbeat_for_agent(agent_id, now_ts, stale_after_secs).is_some())
-        {
+        for agent in self.heartbeats.keys().filter(|agent_id| {
+            self.active_heartbeat_for_agent(agent_id, now_ts, stale_after_secs)
+                .is_some()
+        }) {
             busy_agents.insert(agent.clone(), true);
         }
 
@@ -320,6 +371,8 @@ impl WorkerRuntimeState {
                     progress_message: "Worker claimed the job.".to_string(),
                     last_heartbeat_at: now.to_string(),
                     heartbeat_seq: 1,
+                    current_tool: None,
+                    current_action: None,
                 },
             );
 
@@ -355,6 +408,8 @@ impl WorkerRuntimeState {
             WorkerJobStatus::Running,
             step,
             message,
+            None,
+            None,
             now,
         );
     }
@@ -366,19 +421,106 @@ impl WorkerRuntimeState {
         status: WorkerJobStatus,
         step: &str,
         message: &str,
+        current_tool: Option<&str>,
+        current_action: Option<&str>,
         now: &str,
     ) {
-        if let Some(job) = self
-            .jobs
-            .iter_mut()
-            .find(|job| job.job_id == job_id && job.worker_instance_id.as_deref() == Some(worker_instance_id))
-        {
+        if let Some(job) = self.jobs.iter_mut().find(|job| {
+            job.job_id == job_id && job.worker_instance_id.as_deref() == Some(worker_instance_id)
+        }) {
             job.status = status;
             job.updated_at = now.to_string();
             job.current_step = Some(step.to_string());
             job.progress_message = Some(message.to_string());
         }
-        self.touch_heartbeat_for_job(job_id, worker_instance_id, status, step, message, now);
+        self.touch_heartbeat_for_job(
+            job_id,
+            worker_instance_id,
+            status,
+            step,
+            message,
+            current_tool,
+            current_action,
+            now,
+        );
+    }
+
+    pub fn begin_tool_step(
+        &mut self,
+        job_id: &str,
+        tool_id: &str,
+        action: &str,
+        input_summary: &str,
+        now: &str,
+    ) -> Option<WorkerToolStep> {
+        let job = self.jobs.iter_mut().find(|job| job.job_id == job_id)?;
+        let step = WorkerToolStep {
+            tool_step_id: Uuid::new_v4().to_string(),
+            job_id: job_id.to_string(),
+            tool_id: tool_id.to_string(),
+            action: action.to_string(),
+            status: WorkerToolStepStatus::Running,
+            started_at: now.to_string(),
+            finished_at: None,
+            input_summary: input_summary.to_string(),
+            output_summary: None,
+            artifact_paths: Vec::new(),
+            error: None,
+        };
+        job.tool_steps.push(step.clone());
+        job.current_step = Some(format!("tool:{}:{}", tool_id, action));
+        job.progress_message = Some(format!("Running {} {}.", tool_id, action));
+        Some(step)
+    }
+
+    pub fn finish_tool_step(
+        &mut self,
+        job_id: &str,
+        tool_step_id: &str,
+        status: WorkerToolStepStatus,
+        output_summary: Option<String>,
+        artifact_paths: Vec<String>,
+        error: Option<String>,
+        now: &str,
+    ) {
+        if let Some(job) = self.jobs.iter_mut().find(|job| job.job_id == job_id) {
+            if let Some(step) = job
+                .tool_steps
+                .iter_mut()
+                .find(|step| step.tool_step_id == tool_step_id)
+            {
+                step.status = status;
+                step.finished_at = Some(now.to_string());
+                step.output_summary = output_summary.clone();
+                step.artifact_paths = artifact_paths.clone();
+                step.error = error.clone();
+            }
+            for artifact in artifact_paths {
+                if !job
+                    .artifact_paths
+                    .iter()
+                    .any(|existing| existing == &artifact)
+                {
+                    job.artifact_paths.push(artifact);
+                }
+            }
+            job.updated_at = now.to_string();
+        }
+    }
+
+    pub fn record_artifacts(&mut self, job_id: &str, artifact_paths: &[String], now: &str) {
+        if let Some(job) = self.jobs.iter_mut().find(|job| job.job_id == job_id) {
+            for artifact in artifact_paths {
+                if !job
+                    .artifact_paths
+                    .iter()
+                    .any(|existing| existing == artifact)
+                {
+                    job.artifact_paths.push(artifact.clone());
+                }
+            }
+            job.updated_at = now.to_string();
+        }
     }
 
     pub fn complete_job(
@@ -389,11 +531,9 @@ impl WorkerRuntimeState {
         result: String,
     ) -> Option<WorkerJob> {
         let mut completed = None;
-        if let Some(job) = self
-            .jobs
-            .iter_mut()
-            .find(|job| job.job_id == job_id && job.worker_instance_id.as_deref() == Some(worker_instance_id))
-        {
+        if let Some(job) = self.jobs.iter_mut().find(|job| {
+            job.job_id == job_id && job.worker_instance_id.as_deref() == Some(worker_instance_id)
+        }) {
             job.status = WorkerJobStatus::Completed;
             job.updated_at = now.to_string();
             job.finished_at = Some(now.to_string());
@@ -414,11 +554,9 @@ impl WorkerRuntimeState {
         error: String,
     ) -> Option<WorkerJob> {
         let mut blocked = None;
-        if let Some(job) = self
-            .jobs
-            .iter_mut()
-            .find(|job| job.job_id == job_id && job.worker_instance_id.as_deref() == Some(worker_instance_id))
-        {
+        if let Some(job) = self.jobs.iter_mut().find(|job| {
+            job.job_id == job_id && job.worker_instance_id.as_deref() == Some(worker_instance_id)
+        }) {
             job.status = WorkerJobStatus::Blocked;
             job.updated_at = now.to_string();
             job.finished_at = Some(now.to_string());
@@ -439,11 +577,9 @@ impl WorkerRuntimeState {
         error: String,
     ) -> Option<WorkerJob> {
         let mut failed = None;
-        if let Some(job) = self
-            .jobs
-            .iter_mut()
-            .find(|job| job.job_id == job_id && job.worker_instance_id.as_deref() == Some(worker_instance_id))
-        {
+        if let Some(job) = self.jobs.iter_mut().find(|job| {
+            job.job_id == job_id && job.worker_instance_id.as_deref() == Some(worker_instance_id)
+        }) {
             job.status = WorkerJobStatus::Failed;
             job.updated_at = now.to_string();
             job.finished_at = Some(now.to_string());
@@ -475,6 +611,8 @@ impl WorkerRuntimeState {
         status: WorkerJobStatus,
         step: &str,
         message: &str,
+        current_tool: Option<&str>,
+        current_action: Option<&str>,
         now: &str,
     ) {
         let Some(agent_id) = self
@@ -503,6 +641,8 @@ impl WorkerRuntimeState {
                 progress_message: message.to_string(),
                 last_heartbeat_at: now.to_string(),
                 heartbeat_seq: seq,
+                current_tool: current_tool.map(|value| value.to_string()),
+                current_action: current_action.map(|value| value.to_string()),
             },
         );
     }

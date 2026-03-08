@@ -49,6 +49,12 @@ pub struct KaizenSettings {
     pub mattermost_token: String,
     #[serde(default)]
     pub mattermost_channel_id: String,
+    #[serde(default = "default_true")]
+    pub zeroclaw_gmail_enabled: bool,
+    #[serde(default = "default_report_export_dir")]
+    pub zeroclaw_report_export_dir: String,
+    #[serde(default = "default_report_format")]
+    pub zeroclaw_report_default_format: String,
     #[serde(default)]
     pub selected_github_repo: String,
     #[serde(default = "default_inference_provider")]
@@ -76,6 +82,12 @@ fn default_inference_max_tokens() -> u32 {
 fn default_inference_temperature() -> f32 {
     0.7
 }
+fn default_report_export_dir() -> String {
+    "data/worker_artifacts".to_string()
+}
+fn default_report_format() -> String {
+    "xlsx".to_string()
+}
 
 impl Default for KaizenSettings {
     fn default() -> Self {
@@ -101,6 +113,9 @@ impl Default for KaizenSettings {
             mattermost_url: String::new(),
             mattermost_token: String::new(),
             mattermost_channel_id: String::new(),
+            zeroclaw_gmail_enabled: true,
+            zeroclaw_report_export_dir: default_report_export_dir(),
+            zeroclaw_report_default_format: default_report_format(),
             selected_github_repo: String::new(),
             inference_provider: "codex-cli".to_string(),
             inference_model: "gpt-5.4".to_string(),
@@ -133,6 +148,9 @@ pub struct SettingsPatch {
     pub mattermost_url: Option<String>,
     pub mattermost_token: Option<String>,
     pub mattermost_channel_id: Option<String>,
+    pub zeroclaw_gmail_enabled: Option<bool>,
+    pub zeroclaw_report_export_dir: Option<String>,
+    pub zeroclaw_report_default_format: Option<String>,
     pub selected_github_repo: Option<String>,
     pub inference_provider: Option<String>,
     pub inference_model: Option<String>,
@@ -244,6 +262,15 @@ impl KaizenSettings {
         } else if let Ok(val) = std::env::var("CRYSTAL_BALL_CHANNEL") {
             self.mattermost_channel_id = val;
         }
+        if let Ok(val) = std::env::var("KAIZEN_ZEROCLAW_GMAIL_ENABLED") {
+            self.zeroclaw_gmail_enabled = val.parse().unwrap_or(self.zeroclaw_gmail_enabled);
+        }
+        if let Ok(val) = std::env::var("KAIZEN_ZEROCLAW_REPORT_EXPORT_DIR") {
+            self.zeroclaw_report_export_dir = val;
+        }
+        if let Ok(val) = std::env::var("KAIZEN_ZEROCLAW_REPORT_DEFAULT_FORMAT") {
+            self.zeroclaw_report_default_format = val;
+        }
         if let Ok(val) = std::env::var("KAIZEN_SELECTED_GITHUB_REPO") {
             self.selected_github_repo = val;
         }
@@ -312,6 +339,15 @@ impl KaizenSettings {
         }
         if let Some(value) = patch.mattermost_channel_id {
             self.mattermost_channel_id = value;
+        }
+        if let Some(value) = patch.zeroclaw_gmail_enabled {
+            self.zeroclaw_gmail_enabled = value;
+        }
+        if let Some(value) = patch.zeroclaw_report_export_dir {
+            self.zeroclaw_report_export_dir = value;
+        }
+        if let Some(value) = patch.zeroclaw_report_default_format {
+            self.zeroclaw_report_default_format = value;
         }
         if let Some(value) = patch.selected_github_repo {
             self.selected_github_repo = value;
@@ -454,6 +490,9 @@ mod tests {
             inference_model: None,
             inference_max_tokens: None,
             inference_temperature: None,
+            zeroclaw_gmail_enabled: None,
+            zeroclaw_report_export_dir: None,
+            zeroclaw_report_default_format: None,
         });
 
         assert_eq!(settings.runtime_engine, "kaizen");

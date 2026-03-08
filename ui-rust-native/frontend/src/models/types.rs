@@ -105,6 +105,34 @@ pub enum WorkerJobStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerToolStepStatus {
+    Running,
+    Completed,
+    Blocked,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerToolStep {
+    pub tool_step_id: String,
+    pub job_id: String,
+    pub tool_id: String,
+    pub action: String,
+    pub status: WorkerToolStepStatus,
+    pub started_at: String,
+    #[serde(default)]
+    pub finished_at: Option<String>,
+    pub input_summary: String,
+    #[serde(default)]
+    pub output_summary: Option<String>,
+    #[serde(default)]
+    pub artifact_paths: Vec<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerJob {
     pub job_id: String,
     pub agent_id: String,
@@ -133,6 +161,10 @@ pub struct WorkerJob {
     pub result: Option<String>,
     #[serde(default)]
     pub error: Option<String>,
+    #[serde(default)]
+    pub artifact_paths: Vec<String>,
+    #[serde(default)]
+    pub tool_steps: Vec<WorkerToolStep>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,6 +177,10 @@ pub struct WorkerHeartbeat {
     pub progress_message: String,
     pub last_heartbeat_at: String,
     pub heartbeat_seq: u64,
+    #[serde(default)]
+    pub current_tool: Option<String>,
+    #[serde(default)]
+    pub current_action: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -273,6 +309,9 @@ pub struct KaizenSettings {
     pub inference_model: String,
     pub inference_max_tokens: u32,
     pub inference_temperature: f32,
+    pub zeroclaw_gmail_enabled: bool,
+    pub zeroclaw_report_export_dir: String,
+    pub zeroclaw_report_default_format: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -399,6 +438,53 @@ pub struct ZeroclawRuntimeStatusResponse {
     pub message: String,
     pub providers: Vec<ZeroclawProviderOptionResponse>,
     pub tools: Vec<ZeroclawToolStatusResponse>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GmailToolConfigResponse {
+    pub enabled: bool,
+    pub supported: bool,
+    pub connected: bool,
+    pub access_token_configured: bool,
+    pub refresh_token_configured: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReportsToolConfigResponse {
+    pub ready: bool,
+    pub export_dir: String,
+    pub default_format: String,
+    pub formats: Vec<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ZeroclawToolConfigResponse {
+    pub gmail: GmailToolConfigResponse,
+    pub reports: ReportsToolConfigResponse,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolConnectResponse {
+    pub tool_id: String,
+    pub started: bool,
+    #[serde(default)]
+    pub redirect_url: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolRunResponse {
+    pub tool_id: String,
+    pub action: String,
+    pub ok: bool,
+    pub status: String,
+    pub message: String,
+    #[serde(default)]
+    pub artifact_paths: Vec<String>,
+    #[serde(default)]
+    pub data: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
