@@ -1565,6 +1565,21 @@ fn worker_requests_reports(job: &WorkerJob) -> bool {
     .any(|needle| text.contains(needle))
 }
 
+fn worker_requests_leads(job: &WorkerJob) -> bool {
+    let text = job.instruction.to_ascii_lowercase();
+    [
+        "lead",
+        "leads",
+        "prospect",
+        "prospects",
+        "outreach list",
+        "contact list",
+        "company research",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+}
+
 fn worker_requests_gmail(job: &WorkerJob) -> bool {
     let text = job.instruction.to_ascii_lowercase();
     ["email", "gmail", "inbox", "draft", "send mail", "reply to"]
@@ -1598,6 +1613,33 @@ fn extract_email_addresses(text: &str) -> Vec<String> {
         }
     }
     addresses
+}
+
+fn extract_web_targets(text: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let url_regex =
+        regex::Regex::new(r"(?i)\bhttps?://[^\s<>()]+").expect("valid target url regex");
+    let domain_regex = regex::Regex::new(r"(?i)\b[a-z0-9][a-z0-9.-]+\.[a-z]{2,}\b")
+        .expect("valid target domain regex");
+    let mut out = Vec::new();
+    for capture in url_regex.find_iter(text) {
+        let value = capture.as_str().trim_matches(|ch: char| ch == ')' || ch == ',' || ch == '.');
+        let key = value.to_ascii_lowercase();
+        if seen.insert(key.clone()) {
+            out.push(value.to_string());
+        }
+    }
+    for capture in domain_regex.find_iter(text) {
+        let value = capture.as_str().trim_matches(|ch: char| ch == ')' || ch == ',' || ch == '.');
+        if value.contains('@') {
+            continue;
+        }
+        let key = value.to_ascii_lowercase();
+        if seen.insert(key.clone()) {
+            out.push(format!("https://{}", value));
+        }
+    }
+    out
 }
 
 fn json_payload_from_text(text: &str) -> &str {
@@ -2164,8 +2206,99 @@ async fn run_single_worker_cycle(
 
     let mut summary_lines = Vec::<String>::new();
     let mut blocked_reasons = Vec::<String>::new();
+    let mut structured_artifact_ready = false;
 
-    if worker_requests_reports(job) {
+    if worker_requests_leads(job) {
+        let targets = extract_web_targets(&format!("{}\n{}", job.instruction, local_context));
+        if !targets.is_empty() {
+            set_worker_progress(
+                state,
+                lease,
+                WorkerJobStatus::Running,
+                "tool_leads",
+                "Worker is researching target websites for lead context.",
+                Some("leads"),
+                Some("discover"),
+            )
+            .await;
+
+            let started_at = now_timestamp();
+            let tool_step = {
+                let mut runtime = state.worker_runtime.write().await;
+                runtime.begin_tool_step(
+                    &lease.job_id,
+                    "leads",
+                    "discover",
+                    "Research target websites and export a structured leads artifact.",
+                    &started_at,
+                )
+            };
+            let _ = persist_worker_runtime(state).await;
+
+            let settings = state.settings.read().await.clone();
+            match zeroclaw_tools::run_tool(
+                &settings,
+                state.workspace_root.as_ref(),
+                "leads",
+                ToolRunRequest {
+                    action: "discover".to_string(),
+                    args: json!({
+                        "targets": targets,
+                        "file_stem": format!("leads-{}", lease.job_id),
+                    }),
+                },
+            )
+            .await
+            {
+                Ok(result) => {
+                    structured_artifact_ready = true;
+                    summary_lines.push(result.message.clone());
+                    let finished_at = now_timestamp();
+                    {
+                        let mut runtime = state.worker_runtime.write().await;
+                        if let Some(step) = tool_step.as_ref() {
+                            runtime.finish_tool_step(
+                                &lease.job_id,
+                                &step.tool_step_id,
+                                WorkerToolStepStatus::Completed,
+                                Some(result.message.clone()),
+                                result.artifact_paths.clone(),
+                                None,
+                                &finished_at,
+                            );
+                        }
+                        runtime.record_artifacts(
+                            &lease.job_id,
+                            &result.artifact_paths,
+                            &finished_at,
+                        );
+                    }
+                    let _ = persist_worker_runtime(state).await;
+                }
+                Err(error) => {
+                    let finished_at = now_timestamp();
+                    {
+                        let mut runtime = state.worker_runtime.write().await;
+                        if let Some(step) = tool_step.as_ref() {
+                            runtime.finish_tool_step(
+                                &lease.job_id,
+                                &step.tool_step_id,
+                                WorkerToolStepStatus::Blocked,
+                                None,
+                                Vec::new(),
+                                Some(error.clone()),
+                                &finished_at,
+                            );
+                        }
+                    }
+                    let _ = persist_worker_runtime(state).await;
+                    blocked_reasons.push(format!("Lead research blocked: {}", error));
+                }
+            }
+        }
+    }
+
+    if worker_requests_reports(job) && !structured_artifact_ready {
         set_worker_progress(
             state,
             lease,

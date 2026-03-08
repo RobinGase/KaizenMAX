@@ -195,7 +195,6 @@ async fn build_tool_statuses(
             message: tool.message,
         });
     }
-    tools.push(planned_tool("leads", "Leads", "business"));
     tools
 }
 

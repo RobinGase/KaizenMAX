@@ -128,7 +128,8 @@ pub async fn collect_native_tool_statuses(
 ) -> Vec<NativeToolStatus> {
     let gmail = gmail_tool_status(settings).await;
     let reports = reports_tool_status(settings, workspace_root);
-    vec![gmail, reports]
+    let leads = leads_tool_status();
+    vec![gmail, reports, leads]
 }
 
 pub async fn collect_tool_config(
@@ -172,6 +173,7 @@ pub async fn run_tool(
     match tool_id.trim().to_ascii_lowercase().as_str() {
         "gmail" => run_gmail_tool(settings, request).await,
         "reports" | "sheets" => run_reports_tool(settings, workspace_root, request),
+        "leads" => run_leads_tool(settings, workspace_root, request).await,
         other => Err(format!("Unknown Zeroclaw tool '{}'.", other)),
     }
 }
@@ -279,6 +281,18 @@ pub fn reports_tool_status(settings: &KaizenSettings, workspace_root: &Path) -> 
             config.default_format.to_uppercase(),
             config.export_dir
         ),
+    }
+}
+
+pub fn leads_tool_status() -> NativeToolStatus {
+    NativeToolStatus {
+        id: "leads".to_string(),
+        label: "Leads".to_string(),
+        category: "business".to_string(),
+        available: true,
+        connected: true,
+        status: "ready".to_string(),
+        message: "Researches target websites and exports structured lead artifacts.".to_string(),
     }
 }
 pub async fn gmail_search_messages(
@@ -429,6 +443,85 @@ fn run_reports_tool(
     })
 }
 
+async fn run_leads_tool(
+    settings: &KaizenSettings,
+    workspace_root: &Path,
+    request: ToolRunRequest,
+) -> Result<ToolRunResponse, String> {
+    let action = request.action.trim().to_ascii_lowercase();
+    if !matches!(action.as_str(), "discover" | "research") {
+        return Err(format!("Leads action '{}' is not supported.", action));
+    }
+
+    let targets = request
+        .args
+        .get("targets")
+        .or_else(|| request.args.get("urls"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Leads discovery needs args.targets as an array of URLs or domains.".to_string())?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(|value| normalize_target_url(value))
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+
+    if targets.is_empty() {
+        return Err("Leads discovery needs at least one target URL or domain.".to_string());
+    }
+
+    let mut rows = Vec::<Map<String, Value>>::new();
+    let mut failures = Vec::<String>::new();
+    for target in targets.iter().take(12) {
+        match research_lead_target(target).await {
+            Ok(row) => rows.push(row),
+            Err(error) => failures.push(format!("{}: {}", target, error)),
+        }
+    }
+
+    if rows.is_empty() {
+        return Err(format!(
+            "Lead research failed for all targets. {}",
+            failures.join(" | ")
+        ));
+    }
+
+    let stem = request
+        .args
+        .get("file_stem")
+        .and_then(Value::as_str)
+        .unwrap_or("lead-research");
+    let result = export_report_artifacts(settings, workspace_root, stem, &rows)?;
+    let message = if failures.is_empty() {
+        format!(
+            "Researched {} target(s) and exported {} artifact(s).",
+            rows.len(),
+            result.artifact_paths.len()
+        )
+    } else {
+        format!(
+            "Researched {} target(s) with {} partial failure(s) and exported {} artifact(s).",
+            rows.len(),
+            failures.len(),
+            result.artifact_paths.len()
+        )
+    };
+
+    Ok(ToolRunResponse {
+        tool_id: "leads".to_string(),
+        action,
+        ok: true,
+        status: "completed".to_string(),
+        message,
+        artifact_paths: result.artifact_paths.clone(),
+        data: json!({
+            "rowCount": result.row_count,
+            "columns": result.columns,
+            "targets": targets,
+            "failures": failures,
+        }),
+    })
+}
+
 async fn run_gmail_tool(
     settings: &KaizenSettings,
     request: ToolRunRequest,
@@ -508,6 +601,175 @@ async fn run_gmail_tool(
         }
         _ => Err(format!("Gmail action '{}' is not supported.", action)),
     }
+}
+
+fn normalize_target_url(value: &str) -> String {
+    let trimmed = value.trim().trim_matches('"').trim_matches('\'');
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        trimmed.to_string()
+    } else {
+        format!("https://{}", trimmed.trim_start_matches('/'))
+    }
+}
+
+async fn research_lead_target(target: &str) -> Result<Map<String, Value>, String> {
+    let client = reqwest::Client::builder()
+        .user_agent("kaizen-gateway/0.1.0")
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|error| format!("Failed to build lead research client: {error}"))?;
+    let response = client
+        .get(target)
+        .send()
+        .await
+        .map_err(|error| format!("Request failed: {error}"))?;
+    let final_url = response.url().to_string();
+    let status = response.status();
+    let html = response
+        .text()
+        .await
+        .map_err(|error| format!("Failed to read response body: {error}"))?;
+    if !status.is_success() {
+        return Err(format!("HTTP {} from {}", status.as_u16(), final_url));
+    }
+
+    let title = html_tag_contents(&html, "title");
+    let description = html_meta_content(&html, "description")
+        .or_else(|| html_meta_property(&html, "og:description"));
+    let body_text = strip_html_tags(&html);
+    let emails = find_email_addresses(&html);
+    let excerpt = body_text
+        .split_whitespace()
+        .take(60)
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let mut row = Map::new();
+    row.insert("target".to_string(), Value::String(target.to_string()));
+    row.insert("final_url".to_string(), Value::String(final_url));
+    row.insert(
+        "domain".to_string(),
+        Value::String(
+            target
+                .replace("https://", "")
+                .replace("http://", "")
+                .split('/')
+                .next()
+                .unwrap_or_default()
+                .to_string(),
+        ),
+    );
+    row.insert(
+        "title".to_string(),
+        Value::String(title.unwrap_or_else(|| "Untitled page".to_string())),
+    );
+    row.insert(
+        "description".to_string(),
+        Value::String(description.unwrap_or_else(|| "No meta description found.".to_string())),
+    );
+    row.insert("summary".to_string(), Value::String(excerpt));
+    row.insert(
+        "emails".to_string(),
+        Value::String(if emails.is_empty() {
+            "none found".to_string()
+        } else {
+            emails.join(", ")
+        }),
+    );
+    row.insert(
+        "status".to_string(),
+        Value::String(if emails.is_empty() {
+            "researched_no_contact".to_string()
+        } else {
+            "researched".to_string()
+        }),
+    );
+    Ok(row)
+}
+
+fn html_tag_contents(html: &str, tag: &str) -> Option<String> {
+    let pattern = format!(r"(?is)<{tag}[^>]*>(.*?)</{tag}>");
+    let regex = regex::Regex::new(pattern.as_str()).ok()?;
+    regex
+        .captures(html)
+        .and_then(|captures| captures.get(1))
+        .map(|value| html_entity_decode(value.as_str()).trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn html_meta_content(html: &str, name: &str) -> Option<String> {
+    let pattern = format!(
+        r#"(?is)<meta[^>]+name=["']{}["'][^>]+content=["']([^"']+)["'][^>]*>"#,
+        regex::escape(name)
+    );
+    let regex = regex::Regex::new(pattern.as_str()).ok()?;
+    regex
+        .captures(html)
+        .and_then(|captures| captures.get(1))
+        .map(|value| html_entity_decode(value.as_str()).trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn html_meta_property(html: &str, property: &str) -> Option<String> {
+    let pattern = format!(
+        r#"(?is)<meta[^>]+property=["']{}["'][^>]+content=["']([^"']+)["'][^>]*>"#,
+        regex::escape(property)
+    );
+    let regex = regex::Regex::new(pattern.as_str()).ok()?;
+    regex
+        .captures(html)
+        .and_then(|captures| captures.get(1))
+        .map(|value| html_entity_decode(value.as_str()).trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn strip_html_tags(html: &str) -> String {
+    let script_re = regex::Regex::new(r"(?is)<script[^>]*>.*?</script>").ok();
+    let style_re = regex::Regex::new(r"(?is)<style[^>]*>.*?</style>").ok();
+    let tag_re = regex::Regex::new(r"(?is)<[^>]+>").ok();
+    let whitespace_re = regex::Regex::new(r"\s+").ok();
+
+    let without_scripts = script_re
+        .as_ref()
+        .map(|re| re.replace_all(html, " ").to_string())
+        .unwrap_or_else(|| html.to_string());
+    let without_styles = style_re
+        .as_ref()
+        .map(|re| re.replace_all(&without_scripts, " ").to_string())
+        .unwrap_or(without_scripts);
+    let without_tags = tag_re
+        .as_ref()
+        .map(|re| re.replace_all(&without_styles, " ").to_string())
+        .unwrap_or(without_styles);
+    let normalized = whitespace_re
+        .as_ref()
+        .map(|re| re.replace_all(&without_tags, " ").to_string())
+        .unwrap_or(without_tags);
+    html_entity_decode(normalized.trim())
+}
+
+fn find_email_addresses(text: &str) -> Vec<String> {
+    let regex = match regex::Regex::new(r"(?i)\b[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b") {
+        Ok(regex) => regex,
+        Err(_) => return Vec::new(),
+        };
+    let mut values = BTreeSet::new();
+    for capture in regex.find_iter(text) {
+        values.insert(capture.as_str().to_ascii_lowercase());
+    }
+    values.into_iter().collect()
+}
+
+fn html_entity_decode(text: &str) -> String {
+    text.replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&nbsp;", " ")
 }
 
 fn default_gmail_oauth_redirect_uri(bind_port: u16) -> String {
